@@ -555,7 +555,7 @@ def configure(names, home, command, tools_root, release_root, *, scope='user', p
                     from .app_layout import locate_codex_tools
                     registered = json.loads(result.stdout)
                     cli = locate_codex_tools(resources, windows=sys.platform == 'win32').cli
-                    install_hooks(cli, Path(registered['path']), cwd, env, original_plugins)
+                    install_hooks(cli, Path(registered['path']), cwd, env, original_plugins, setup_command)
                 elif name == 'claude-code' and phase == 'MCP':
                     from .claude_visibility import install as hide_host_only_tools
                     hide_host_only_tools(home, project=project if scope == 'project' else None)

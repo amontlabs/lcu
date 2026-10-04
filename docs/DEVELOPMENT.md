@@ -49,6 +49,17 @@ Before publishing, inspect the tar member list and unpacked tree. They must cont
 
 [tested-versions.json](../tested-versions.json) lists the app and CUA runtime pairs that checked-in verification covers; [tested app versions](INSTALLATION.md#tested-app-versions) describes how LCU reports it. It is informational and is never used to select or refuse an app. Add an entry only after the pair itself passed: for Linux, `tests/run.sh` against that package on both architectures, with the package's SHA-256 as `app_sha256`; for macOS, the installed-app and desktop checks in the release notes. Set `lcu_version` to the release whose gates covered it, point `evidence` at the release notes or verification record, and never record a pair that only installed. An entry may also list `"native_input": ["gtk4", "qt-scroll"]` for the Linux toolkits whose window-targeted input that exact pair handles natively, which turns off [LCU's input translation](STANDALONE-ADAPTATIONS.md#linux-window-targeted-input-reason-and-removal-criterion) for those toolkits on that pair; add it only after the gates passed with the translation off. `tests/test_tested_versions.py` checks that every entry is well formed, unique and points at an existing file.
 
+## Release severity marker
+
+`lcu update` notices can say how urgent a release is. Add one of these HTML comments to `docs/releases/<version>.md`, on a line of its own:
+
+~~~md
+<!-- lcu-severity: security -->
+<!-- lcu-severity: breaking -->
+~~~
+
+`lcu update --check` and the background refresh fetch that file for the latest release tag and read the marker. The notice is then prefixed "Security update:" or "Breaking update:". The marker must be on a line of its own; a mention inside other text is ignored, so notes can describe the syntax safely. Without a marker, or with any other value, the notice has no prefix. The marker must be in the notes file at the release tag, because that is the copy that is fetched; a later edit on main is not seen for an already tagged release.
+
 ## Install and exercise an isolated fixture
 
 Prepare a disposable Ubuntu 24.04-compatible Linux desktop and account. A test may use a verified local official .deb as input, but extract it into the disposable fixture before invoking LCU:

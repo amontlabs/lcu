@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import sys
 
-from . import tested
+from . import tested, update
 
 
 def saved_setup():
@@ -43,6 +43,7 @@ def collect(root):
         'changed_since_install': changed,
         'setup': saved,
         'pending': saved['pending'] if saved else [],
+        'update': update.cached_notice(root),
     }
 
 
@@ -74,3 +75,5 @@ def main(root, argv=None):
         if saved['pending']:
             print('Pending harnesses (not installed yet; `lcu setup --reconcile` registers them): '
                   + ', '.join(saved['pending']) + '.')
+    if status.get('update'):
+        print(update.status_line(root))

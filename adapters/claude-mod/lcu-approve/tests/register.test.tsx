@@ -345,3 +345,59 @@ test('a terminal that cannot draw pictures gets no icon cell before the name', a
   expect(store.get('icon:dev.zed.Zed')).toEqual({ png: ZED_ICON })
   expect(await ui.find({ type: 'Image' })).toBeUndefined()
 })
+
+const NOTICE = {
+  current: '0.9.1', latest: '0.9.2', severity: 'normal', release_url: 'https://example.test/r', command: LCU,
+  message: 'LCU 0.9.2 is available (installed: 0.9.1). Tell the user and offer to run `lcu update`.',
+}
+
+function noticeHost(on: any, processes: (argv: string[]) => any, surfaces: string[] = ['terminal'], files: Record<string, string> = { [LCU]: '' }) {
+  on('classic.SessionStart', () => ({}))
+  on('session.surfaces', () => ({ value: surfaces }))
+  return host(on, { files, processes })
+}
+
+const noticeRun = (stdout: string) => (argv: string[]) => (argv[1] === 'update' ? { stdout } : undefined)
+
+test('an update notice becomes session context and one toast', async ($, on) => {
+  const { ran, toasts } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)))
+  const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
+  expect(ran.find(argv => argv[1] === 'update')).toEqual([LCU, 'update', '--notice', '--json'])
+  expect(result.additionalContext).toEqual([NOTICE.message])
+  expect(toasts).toEqual(['LCU 0.9.2 is available \u2014 ask Claude to update it, or run lcu update'])
+})
+
+test('a headless run gets the context without a toast', async ($, on) => {
+  const { toasts } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)), [])
+  const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
+  expect(result.additionalContext).toEqual([NOTICE.message])
+  expect(toasts).toEqual([])
+})
+
+test('a security notice toast is prefixed', async ($, on) => {
+  const { toasts } = noticeHost(on, noticeRun(JSON.stringify({ ...NOTICE, severity: 'security' })))
+  await $.classic.SessionStart({ source: 'startup' } as any)
+  expect(toasts[0].startsWith('Security update: LCU 0.9.2')).toBe(true)
+})
+
+const quiet: [string, (argv: string[]) => any][] = [
+  ['no update known', noticeRun('{}')],
+  ['garbage output', noticeRun('not json')],
+  ['a non-object', noticeRun('[1]')],
+  ['a failing command', argv => (argv[1] === 'update' ? { exitCode: 3, stderr: 'boom' } : undefined)],
+  ['a command that cannot run', () => { throw new Error('no processes') }],
+]
+for (const [name, processes] of quiet) {
+  test(`${name}: no context, no toast, no throw`, async ($, on) => {
+    const { toasts } = noticeHost(on, processes)
+    const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
+    expect(result.additionalContext).toBeUndefined()
+    expect(toasts).toEqual([])
+  })
+}
+
+test('without lcu installed nothing is run for the notice', async ($, on) => {
+  const { ran } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)), ['terminal'], {})
+  await $.classic.SessionStart({ source: 'startup' } as any)
+  expect(ran.some(argv => argv[1] === 'update')).toBe(false)
+})

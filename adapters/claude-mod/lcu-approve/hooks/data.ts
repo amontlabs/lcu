@@ -43,3 +43,25 @@ export const plainWarning = (text: string) =>
 // the Image would leave blank cells before the app's name.
 export const drawsImages = (vars: Record<string, string | undefined>) =>
   !vars.TMUX && (Boolean(vars.KITTY_WINDOW_ID || vars.GHOSTTY_RESOURCES_DIR) || vars.TERM === 'xterm-kitty' || vars.TERM_PROGRAM === 'ghostty')
+
+export const NOTICE_TIMEOUT_MS = 3000
+
+export type UpdateNotice = { message: string; latest?: string; severity?: string }
+
+// What `lcu update --notice --json` printed: `{}` (or anything unreadable) is no notice.
+export function parseNotice(stdout: string): UpdateNotice | undefined {
+  try {
+    const value = JSON.parse(stdout)
+    if (!value || typeof value !== 'object' || typeof value.message !== 'string' || !value.message.trim()) return undefined
+    return {
+      message: value.message,
+      latest: typeof value.latest === 'string' ? value.latest : undefined,
+      severity: typeof value.severity === 'string' ? value.severity : undefined,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+export const noticeToast = (notice: UpdateNotice) =>
+  `${notice.severity === 'security' ? 'Security update: ' : notice.severity === 'breaking' ? 'Breaking update: ' : ''}LCU ${notice.latest ?? 'update'} is available \u2014 ask Claude to update it, or run lcu update`

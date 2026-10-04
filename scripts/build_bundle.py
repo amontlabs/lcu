@@ -110,7 +110,8 @@ def build(output, package=None, *, target='linux', app=None):
         modules = ('__init__.py', 'app_layout.py', 'asar.py', 'runtime.py', 'setup.py',
                          'setup_clients.py', 'codex_hooks.py', 'app_server.py', 'browser.py', 'doctor.py',
                          'maintenance.py', 'native_host.py', 'claude_visibility.py', 'harness_setup.py',
-                         'tested.py', 'status.py', 'approval.py', 'interpreter.py', 'apps.py', 'claude_mod.py')
+                         'tested.py', 'status.py', 'approval.py', 'interpreter.py', 'apps.py', 'claude_mod.py',
+                         'update.py', 'update_apply.py')
         if target != 'windows':
             modules += ('session.py', 'platforms.py')
         for filename in modules:

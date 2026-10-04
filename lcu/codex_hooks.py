@@ -2,6 +2,7 @@
 import copy
 import json
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,36 @@ def original_hooks(host_root):
                     raise ValueError('Upstream lifecycle contract changed; review before installation.')
                 hook['server'] = 'lcu'
     return events
+
+
+NOTICE_SUFFIX = ' update --notice --hook-json'
+NOTICE_MATCHER = 'startup|resume'
+
+
+def notice_hook(lcu):
+    """LCU's own SessionStart command hook (harness integration, not an original lifecycle hook).
+
+    `update --notice --hook-json` prints Codex's SessionStart `hookSpecificOutput.additionalContext`
+    for the model; it is cache-only, exits 0 and prints nothing unless an update is known. Hook trust applies as
+    for any other hook; this is never part of the upstream lifecycle contract.
+    """
+    lcu = str(lcu)
+    return {'matcher': NOTICE_MATCHER, 'hooks': [{
+        'type': 'command', 'command': shlex.quote(lcu) + NOTICE_SUFFIX,
+        'commandWindows': subprocess.list2cmdline([lcu]) + NOTICE_SUFFIX,
+        'timeout': 10, 'statusMessage': 'Checking for LCU updates'}]}
+
+
+def is_notice_group(group):
+    """True for a group made only of LCU update-notice command hooks (ours to replace or remove)."""
+    hooks = group.get('hooks') if isinstance(group, dict) else None
+    try:
+        return bool(hooks) and all(isinstance(h, dict) and h.get('type') == 'command'
+                                   and str(h.get('command', '')).endswith(NOTICE_SUFFIX)
+                                   and Path(shlex.split(h['command'])[0]).name in {'lcu', 'lcu.cmd'}
+                                   for h in hooks)
+    except ValueError:  # Unbalanced quoting in someone else's hook: not ours.
+        return False
 
 
 def export_files(command, host_root):
@@ -107,7 +138,7 @@ def require_cli_hook_support(env):
                              '`lcu setup --agent codex`.')
 
 
-def install_hooks(cli, config_path, cwd, env, host_root):
+def install_hooks(cli, config_path, cwd, env, host_root, notice_command=None):
     """Preserve scope and unrelated hooks; trust only the reviewed original records.
 
     The pinned native API writes user config only. A disposable CODEX_HOME lets
@@ -134,6 +165,18 @@ def install_hooks(cli, config_path, cwd, env, host_root):
         for group in original:
             if group not in groups:
                 groups.append(group)
+    # LCU-owned update notice: replaced when present, removed when notice_command is None.
+    start = hooks.get('SessionStart', [])
+    if not isinstance(start, list):
+        raise ValueError('Invalid existing Codex hook list: SessionStart')
+    kept = [g for g in start if not is_notice_group(g)]
+    notice = notice_hook(notice_command) if notice_command else None
+    if notice:
+        kept.append(notice)
+    notice_edits = []
+    if kept != start:
+        hooks['SessionStart'] = kept
+        notice_edits.append({'keyPath': 'hooks.SessionStart', 'value': kept, 'mergeStrategy': 'replace'})
     with tempfile.TemporaryDirectory(prefix='lcu-codex-config-') as temporary:
         # macOS tempfile paths can use /var while Codex reports /private/var.
         # Match the native writer's canonical source path for exact hook trust.
@@ -145,7 +188,7 @@ def install_hooks(cli, config_path, cwd, env, host_root):
         isolated = {**env, 'HOME': temporary, 'CODEX_HOME': temporary}
         with config_writer(cli, scratch, isolated) as call:
             edits = [{'keyPath': 'hooks.' + event, 'value': hooks[event], 'mergeStrategy': 'replace'} for event in expected]
-            call('config/batchWrite', {'edits': edits})
+            call('config/batchWrite', {'edits': edits + notice_edits})
             # Match the exact source path; unrelated/plugin hooks are not trusted.
             listed = call('hooks/list', {'cwds': [temporary]})
             trust = []
@@ -162,6 +205,18 @@ def install_hooks(cli, config_path, cwd, env, host_root):
                                       'value': hook['currentHash'], 'mergeStrategy': 'replace'})
             if len(trust) != sum(len(g['hooks']) for groups in expected.values() for g in groups):
                 raise ValueError('Codex did not discover exactly the original LCU lifecycle hooks.')
+            if notice:
+                # Trust only the exact LCU notice command at this source path.
+                found = [h for entry in listed['data'] for h in entry['hooks']
+                         if h['sourcePath'] == str(config) and h.get('eventName') == 'sessionStart'
+                         and h.get('command') == notice['hooks'][0]['command']]
+                if len(found) != 1:
+                    raise ValueError('Codex did not discover exactly the LCU update notice hook.')
+                suffix = found[0]['key'].removeprefix(str(config))
+                if suffix == found[0]['key']:
+                    raise ValueError('Upstream hook key format changed.')
+                trust.append({'keyPath': 'hooks.state.' + json.dumps(str(config_path) + suffix) + '.trusted_hash',
+                              'value': found[0]['currentHash'], 'mergeStrategy': 'replace'})
             after = config.read_bytes()
             if trust_path != config_path:
                 # Native Codex ignores project-provided hook trust. Store only

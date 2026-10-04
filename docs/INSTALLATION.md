@@ -336,13 +336,33 @@ The version and runtime are read from the installed app each time, so an app upd
 
 ## Upgrades and rollback
 
-Reinstall with the same prefix. The installer keeps LCU generations under releases/ (and, on Windows, app generations under apps/), and atomically changes current only after validating the new release. Agent registrations point at current and should be reloaded after a switch. A failed setup can leave completed agent registrations even when another agent fails; its error lists which to retry. Old generations are retained so live processes do not lose their files.
+Run `lcu update` to move to the latest LCU release. It reads the latest release tag from the redirect of `https://github.com/amontlabs/lcu/releases/latest`, downloads this platform's archive and its `.sha256` file, verifies the checksum, extracts the archive and runs its installer with `--runtime-only`, the same prefix and the app recorded in `installation.json`. Agent registrations point at `current`, so they keep working and setup is not rerun; saved setup choices are unchanged. On Linux it adds `--skip-system`: system libraries stay as installed, so when release notes list new system dependencies, run the full installer instead. On a terminal it asks before installing; without a terminal it requires `--yes` and otherwise exits with status 2 and instructions. It never downloads or installs the ChatGPT app. If this account cannot write the prefix (for example a root-owned `/opt/lcu`), it verifies and extracts the release, then prints the `sudo` command to finish instead of escalating. Where Python has no CA certificates (python.org builds on macOS ship without them), the check and the download use the system `curl`. Afterwards, restart the agents that use LCU so they pick up the new release, and run `lcu prune` to reclaim the old one.
+
+~~~sh
+/opt/lcu/current/bin/lcu update --check   # is a newer release available? (--json for scripts)
+/opt/lcu/current/bin/lcu update           # download, verify and install it
+~~~
+
+`lcu update --check` contacts GitHub now and exits 1 if it cannot. To update by hand, or to change options, reinstall with the same prefix. The installer keeps LCU generations under releases/ (and, on Windows, app generations under apps/), and atomically changes current only after validating the new release. Agent registrations point at current and should be reloaded after a switch. A failed setup can leave completed agent registrations even when another agent fails; its error lists which to retry. Old generations are retained so live processes do not lose their files.
 
 Reclaim that space with `lcu prune [--keep N] [--yes]`. It removes old LCU release directories under `<prefix>/releases` and the private app generations under `<prefix>/apps` that the kept releases no longer use: Windows copies, and Linux copies made by LCU 0.7.0 and earlier. After upgrading on Linux, prune to reclaim the old app copy. It keeps the current release plus the `N-1` most recent (default `--keep 2`). Without `--yes` it is a dry run that lists the paths and sizes it would remove. Stop or restart any agents still using an older release before pruning, so a live process does not lose its files.
 
 ~~~sh
 /opt/lcu/current/bin/lcu prune --keep 2
 ~~~
+
+### Update notices
+
+LCU can tell you when a newer release exists without you running `lcu update --check`. `lcu update --notice` reads only a local cache and never blocks: it prints a notice for an agent when a newer release is known, and nothing otherwise. When the cache is older than 24 hours it starts a background refresh (about 1 hour after a failed check, so it does not retry on every session). The refresh makes the same single request to the releases redirect as `--check`, then reads that release's `docs/releases/<version>.md` for an optional severity marker; nothing else is sent. The cache is per account: `~/Library/Caches/lcu/update.json` on macOS, `$XDG_CACHE_HOME/lcu/update.json` (default `~/.cache`) on Linux, and `%LOCALAPPDATA%\LCU\cache\update.json` on Windows.
+
+Where the notice appears:
+
+- `lcu status` (text, and the `update` key of `--json`) and `lcu doctor` show the cached notice. It is informational and never makes `doctor` fail.
+- Claude Code and the Claude app: the `lcu-approve` mod, installed by `lcu setup --agent claude-code`, runs the notice when a session starts. The agent receives it as context, with an instruction to tell you and offer `lcu update` rather than upgrade on its own, and you see a toast.
+- Codex CLI: `lcu setup --agent codex` adds an LCU-owned `SessionStart` hook (`lcu update --notice --hook-json`, on startup and resume) that gives the agent the same notice as context. It is separate from the original Stop, Interrupt and SubagentStop hooks, which are unchanged, and is trusted the same way, by its exact hash. Codex discovers and trusts it; it has not yet been observed in a live Codex turn.
+- Pi, Oh My Pi and Hermes have no session hook for this. Their users see the notice in `lcu status` and `lcu doctor`, or by running `lcu update --check`.
+
+A release whose notes carry a severity marker prefixes the notice with "Security update:" or "Breaking update:"; see [Development](DEVELOPMENT.md#release-severity-marker). Set `LCU_NO_UPDATE_CHECK=1` to disable the background check and all notices. A source checkout never reports updates. Offline installs are not recorded, so set the variable on machines without network access; otherwise the check fails quietly and retries about once an hour.
 
 The installer accepts the legacy positional prefix. --offline prohibits installation network calls and requires preinstalled system libraries with --skip-system; model and browser services can still need network during use. --yes confirms a selected noninteractive setup. See --help for the complete option list and [verification](VERIFICATION.md) for exact tested outcomes.
 

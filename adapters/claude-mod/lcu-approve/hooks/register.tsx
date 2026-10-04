@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import { BUNDLE_ID, CONFIG_FILE, DEFAULT_LCU, ICON_PIXELS, ICON_TTL_MS, drawsImages, firstLine, ok, parseAllowed, plainWarning } from './data'
-import type { AppRow, AppsData, SessionRow } from './data'
+import { BUNDLE_ID, CONFIG_FILE, DEFAULT_LCU, ICON_PIXELS, ICON_TTL_MS, NOTICE_TIMEOUT_MS, drawsImages, firstLine, noticeToast, ok, parseAllowed, parseNotice, plainWarning } from './data'
+import type { AppRow, AppsData, SessionRow, UpdateNotice } from './data'
 import {
   APPS_PREFIX, AppsView, ApprovalView, INITIAL_APPS, KEY_PREFIX, LABEL_ALWAYS, LABEL_DENY, LABEL_SESSION,
   appsRows, approvalRows,
@@ -30,6 +30,8 @@ type McpResult = { isError?: boolean; content?: { type: string; text?: string }[
 
 const textOf = (result: McpResult) =>
   (result.content ?? []).map(item => item.text ?? '').join('')
+
+let noticeToasted = false
 
 const paneId = (approval: Approval) => `lcu-approval-${approval.id}`
 
@@ -124,6 +126,19 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // An update notice from the cache `lcu update --notice` keeps: the model gets the message as session
+  // context (`session.start` cannot carry any; the classic SessionStart hook can), the person one toast.
+  on('classic.SessionStart', async ($, e, next) => {
+    const result = await next(e)
+    const notice = await updateNotice($)
+    if (!notice) return result
+    if (!noticeToasted && (await $.session.surfaces().catch(() => [])).length > 0) {
+      noticeToasted = true
+      $.ui.toast(noticeToast(notice))
+    }
+    return { ...result, additionalContext: [...(result.additionalContext ?? []), notice.message] }
+  })
+
   on('command.run', { command: APPS_COMMAND }, async $ => {
     await refresh($)
     await openApps($)
@@ -144,6 +159,19 @@ export const register: Register = on => {
       if (next.origin.plugin !== $.plugin.name) return next(e)
       return { decision: 'allow', reason: 'LCU approval mod' }
     })
+  }
+}
+
+// `lcu update --notice --json`: cache only, never blocks on the network. Any failure means no notice.
+export async function updateNotice($: any): Promise<UpdateNotice | undefined> {
+  try {
+    const { path } = await findLcu($)
+    if (!path) return undefined
+    const run = await $.process.run([path, 'update', '--notice', '--json'], { timeoutMs: NOTICE_TIMEOUT_MS })
+    if (!ok(run)) return undefined
+    return parseNotice(run.stdout)
+  } catch {
+    return undefined
   }
 }
 

@@ -279,6 +279,10 @@ def main(root: Path, argv=None, *, resolved=None, env=None) -> int:
         changed = None
     if changed:
         print(f'Warning: {changed}')
+    from .update import status_line
+    update_line = status_line(root)
+    if update_line:
+        print(update_line)
     if target == 'linux' and (not env.get('DISPLAY') or not env.get('DBUS_SESSION_BUS_ADDRESS')):
         message = ('A live X11 DISPLAY and DBUS_SESSION_BUS_ADDRESS are required. '
                    'Use lcu-session or run inside the desktop session.')

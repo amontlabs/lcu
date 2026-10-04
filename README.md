@@ -119,7 +119,7 @@ In interactive Pi, `/lcu stop` requests original Computer Use Stop for a selecte
 
 ## Documentation
 
-- [Installation](docs/INSTALLATION.md): downloads, harness setup, permissions, sessions, and upgrades.
+- [Installation](docs/INSTALLATION.md): downloads, harness setup, permissions, sessions, and upgrades. Update with `lcu update`; [update notices](docs/INSTALLATION.md#update-notices) can be turned off with `LCU_NO_UPDATE_CHECK=1`.
 - [Harness adapters](docs/ADAPTERS.md): custom clients, approvals, lifecycle, and result handling.
 - [Verification](docs/PARITY-STATUS.md): tested behavior and remaining gaps.
 - [Development](docs/DEVELOPMENT.md): source builds and isolated desktop tests.

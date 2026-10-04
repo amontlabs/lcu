@@ -13,6 +13,7 @@ USAGE = ('Usage: lcu [--chrome] [--audio] [--mcp-discovery-compat]\n'
          '       lcu browser status\n'
          '       lcu apps [list|allow APP|revoke APP] [--json]   (macOS)\n'
          '       lcu prune [--keep N] [--yes]\n'
+         '       lcu update [--check [--json]] [--yes]\n'
          '       lcu doctor\n'
          '       lcu status [--json]\n'
          '       lcu --version')
@@ -379,6 +380,12 @@ def main(root, argv):
     if argv[:1] == ['prune']:
         from .maintenance import main as maintenance
         maintenance(root, argv[1:])
+        return
+    if argv[:1] == ['update']:
+        from .update import main as update
+        status = update(root, argv[1:])
+        if status:
+            raise SystemExit(status)
         return
     if argv == ['--with-browser-host']:
         raise ValueError('--with-browser-host was removed with the embedded browser. '
