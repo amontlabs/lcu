@@ -30,7 +30,7 @@ Check my OS, architecture, and prerequisites, then guide me through any required
 
 The first time an agent controls an app (Zed, Notes, Safari), the computer-use runtime asks you to allow it. The Claude app's Code tab used to fail that request with "Computer Use was not approved". `lcu setup --agent claude-code` now installs a small Claude Code mod, `lcu-approve`, that shows the question as a native **Computer use approval** pane in the Claude app, and in the terminal.
 
-<p align="center"><img src="docs/assets/approval-pane.png" width="640" alt="The Computer use approval pane in the Claude app"></p>
+<p align="center"><img src="docs/assets/approval-demo.gif" width="720" alt="The Computer use approval pane in Claude Code: Allow this conversation, a high-risk app with its warning, and the Approved apps panel"></p>
 
 - **Allow this conversation** for the current chat only.
 - **Always allow** to remember the app (offered only when the runtime allows it).
@@ -52,7 +52,7 @@ lcu apps allow Zed       # Touch ID (or your password), then Zed is allowed
 lcu apps revoke Zed      # take it back
 ```
 
-<p align="center"><img src="docs/assets/lcu-apps-touch-id.png" width="480" alt="The Touch ID prompt for lcu apps allow"></p>
+<p align="center"><img src="docs/assets/approved-apps.png" width="720" alt="The Approved apps panel opened with /computer-use-apps"></p>
 
 - Pass an app name, a bundle identifier or an `.app` path.
 - Listing is free; `allow` and `revoke` need you at the machine, so an agent running them is stopped by the prompt.
