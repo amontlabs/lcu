@@ -27,30 +27,36 @@ def original_hooks(host_root):
     return events
 
 
-NOTICE_SUFFIX = ' update --notice --hook-json'
+NOTICE_EVENTS = ('SessionStart', 'UserPromptSubmit')
+NOTICE_SUFFIXES = {event: f' update --notice --hook {event}' for event in NOTICE_EVENTS}
 NOTICE_MATCHER = 'startup|resume'
 
 
-def notice_hook(lcu):
-    """LCU's own SessionStart command hook (harness integration, not an original lifecycle hook).
+def notice_hook(lcu, event='SessionStart'):
+    """LCU's own command hook for `event` (harness integration, not an original lifecycle hook).
 
-    `update --notice --hook-json` prints Codex's SessionStart `hookSpecificOutput.additionalContext`
-    for the model; it is cache-only, exits 0 and prints nothing unless an update is known. Hook trust applies as
-    for any other hook; this is never part of the upstream lifecycle contract.
+    `update --notice --hook EVENT` prints Codex's `hookSpecificOutput.additionalContext` for the model once per
+    session and release; it is cache-only, exits 0 and prints nothing otherwise. SessionStart runs on startup and
+    resume, UserPromptSubmit on every prompt (no matcher, no status message: it must stay quiet). Hook trust
+    applies as for any other hook; this is never part of the upstream lifecycle contract.
     """
-    lcu = str(lcu)
-    return {'matcher': NOTICE_MATCHER, 'hooks': [{
-        'type': 'command', 'command': shlex.quote(lcu) + NOTICE_SUFFIX,
-        'commandWindows': subprocess.list2cmdline([lcu]) + NOTICE_SUFFIX,
-        'timeout': 10, 'statusMessage': 'Checking for LCU updates'}]}
+    lcu, suffix = str(lcu), NOTICE_SUFFIXES[event]
+    hook = {'type': 'command', 'command': shlex.quote(lcu) + suffix,
+            'commandWindows': subprocess.list2cmdline([lcu]) + suffix}
+    if event == 'SessionStart':
+        hook.update(timeout=10, statusMessage='Checking for LCU updates')
+        return {'matcher': NOTICE_MATCHER, 'hooks': [hook]}
+    hook['timeout'] = 5
+    return {'hooks': [hook]}
 
 
-def is_notice_group(group):
+def is_notice_group(group, event=None):
     """True for a group made only of LCU update-notice command hooks (ours to replace or remove)."""
     hooks = group.get('hooks') if isinstance(group, dict) else None
+    suffixes = tuple(NOTICE_SUFFIXES.values() if event is None else [NOTICE_SUFFIXES[event]])
     try:
         return bool(hooks) and all(isinstance(h, dict) and h.get('type') == 'command'
-                                   and str(h.get('command', '')).endswith(NOTICE_SUFFIX)
+                                   and str(h.get('command', '')).endswith(suffixes)
                                    and Path(shlex.split(h['command'])[0]).name in {'lcu', 'lcu.cmd'}
                                    for h in hooks)
     except ValueError:  # Unbalanced quoting in someone else's hook: not ours.
@@ -165,18 +171,19 @@ def install_hooks(cli, config_path, cwd, env, host_root, notice_command=None):
         for group in original:
             if group not in groups:
                 groups.append(group)
-    # LCU-owned update notice: replaced when present, removed when notice_command is None.
-    start = hooks.get('SessionStart', [])
-    if not isinstance(start, list):
-        raise ValueError('Invalid existing Codex hook list: SessionStart')
-    kept = [g for g in start if not is_notice_group(g)]
-    notice = notice_hook(notice_command) if notice_command else None
-    if notice:
-        kept.append(notice)
-    notice_edits = []
-    if kept != start:
-        hooks['SessionStart'] = kept
-        notice_edits.append({'keyPath': 'hooks.SessionStart', 'value': kept, 'mergeStrategy': 'replace'})
+    # LCU-owned update notices: replaced when present, removed when notice_command is None.
+    notices, notice_edits = {}, []
+    for event in NOTICE_EVENTS:
+        existing = hooks.get(event, [])
+        if not isinstance(existing, list):
+            raise ValueError(f'Invalid existing Codex hook list: {event}')
+        kept = [g for g in existing if not is_notice_group(g, event)]
+        if notice_command:
+            notices[event] = notice_hook(notice_command, event)
+            kept.append(notices[event])
+        if kept != existing:
+            hooks[event] = kept
+            notice_edits.append({'keyPath': 'hooks.' + event, 'value': kept, 'mergeStrategy': 'replace'})
     with tempfile.TemporaryDirectory(prefix='lcu-codex-config-') as temporary:
         # macOS tempfile paths can use /var while Codex reports /private/var.
         # Match the native writer's canonical source path for exact hook trust.
@@ -205,13 +212,13 @@ def install_hooks(cli, config_path, cwd, env, host_root, notice_command=None):
                                       'value': hook['currentHash'], 'mergeStrategy': 'replace'})
             if len(trust) != sum(len(g['hooks']) for groups in expected.values() for g in groups):
                 raise ValueError('Codex did not discover exactly the original LCU lifecycle hooks.')
-            if notice:
+            for event, notice in notices.items():
                 # Trust only the exact LCU notice command at this source path.
                 found = [h for entry in listed['data'] for h in entry['hooks']
-                         if h['sourcePath'] == str(config) and h.get('eventName') == 'sessionStart'
+                         if h['sourcePath'] == str(config) and h.get('eventName') == event[0].lower() + event[1:]
                          and h.get('command') == notice['hooks'][0]['command']]
                 if len(found) != 1:
-                    raise ValueError('Codex did not discover exactly the LCU update notice hook.')
+                    raise ValueError(f'Codex did not discover exactly the LCU {event} update notice hook.')
                 suffix = found[0]['key'].removeprefix(str(config))
                 if suffix == found[0]['key']:
                     raise ValueError('Upstream hook key format changed.')

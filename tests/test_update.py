@@ -103,7 +103,8 @@ class UpdateTest(unittest.TestCase):
     def test_staleness_and_error_backoff(self):
         now = time.time()
         self.assertTrue(update.stale(None))
-        self.assertFalse(update.stale({'checked_at': now - 3600, 'error': None}, now))
+        self.assertFalse(update.stale({'checked_at': now - 540, 'error': None}, now))
+        self.assertTrue(update.stale({'checked_at': now - 601, 'error': None}, now))
         self.assertTrue(update.stale({'checked_at': now - 25 * 3600, 'error': None}, now))
         self.assertFalse(update.stale({'checked_at': now - 600, 'error': 'down'}, now))
         self.assertTrue(update.stale({'checked_at': now - 4000, 'error': 'down'}, now))
@@ -168,6 +169,7 @@ class UpdateTest(unittest.TestCase):
         self.assertIs(kwargs['stdout'], update.subprocess.DEVNULL)
         self.assertTrue(kwargs['start_new_session'])
         self.cache(age=90000)
+        update.cache_path().with_name('refresh.stamp').unlink()
         with mock.patch.object(update.subprocess, 'Popen') as popen:
             self.assertEqual(update.notice(self.root)['latest'], '0.9.2')
         popen.assert_called_once()
@@ -247,7 +249,12 @@ class UpdateTest(unittest.TestCase):
             '[mcp_servers.lcu]\ncommand = "/p/current/bin/lcu"\n'
             '[[hooks.SessionStart]]\nmatcher = "startup|resume"\n'
             '[[hooks.SessionStart.hooks]]\ntype = "command"\n'
-            'command = "/p/current/bin/lcu update --notice --hook-json"\n')
+            'command = "/p/current/bin/lcu update --notice --hook SessionStart"\n')
+        self.assertTrue(update.codex_needs_setup(self.home, env))
+        with (codex / 'config.toml').open('a') as handle:
+            handle.write('[[hooks.UserPromptSubmit]]\n'
+                         '[[hooks.UserPromptSubmit.hooks]]\ntype = "command"\n'
+                         'command = "/p/current/bin/lcu update --notice --hook UserPromptSubmit"\n')
         self.assertFalse(update.codex_needs_setup(self.home, env))
 
     def test_stable_command_per_platform(self):
@@ -264,14 +271,68 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(json.loads(out)['latest'], '0.9.2')
         status, out = self.run_main('--notice')
         self.assertTrue(out.startswith('LCU 0.9.2 is available'))
-        status, out = self.run_main('--notice', '--hook-json')
-        output = json.loads(out)['hookSpecificOutput']
-        self.assertEqual(output['hookEventName'], 'SessionStart')
-        self.assertTrue(output['additionalContext'].startswith('LCU 0.9.2 is available'))
         self.cache({**INFO, 'version': '0.9.1'})
         self.assertEqual(self.run_main('--notice', '--json'), (0, '{}\n'))
         self.assertEqual(self.run_main('--notice'), (0, ''))
-        self.assertEqual(self.run_main('--notice', '--hook-json'), (0, ''))
+        self.assertEqual(self.run_main('--notice', '--hook', 'SessionStart'), (0, ''))
+
+    def hook(self, event, stdin='{"session_id": "s1"}'):
+        out = io.StringIO()
+        with mock.patch('sys.stdin', io.StringIO(stdin)), mock.patch('sys.stdout', out), \
+                mock.patch.object(update.subprocess, 'Popen'):
+            self.assertEqual(update.main(self.root, ['--notice', '--hook', event]), 0)
+        return json.loads(out.getvalue())['hookSpecificOutput'] if out.getvalue() else None
+
+    def test_hook_announces_once_per_session_and_version(self):
+        self.cache()
+        first = self.hook('SessionStart')
+        self.assertEqual(first['hookEventName'], 'SessionStart')
+        self.assertTrue(first['additionalContext'].startswith('LCU 0.9.2 is available'))
+        self.assertIsNone(self.hook('SessionStart'))
+        self.assertIsNone(self.hook('UserPromptSubmit'))
+        other = self.hook('UserPromptSubmit', '{"session_id": "s2"}')
+        self.assertEqual(other['hookEventName'], 'UserPromptSubmit')
+        self.cache({**INFO, 'version': '0.9.3', 'tag': 'v0.9.3'})
+        self.assertIn('0.9.3', self.hook('UserPromptSubmit')['additionalContext'])
+        self.assertIsNone(self.hook('SessionStart'))
+
+    def test_hook_without_notice_is_silent(self):
+        self.cache({**INFO, 'version': '0.9.1'})
+        self.assertIsNone(self.hook('SessionStart'))
+        self.assertFalse(update.cache_path().with_name('announced.json').exists())
+
+    def test_hook_missing_or_garbage_session_id(self):
+        self.cache()
+        for stdin in ('', 'garbage{', '[]', '{"session_id": 5}', '{}'):
+            self.assertIsNotNone(self.hook('SessionStart', stdin))
+            self.assertIsNone(self.hook('UserPromptSubmit', stdin))
+        self.assertFalse(update.cache_path().with_name('announced.json').exists())
+
+    def test_hook_prunes_old_announcements(self):
+        self.cache()
+        path = update.cache_path().with_name('announced.json')
+        now = time.time()
+        path.write_text(json.dumps({'old': {'version': '0.9.2', 'at': now - 8 * 86400},
+                                    'recent': {'version': '0.9.2', 'at': now - 86400}, 'bad': 3}))
+        self.assertIsNone(self.hook('UserPromptSubmit', '{"session_id": "recent"}'))
+        self.assertIsNotNone(self.hook('UserPromptSubmit', '{"session_id": "old"}'))
+        data = json.loads(path.read_text())
+        self.assertEqual(set(data), {'old', 'recent'})
+        self.assertGreater(data['old']['at'], now - 5)
+        path.write_text('{broken')
+        self.assertIsNotNone(self.hook('UserPromptSubmit'))
+
+    def test_refresh_stamp_guards_stampede(self):
+        with mock.patch.object(update.subprocess, 'Popen') as popen:
+            update.notice(self.root)
+            update.notice(self.root)
+        popen.assert_called_once()
+        stamp = update.cache_path().with_name('refresh.stamp')
+        old = time.time() - 121
+        os.utime(stamp, (old, old))
+        with mock.patch.object(update.subprocess, 'Popen') as popen:
+            update.notice(self.root)
+        popen.assert_called_once()
 
     def test_check_cli(self):
         with mock.patch.object(update, 'fetch_latest', return_value=INFO):
