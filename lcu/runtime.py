@@ -238,10 +238,11 @@ def _default_linux_sandbox_state(env):
     to X11 ... Operation not permitted". Hosts that do not send the metadata
     (every LCU adapter and generic MCP clients) would never work on such a
     machine. The default sandbox state disables that wrapper, as official Codex
-    does under danger-full-access; computer use remains gated by the original
-    approval prompts. A host that sends its own `codex/sandbox-state-meta` per
-    call, or one in NODE_REPL_REQUEST_META, keeps full precedence over this
-    default, so a stricter profile is honored. Set LCU_NODE_REPL_SANDBOX=host to
+    does under danger-full-access. The original Linux runtime has no per-app
+    approval prompt, so the host's own tool approval is the only gate. A host
+    that sends its own `codex/sandbox-state-meta` per call, or one in
+    NODE_REPL_REQUEST_META, keeps full precedence over this default, so a
+    stricter profile is honored. Set LCU_NODE_REPL_SANDBOX=host to
     leave the original behavior untouched.
     """
     try:
