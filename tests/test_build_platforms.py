@@ -179,6 +179,16 @@ class BuildPlatformTests(unittest.TestCase):
             for name in ('.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.tsx'):
                 self.assertTrue((mod / name).is_file(), name)
             self.assertFalse((mod / 'tests').exists())
+            # The release carries every file of the mod but its tests, including the types contract
+            # its manifest names (the engine refuses to load the mod without it).
+            source = SCRIPTS.parent / 'adapters/claude-mod/lcu-approve'
+            expected = {path.relative_to(source) for path in source.rglob('*')
+                        if path.is_file() and path.relative_to(source).parts[0] != 'tests'
+                        and path.name != '.DS_Store'}
+            self.assertEqual({path.relative_to(mod) for path in mod.rglob('*') if path.is_file()}, expected)
+            manifest = json.loads((mod / '.claude-plugin/plugin.json').read_text())
+            if 'types' in manifest:
+                self.assertTrue((mod / manifest['types']).is_file(), manifest['types'])
             for name in ('plugin.yaml', '__init__.py', 'bridge.mjs'):
                 self.assertTrue((release / 'adapters/hermes' / name).is_file())
             self.assertFalse((release / 'adapters/hermes/lcu-config.json').exists())
