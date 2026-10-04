@@ -3,13 +3,17 @@ import json
 import os
 from contextlib import nullcontext
 from pathlib import Path
-import pwd
 import subprocess
 import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+
+if sys.platform == 'win32':
+    raise unittest.SkipTest('Linux release registration and the /bin/sh portable export; test_windows_setup covers Windows')
+
+import pwd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lcu import setup

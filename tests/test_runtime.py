@@ -8,6 +8,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+if sys.platform == 'win32':
+    raise unittest.SkipTest('Linux and macOS app layouts; test_windows_runtime covers Windows')
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lcu.runtime import environment, main, paths
 from lcu.browser import install

@@ -42,7 +42,7 @@ def linked_docs(source):
         if path in seen or not path.is_file():
             continue
         seen.add(path)
-        for match in _LINK.finditer(path.read_text()):
+        for match in _LINK.finditer(path.read_text(encoding='utf-8')):
             target = match.group(1).split('#', 1)[0].strip()
             if not target or '://' in target or target.startswith('mailto:'):
                 continue

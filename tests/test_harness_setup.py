@@ -50,7 +50,7 @@ class HarnessSetupTests(unittest.TestCase):
             with self.subTest(agent=name):
                 argv = ['--prefix', str(self.root / 'prefix'), '--scope', 'project',
                         '--project', str(self.project), '--agent', name]
-                if os.getuid() == 0:
+                if getattr(os, 'getuid', lambda: None)() == 0:
                     argv += ['--user', 'root']
                 args = setup.parser().parse_args(argv)
                 with self.assertRaisesRegex(ValueError, 'project scope is not supported'):
@@ -112,7 +112,7 @@ class HarnessSetupTests(unittest.TestCase):
         self.assertEqual(calls[0][1]['env']['HERMES_HOME'], str(self.home / '.hermes'))
         package = self.home / '.hermes/plugins/lcu-cua'
         self.assertEqual(json.loads((package / 'lcu-config.json').read_text()), {
-            'command': self.command, 'node': '/original/node',
+            'command': self.command, 'node': str(Path('/original/node')),
             'bridge': str(self.release / 'adapters/hermes/bridge.mjs'),
         })
         self.assertFalse((package / 'skills').exists())

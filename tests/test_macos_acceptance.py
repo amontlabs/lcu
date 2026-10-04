@@ -1,12 +1,16 @@
 import importlib.util
 import os
-import pty
 from pathlib import Path
-import select
 import subprocess
 import sys
 import tempfile
 import unittest
+
+if sys.platform == 'win32':
+    raise unittest.SkipTest('macOS acceptance drives POSIX terminals')
+
+import pty
+import select
 
 
 SPEC = importlib.util.spec_from_file_location(

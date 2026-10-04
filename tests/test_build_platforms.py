@@ -18,8 +18,12 @@ import build_bundle
 from bundle import VERSION
 from provision_agent_tools import provision
 
+# Linux and macOS archives are built on their target OS; their import check needs POSIX modules.
+posix_archive = unittest.skipIf(sys.platform == 'win32', 'Linux and macOS archives are built on POSIX hosts')
+
 
 class BuildPlatformTests(unittest.TestCase):
+    @posix_archive
     def test_darwin_archive_uses_selected_compatible_app_and_contains_only_thin_platform_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -75,6 +79,7 @@ class BuildPlatformTests(unittest.TestCase):
                     build_bundle.build(Path(temporary) / 'dist', target='darwin')
             resolve.assert_not_called()
 
+    @posix_archive
     def test_linux_archive_name_and_manifest_remain_linux(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -91,6 +96,7 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/linux_sky_service.mjs', names)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/lcu/macos_sky_service.mjs', names)
 
+    @posix_archive
     def test_shipped_document_links_resolve_inside_the_release(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -69,6 +69,7 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'symlink'):
             verify(self.root, 'arm64')
 
+    @unittest.skipIf(sys.platform == 'win32', 'Windows has no POSIX executable bit to seal')
     def test_executable_bit_change_is_rejected(self):
         self.binary.chmod(0o644)
         with self.assertRaisesRegex(ValueError, 'integrity'):

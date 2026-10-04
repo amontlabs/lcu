@@ -29,6 +29,7 @@ class InterpreterTests(unittest.TestCase):
         interpreter.ensure('/x/lcu', ['a'], version=CURRENT, execv=lambda *args: calls.append(args))
         self.assertEqual(calls, [])
 
+    @unittest.skipIf(sys.platform == 'win32', 'Fake interpreters are shell scripts; bin/lcu.cmd checks the version through the py launcher')
     def test_too_old_interpreter_reexecs_a_newer_one_found_on_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             old = _fake_python(tmp, 'python3', (3, 9))
@@ -41,6 +42,7 @@ class InterpreterTests(unittest.TestCase):
             self.assertEqual(calls, [(str(new), [str(new), '-B', '/x/lcu', '--chrome'])])
             self.assertNotEqual(str(old), calls[0][0])
 
+    @unittest.skipIf(sys.platform == 'win32', 'Fake interpreters are shell scripts; bin/lcu.cmd checks the version through the py launcher')
     def test_lcu_python_override_is_preferred(self):
         with tempfile.TemporaryDirectory() as tmp:
             chosen = _fake_python(tmp, 'mypython', (3, 13))
