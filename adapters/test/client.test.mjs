@@ -321,3 +321,14 @@ test('aborting a tool call cancels the approval it is waiting on', async () => {
     await assert.rejects(call, /interrupted/);
   } finally { await bridge.close(); }
 });
+
+test('an approval for an app hosting the agent is declined without asking the host', async () => {
+  const seen = [];
+  const bridge = createCuaClient({ command, onElicitation: async params => { seen.push(params); return { action: 'accept', content: {} }; } });
+  try {
+    await bridge.connect();
+    const result = await bridge.call('js', { code: 'approval-native-host' }, { sessionId: 's', turnId: 't' });
+    assert.deepEqual(JSON.parse(result.content[0].text), { action: 'decline' });
+    assert.equal(seen.length, 0);
+  } finally { await bridge.close(); }
+});

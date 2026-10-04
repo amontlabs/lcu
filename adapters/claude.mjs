@@ -18,6 +18,7 @@ import {
   relayElicitation,
   TURN_END_TIMEOUT_MS,
 } from './client.mjs';
+import { declineAgentHostApp } from './host-guard.mjs';
 
 const PUBLIC_TOOLS = new Set(['js', 'js_reset']);
 const CONTEXT_TOOL = 'set_turn_context';
@@ -259,6 +260,8 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
 
     upstream.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
       const params = request.params;
+      const refused = declineAgentHostApp(params);
+      if (refused) return refused;
       const approval = nativeAppApprovalOptions(params);
       try {
         const response = await relayElicitation(

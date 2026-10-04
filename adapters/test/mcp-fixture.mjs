@@ -126,7 +126,7 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
     return { isError: true, content: [{ type: 'text', text: 'cleanup failed once' }] };
   }
   if (name === 'js' && ['approval', 'approval-other', 'approval-form', 'approval-native',
-    'approval-native-session-only', 'pi-origin-approval', 'pi-origin-lookalike',
+    'approval-native-session-only', 'approval-native-host', 'pi-origin-approval', 'pi-origin-lookalike',
     'pi-origin-other-empty'].includes(args?.code)) {
     const browser = args.code === 'approval' || args.code === 'pi-origin-approval' ||
       args.code === 'pi-origin-lookalike';
@@ -135,7 +135,8 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
     const origin = args.code === 'pi-origin-lookalike'
       ? 'http://127.0.0.1.attacker.invalid:8080' : 'http://127.0.0.1:8080';
     const form = args.code === 'approval-form';
-    const native = args.code === 'approval-native' || args.code === 'approval-native-session-only';
+    const native = args.code === 'approval-native' || args.code === 'approval-native-session-only' ||
+      args.code === 'approval-native-host';
     const decision = await server.elicitInput({
       message: browser ? `Allow Browser use to access ${origin}?` : otherEmpty
         ? 'Allow Browser use to use your browsing history for this task?' : form ? 'Enter a secret' :
@@ -164,7 +165,7 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
         connector_id: 'computer-use',
         persist: args.code === 'approval-native-session-only' ? ['session'] : ['session', 'always'],
         tool_name: 'get_app_state',
-        tool_params: { app: 'dev.lcu.NativeFixture.generated' },
+        tool_params: { app: args.code === 'approval-native-host' ? 'com.apple.Terminal' : 'dev.lcu.NativeFixture.generated' },
       } : {},
       requestedSchema: { type: 'object', properties: form ? { secret: { type: 'string' } } : {} },
     });

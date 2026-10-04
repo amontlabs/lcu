@@ -53,7 +53,7 @@ class HermesHarnessTests(unittest.TestCase):
         adapter_root = home / "adapter" / "adapters"
         (adapter_root / "hermes").mkdir(parents=True)
         (adapter_root / "test").mkdir()
-        for name in ("client.mjs", "audio-files.mjs"):
+        for name in ("client.mjs", "audio-files.mjs", "host-guard.mjs"):
             shutil.copy2(installed / name, adapter_root / name)
         for name in ("bridge.mjs",):
             shutil.copy2(installed / "hermes" / name, adapter_root / "hermes" / name)
