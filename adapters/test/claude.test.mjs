@@ -599,11 +599,8 @@ test('Claude relay falls back to the host answer when the mod recorded nothing',
     assert.deepEqual(JSON.parse(accepted.content[0].text),
       { action: 'accept', content: {}, _meta: { persist: 'session' } });
 
-    // A mod that only asked for the description and never chose leaves the host decline in force.
-    bridge.respondToNextElicitation(async () => {
-      await approvalCall(bridge.client, 'approval_request', { message: NATIVE_MESSAGE });
-      return { action: 'decline' };
-    });
+    // Nothing from the mod at all: the host's decline is the answer.
+    bridge.respondToNextElicitation(async () => ({ action: 'decline' }));
     const declined = await callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'host-decline' });
     assert.deepEqual(JSON.parse(declined.content[0].text), { action: 'decline' });
   } finally {
@@ -641,13 +638,15 @@ test('Claude relay rejects approval choices that are not the mod\'s, current, si
     assert.deepEqual(JSON.parse(result.content[0].text),
       { action: 'accept', content: {}, _meta: { persist: 'session' } });
 
-    // Persistent approval not offered: "always" is refused and the host's answer stands.
+    // Persistent approval not offered: "always" is refused and the record stays open for a valid choice.
     let refused;
     bridge.respondToNextElicitation(async () => {
       const described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
         { message: NATIVE_MESSAGE })).content[0].text);
       assert.deepEqual(described.scopes, ['session']);
       refused = await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'always' });
+      // The mod then records what the person can actually choose.
+      await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'deny' });
       return { action: 'decline' };
     });
     const sessionOnly = await callWithContext(bridge.client, 'js', { code: 'approval-native-session-only' }, {
@@ -660,26 +659,70 @@ test('Claude relay rejects approval choices that are not the mod\'s, current, si
   }
 });
 
-test('Claude relay holds approval_wait until the mod records the choice from a button press', async () => {
+test('Claude relay keeps a mod-claimed elicitation open past the host decline until the mod chooses', async () => {
   const bridge = await connectRelay();
   try {
-    let waited;
+    let described;
     bridge.respondToNextElicitation(async () => {
-      const described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
+      described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
         { message: NATIVE_MESSAGE })).content[0].text);
-      const pending = approvalCall(bridge.client, 'approval_wait', { id: described.id });
-      const modelWait = await approvalCall(bridge.client, 'approval_wait', { id: described.id },
-        { 'claudecode/toolUseId': 'toolu_01model' });
-      assert.equal(modelWait.isError, true);
-      await new Promise(resolve => setTimeout(resolve, 50));
-      await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'always' });
-      waited = JSON.parse((await pending).content[0].text);
+      // The mod's hook returned a block at once: the host declines before any press.
       return { action: 'decline' };
     });
-    const result = await callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'wait' });
-    assert.deepEqual(waited, { choice: 'always' });
-    assert.deepEqual(JSON.parse(result.content[0].text),
+    let settled = false;
+    const call = callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'wait' })
+      .then(result => { settled = true; return result; });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.ok(described, 'the mod claimed the record');
+    assert.equal(settled, false, 'still waiting for the person');
+    const recorded = await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'always' });
+    assert.notEqual(recorded.isError, true);
+    assert.deepEqual(JSON.parse((await call).content[0].text),
       { action: 'accept', content: {}, _meta: { persist: 'always' } });
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay answers the runtime with a decline recorded after the host decline', async () => {
+  const bridge = await connectRelay();
+  try {
+    let described;
+    bridge.respondToNextElicitation(async () => {
+      described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
+        { message: NATIVE_MESSAGE })).content[0].text);
+      return { action: 'cancel' };
+    });
+    const call = callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'wait-deny' });
+    await new Promise(resolve => setTimeout(resolve, 200));
+    await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'deny' });
+    assert.deepEqual(JSON.parse((await call).content[0].text), { action: 'decline' });
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay stops waiting for a mod choice when the call is aborted and refuses it afterwards', async () => {
+  const bridge = await connectRelay();
+  try {
+    let described;
+    bridge.respondToNextElicitation(async () => {
+      described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
+        { message: NATIVE_MESSAGE })).content[0].text);
+      return { action: 'decline' };
+    });
+    const controller = new AbortController();
+    const aborted = callWithContext(bridge.client, 'js', { code: 'approval-native' }, {
+      toolUseId: 'wait-abort', signal: controller.signal,
+    }).then(() => undefined, error => error);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.ok(described);
+    controller.abort();
+    assert.ok(await aborted, 'the aborted call rejects at the caller');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    // The record ended with the request: the mod's late press is refused, which tells it to close its pane.
+    const late = await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'session' });
+    assert.equal(late.isError, true);
   } finally {
     await bridge.close();
   }
@@ -689,9 +732,9 @@ test('Claude relay lists the host-only approval tools for the mod and answers no
   const bridge = await connectRelay();
   try {
     const names = (await bridge.client.listTools()).tools.map(tool => tool.name);
-    for (const name of ['approval_request', 'approval_wait', 'approval_choice']) assert.ok(names.includes(name), name);
+    for (const name of ['approval_request', 'approval_choice']) assert.ok(names.includes(name), name);
     for (const [name, args] of [['approval_request', { message: NATIVE_MESSAGE }],
-      ['approval_wait', { id: 'x' }], ['approval_choice', { id: 'x', choice: 'always' }]]) {
+      ['approval_choice', { id: 'x', choice: 'always' }]]) {
       const refused = await approvalCall(bridge.client, name, args, { 'claudecode/toolUseId': 'toolu_01model' });
       assert.equal(refused.isError, true, name);
     }

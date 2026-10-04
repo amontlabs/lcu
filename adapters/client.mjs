@@ -263,32 +263,38 @@ export function createApprovalBroker({ now = Date.now, ttlMs = APPROVAL_CHOICE_T
       record.choice = choice === 'session' && !record.scopes.includes('session') ? 'once' : choice;
       record.chosenAt = now();
       record.chosenInput = choice;
-      for (const waiter of record.waiters.splice(0)) waiter(choice);
+      for (const waiter of record.waiters.splice(0)) waiter();
       return { ok: true };
     },
+    /** True once the mod has claimed this record: it will answer for the person. */
+    isClaimed(id) {
+      return records.get(id)?.claimedAt !== undefined;
+    },
     /**
-     * Resolve with the recorded choice once there is one (immediately if already recorded), or
-     * with 'none' when the request ends or `signal` aborts without a choice. A mod waits here
-     * because a call in flight does not count against its hook's time limit.
+     * Wait for the mod to record a choice for a claimed record, then settle it. Resolves with the
+     * runtime-facing choice, or undefined when the request ends or `signal` aborts first.
      */
-    wait(id, toolUseId, signal) {
-      if (typeof toolUseId !== 'string' || !toolUseId.startsWith(MOD_TOOL_USE_PREFIX)) {
-        return Promise.resolve(fail('approval_wait accepts only host-mod calls'));
+    async awaitChoice(id, signal) {
+      const record = records.get(id);
+      if (!record || record.claimedAt === undefined) return undefined;
+      if (record.choice === undefined) {
+        await new Promise(resolve => {
+          record.waiters.push(resolve);
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
       }
-      const record = typeof id === 'string' ? records.get(id) : undefined;
-      if (!record || record.claimedAt === undefined) return Promise.resolve(fail('Unknown approval id'));
-      if (record.choice !== undefined) return Promise.resolve({ ok: true, choice: record.chosenInput });
-      return new Promise(resolve => {
-        const finish = choice => resolve({ ok: true, choice });
-        record.waiters.push(finish);
-        signal?.addEventListener('abort', () => finish('none'), { once: true });
-      });
+      return this.settle(id);
+    },
+    /** Release every wait without a choice: the request they belong to ended. */
+    cancelWaiting() {
+      for (const record of records.values()) for (const waiter of record.waiters.splice(0)) waiter();
     },
     /** Remove the record and return its still-valid recorded choice, if any. */
     settle(id) {
       const record = records.get(id);
       records.delete(id);
-      for (const waiter of record?.waiters.splice(0) ?? []) waiter('none');
+      for (const waiter of record?.waiters.splice(0) ?? []) waiter();
       if (!record || record.choice === undefined || now() - record.chosenAt > ttlMs) return undefined;
       return record.choice === 'deny' ? 'decline' : record.choice;
     },

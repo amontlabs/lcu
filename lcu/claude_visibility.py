@@ -9,7 +9,7 @@ HOST_ONLY = ('mcp__lcu__turn_ended', 'mcp__lcu__js_add_node_module_dir',
 # The approval tools the lcu-approve mod calls. They cannot be in `permissions.deny`
 # (a denied MCP tool leaves the tool list, so the mod's `$.mcp.call` would fail) and are
 # never allowed; the relay refuses any call without a mod (`toolu_plugin_`) tool-use id.
-MOD_ONLY = ('mcp__lcu__approval_request', 'mcp__lcu__approval_wait', 'mcp__lcu__approval_choice')
+MOD_ONLY = ('mcp__lcu__approval_request', 'mcp__lcu__approval_choice')
 
 
 def _install_lifecycle_hooks(settings):

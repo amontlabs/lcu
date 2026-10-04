@@ -25,10 +25,9 @@ const PUBLIC_TOOLS = new Set(['js', 'js_reset']);
 const CONTEXT_TOOL = 'set_turn_context';
 const APPROVAL_REQUEST_TOOL = 'approval_request';
 const APPROVAL_CHOICE_TOOL = 'approval_choice';
-const APPROVAL_WAIT_TOOL = 'approval_wait';
 const TURN_END_TOOL = 'turn_ended';
 /** Listed for the lcu-approve mod but never allowed or denied in Claude's permissions; refused without a plugin tool-use id. */
-const MOD_ONLY_TOOLS = new Set(['approval_request', 'approval_wait', 'approval_choice']);
+const MOD_ONLY_TOOLS = new Set(['approval_request', 'approval_choice']);
 const TURN_CONTEXT_META = 'x-codex-turn-metadata';
 const CLAUDE_TOOL_USE_META = 'claudecode/toolUseId';
 const TURN_CONTEXT_SCHEMA = {
@@ -47,12 +46,6 @@ const APPROVAL_REQUEST_SCHEMA = {
   type: 'object',
   properties: { message: { type: 'string', minLength: 1 } },
   required: ['message'],
-  additionalProperties: false,
-};
-const APPROVAL_WAIT_SCHEMA = {
-  type: 'object',
-  properties: { id: { type: 'string', minLength: 1 } },
-  required: ['id'],
   additionalProperties: false,
 };
 const APPROVAL_CHOICE_SCHEMA = {
@@ -140,6 +133,7 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
   let server;
   const approvals = createApprovalGate();
   const broker = createApprovalBroker();
+  let liveCalls = 0;
   let connected = false;
   let shutdown;
   let serverClose;
@@ -193,7 +187,7 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
         !upstreamTools.some(tool => tool.name === TURN_END_TOOL)) {
       throw new Error('Original CUA js/js_reset and turn_ended tools are required');
     }
-    if (upstreamTools.some(tool => [CONTEXT_TOOL, APPROVAL_REQUEST_TOOL, APPROVAL_WAIT_TOOL, APPROVAL_CHOICE_TOOL].includes(tool.name))) {
+    if (upstreamTools.some(tool => [CONTEXT_TOOL, APPROVAL_REQUEST_TOOL, APPROVAL_CHOICE_TOOL].includes(tool.name))) {
       throw new Error('Original CUA server already uses a Claude relay host-only tool name');
     }
     const turnEndedTool = upstreamTools.find(tool => tool.name === TURN_END_TOOL);
@@ -203,18 +197,13 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
       inputSchema: TURN_CONTEXT_SCHEMA,
     };
 
-    // These two cannot be hidden with deny rules like the tools above: a denied MCP tool is
+    // These cannot be hidden with deny rules like the tools above: a denied MCP tool is
     // removed from Claude Code's tool list, and the mod's `$.mcp.call` needs it listed.
     // The relay rejects any call without a mod-originated tool-use id, and the mod denies the model's.
     const approvalRequestTool = {
       name: APPROVAL_REQUEST_TOOL,
       description: 'Internal Claude host mod: describe the pending native-app approval for an elicitation message.',
       inputSchema: APPROVAL_REQUEST_SCHEMA,
-    };
-    const approvalWaitTool = {
-      name: APPROVAL_WAIT_TOOL,
-      description: 'Internal Claude host mod: wait until the person has chosen for a pending native-app approval.',
-      inputSchema: APPROVAL_WAIT_SCHEMA,
     };
     const approvalChoiceTool = {
       name: APPROVAL_CHOICE_TOOL,
@@ -230,7 +219,7 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
     upstream.onerror = error => console.error('Claude MCP relay upstream error:', asError(error));
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [...publicTools, turnEndedTool, contextTool, approvalRequestTool, approvalWaitTool, approvalChoiceTool],
+      tools: [...publicTools, turnEndedTool, contextTool, approvalRequestTool, approvalChoiceTool],
     }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -262,10 +251,9 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
         // Host-only: answered for the lcu-approve mod, which Claude Code marks with a plugin tool-use id.
         const modCall = _meta?.[CLAUDE_TOOL_USE_META];
         const outcome = name === APPROVAL_REQUEST_TOOL ? broker.describe(toolArgs.message, modCall)
-          : name === APPROVAL_WAIT_TOOL ? await broker.wait(toolArgs.id, modCall, extra.signal)
-            : broker.choose(toolArgs.id, toolArgs.choice, modCall);
+          : broker.choose(toolArgs.id, toolArgs.choice, modCall);
         if (!outcome.ok) return { isError: true, content: [{ type: 'text', text: outcome.error }] };
-        const body = outcome.approval ?? (outcome.choice ? { choice: outcome.choice } : { ok: true });
+        const body = outcome.approval ?? { ok: true };
         return { content: [{ type: 'text', text: JSON.stringify(body) }] };
       }
       if (name === TURN_END_TOOL) {
@@ -298,6 +286,7 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
         call_id: toolUseId,
       });
       metadata[TURN_CONTEXT_META] = turnMetadata;
+      liveCalls++;
       try {
         return await callWithDeadline(approvals, callTimeout(name, toolArgs), extra.signal,
           signal => upstream.callTool({ name, arguments: toolArgs, _meta: metadata }, undefined, {
@@ -305,8 +294,12 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
             timeout: APPROVAL_TIMEOUT_MS,
           }));
       } finally {
+        liveCalls--;
         // Never let cleanup mask the original tool result or abort error.
         if (extra.signal.aborted) {
+          // The runtime's own cancel of an open elicitation is not always delivered: with no other
+          // call alive, nobody is left to answer an approval the mod is still holding open.
+          if (liveCalls === 0) broker.cancelWaiting();
           try {
             await turnEnded(context.sessionId, context.turnId, 'Interrupt');
           } catch (error) {
@@ -326,6 +319,13 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
         const response = await relayElicitation(
           server, approvals, approval ? nativeForm(params, approval) : params, extra.signal);
         if (!approval) return response;
+        // A claimed record means the lcu-approve mod answers for the person: the host's own answer
+        // was only its hook's block, so keep this elicitation open until the mod records a choice
+        // (the approval gate holds tool-call deadlines meanwhile) or the request ends.
+        if (response.action !== 'accept' && broker.isClaimed(pendingId)) {
+          const waited = await approvals.track(() => broker.awaitChoice(pendingId, extra.signal));
+          return waited ? nativeAppApprovalResponse(params, waited) : { action: 'cancel' };
+        }
         // A choice the lcu-approve mod recorded for this exact request answers for the person.
         const modChoice = broker.settle(pendingId);
         if (modChoice) return nativeAppApprovalResponse(params, modChoice);

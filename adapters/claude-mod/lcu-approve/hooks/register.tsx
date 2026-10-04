@@ -3,7 +3,6 @@ import type { Register } from 'claude-code'
 // The MCP server name `lcu setup` registers.
 const SERVER = 'lcu'
 const REQUEST_TOOL = 'approval_request'
-const WAIT_TOOL = 'approval_wait'
 const CHOICE_TOOL = 'approval_choice'
 const ASK_HEADER = 'Computer use'
 const LABEL_SESSION = 'Allow this conversation'
@@ -49,17 +48,20 @@ export const register: Register = on => {
       return next(e)
     }
 
-    // The person's answer reaches LCU either from the pane's button (already recorded) or from here.
-    const answered = await decide($, approval)
-    if (!answered.isRecorded && !(await record($, approval.id, answered.choice))) return next(e)
-    // The choice is with LCU; keep the engine's own form from showing.
-    return { block: `Answered by the lcu-approve mod: ${answered.choice}` }
+    // No hook stays pending while the person decides: a pending hook keeps the desktop surface from
+    // delivering the pane's presses. The pane's button (or Esc) records the choice with LCU, whose
+    // relay keeps the runtime's elicitation open until then; this hook only blocks the engine's form.
+    if (!(await showPane($, approval))) {
+      // A narrow terminal seats no pane: ask from a timer, which is a dispatch of its own.
+      $.clock.after(0, () => askAndRecord($, approval))
+    }
+    return { block: 'Answered by the lcu-approve mod' }
   })
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     const approval = shown.get(e.requestId)
     if (!approval) return next(e)
-    const settle = (choice: Choice) => void record($, approval.id, choice)
+    const settle = (choice: Choice) => void finish($, approval, choice)
     const { Box, Text, Button } = $.ui.resolve(e)
     const isHigh = approval.riskLevel === 'high'
     return (
@@ -90,13 +92,16 @@ export const register: Register = on => {
   // Esc or the close mark dismisses the pane: that is a cancel.
   on('ui.close', async ($, e, next) => {
     const approval = shown.get(e.id)
-    if (approval && e.origin.kind === 'person') await record($, approval.id, 'cancel')
+    if (approval && e.origin.kind === 'person') {
+      shown.delete(e.id)
+      await record($, approval.id, 'cancel')
+    }
     return next(e)
   })
 
-  // The two approval tools are for this mod alone: the model gets a refusal,
+  // The approval tools are for this mod alone: the model gets a refusal,
   // and the mod's own calls need no permission card.
-  for (const name of [REQUEST_TOOL, WAIT_TOOL, CHOICE_TOOL]) {
+  for (const name of [REQUEST_TOOL, CHOICE_TOOL]) {
     const tool = `mcp__${SERVER}__${name}`
     on('tool.call', { tool }, async ($, e, next) => {
       if (next.origin.plugin !== $.plugin.name) {
@@ -121,14 +126,16 @@ async function record($: any, id: string, choice: Choice): Promise<boolean> {
   }
 }
 
-type Answer = { choice: Choice; isRecorded: boolean }
-
-// Ask the person: a pane where the terminal or app seats one, otherwise the engine's question dialog.
-async function decide($: any, approval: Approval): Promise<Answer> {
-  return (await viaPane($, approval)) ?? (await viaAsk($, approval))
+// Record the person's choice, then take the pane down. A refused record means the request ended.
+async function finish($: any, approval: Approval, choice: Choice): Promise<void> {
+  await record($, approval.id, choice)
+  const id = paneId(approval)
+  shown.delete(id)
+  await $.ui.close({ id }).catch(() => {})
 }
 
-async function viaPane($: any, approval: Approval): Promise<Answer | undefined> {
+// Open the pane; false when it waits undrawn (a narrow terminal) and the person needs another prompt.
+async function showPane($: any, approval: Approval): Promise<boolean> {
   const id = paneId(approval)
   shown.set(id, approval)
   try {
@@ -140,23 +147,17 @@ async function viaPane($: any, approval: Approval): Promise<Answer | undefined> 
       holdToasts: true,
       rows: 9,
     })
-    // An unasked pane waits undrawn on a narrow terminal; do not leave the person without a prompt.
-    if (!opened.isPlaced) return undefined
-    // A hook's own time is limited, a `$` call in flight is not: LCU holds this call until a
-    // button press or a dismissal has been recorded (or the request ends).
-    const reply = (await $.mcp.call(SERVER, WAIT_TOOL, { id: approval.id })) as McpResult
-    if (reply.isError) return undefined
-    const choice = (JSON.parse(textOf(reply)) as { choice: string }).choice
-    return { choice: choice === 'none' ? 'cancel' : (choice as Choice), isRecorded: true }
+    if (opened.isPlaced) return true
   } catch {
-    return undefined
-  } finally {
-    shown.delete(id)
-    await $.ui.close({ id }).catch(() => {})
+    // Fall through to the question dialog.
   }
+  shown.delete(id)
+  await $.ui.close({ id }).catch(() => {})
+  return false
 }
 
-async function viaAsk($: any, approval: Approval): Promise<Answer> {
+// The engine's question dialog, for where no pane is seated.
+async function askAndRecord($: any, approval: Approval): Promise<void> {
   const options = [LABEL_SESSION, ...(approval.scopes.includes('always') ? [LABEL_ALWAYS] : []), LABEL_DENY]
   const risk = approval.riskLevel === 'high' && approval.warning ? `\n${WARNING_TITLE}: ${approval.warning}` : ''
   const started = Date.now()
@@ -164,7 +165,7 @@ async function viaAsk($: any, approval: Approval): Promise<Answer> {
   try {
     const answer: string = await $.ui.ask(`${approval.message}${risk}`, { options, header: ASK_HEADER })
     choice = 'deny'
-    // A person cannot answer in under a few hundred milliseconds; anything faster came from a hook.
+    // A person cannot answer in under a few hundred milliseconds; anything faster was not a person.
     if (Date.now() - started >= 400) {
       if (answer === LABEL_SESSION) choice = 'session'
       else if (answer === LABEL_ALWAYS && options.includes(LABEL_ALWAYS)) choice = 'always'
@@ -172,5 +173,5 @@ async function viaAsk($: any, approval: Approval): Promise<Answer> {
   } catch {
     // Dismissed.
   }
-  return { choice, isRecorded: false }
+  await record($, approval.id, choice)
 }

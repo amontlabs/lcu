@@ -103,28 +103,39 @@ test('deny settles as decline and cancel as cancel; parallel requests are claime
   assert.equal(broker.settle(second), 'cancel');
 });
 
-test('wait resolves when the choice is recorded, at once if it already was, and with none when the request ends', async () => {
+test('awaitChoice waits for a claimed record\'s choice, and gives up when the request ends or aborts', async () => {
   const broker = createApprovalBroker();
   const message = 'Allow Computer Use to use "Zed"?';
+  const unclaimed = broker.open(params());
+  assert.equal(broker.isClaimed(unclaimed), false);
+  assert.equal(await broker.awaitChoice(unclaimed), undefined, 'no mod claimed it');
+  assert.equal(await broker.awaitChoice('other'), undefined);
+  broker.settle(unclaimed);
+
   const first = broker.open(params());
   broker.describe(message, MOD);
-  assert.equal((await broker.wait(first, 'toolu_01real')).ok, false, 'not a mod call');
-  assert.equal((await broker.wait('other', MOD)).ok, false);
-  const waiting = broker.wait(first, MOD);
+  assert.equal(broker.isClaimed(first), true);
+  const waiting = broker.awaitChoice(first);
   broker.choose(first, 'deny', MOD);
-  assert.deepEqual(await waiting, { ok: true, choice: 'deny' });
-  assert.deepEqual(await broker.wait(first, MOD), { ok: true, choice: 'deny' });
+  assert.equal(await waiting, 'decline');
+  assert.equal(broker.size, 0, 'settled with the choice');
+
+  const recorded = broker.open(params());
+  broker.describe(message, MOD);
+  broker.choose(recorded, 'session', MOD);
+  assert.equal(await broker.awaitChoice(recorded), 'session', 'already recorded');
 
   const second = broker.open(params());
   broker.describe(message, MOD);
-  const ended = broker.wait(second, MOD);
+  const ended = broker.awaitChoice(second);
   broker.settle(second);
-  assert.deepEqual(await ended, { ok: true, choice: 'none' });
+  assert.equal(await ended, undefined);
 
   const third = broker.open(params());
   broker.describe(message, MOD);
   const controller = new AbortController();
-  const aborted = broker.wait(third, MOD, controller.signal);
+  const aborted = broker.awaitChoice(third, controller.signal);
   controller.abort();
-  assert.deepEqual(await aborted, { ok: true, choice: 'none' });
+  assert.equal(await aborted, undefined);
+  assert.equal(broker.size, 0);
 });

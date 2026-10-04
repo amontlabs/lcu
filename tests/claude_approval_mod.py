@@ -46,7 +46,7 @@ SCENARIOS = {
     'pane-deny': scenario(keys='3', answer={'action': 'decline'}),
     'pane-dismiss': scenario(keys=['ESC'], answer={'action': 'cancel'}),
     'pane-session-only': scenario(code='approval-native-session-only', keys='1', answer=SESSION),
-    # The hook's own time is limited to 10 s; waiting for the person must not count against it.
+    # The person takes longer than a hook's 10 s: no hook waits, so the answer still arrives.
     'pane-slow': scenario(keys='1', answer=SESSION, delay=15),
     # The terminal cannot seat an unasked pane below 144 columns: the question dialog is used.
     'ask-narrow': scenario(columns=100, keys=['ENTER'], answer=SESSION, surface='ask'),
