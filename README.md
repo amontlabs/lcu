@@ -26,9 +26,23 @@ Check my OS, architecture, and prerequisites, then guide me through any required
 - **Chrome, when enabled:** read and control tabs through the official extension, with site approval.
 - **In your harness:** adapters are available for Pi, Codex CLI, and Claude Code, with experimental Oh My Pi and Hermes integrations. See [setup and verification limits](docs/ADAPTERS.md).
 
-## Choose which apps your agent may control (macOS)
+## Approve apps from Claude, natively
 
-Computer use asks before it touches an app, and "Always allow" is remembered. Review and change that list without opening the Codex app, behind Touch ID:
+The first time an agent controls an app (Zed, Notes, Safari), the computer-use runtime asks you to allow it. The Claude app's Code tab used to fail that request with "Computer Use was not approved". `lcu setup --agent claude-code` now installs a small Claude Code mod, `lcu-approve`, that shows the question as a native **Computer use approval** pane in the Claude app, and in the terminal.
+
+<p align="center"><img src="docs/assets/approval-pane.png" width="640" alt="The Computer use approval pane in the Claude app"></p>
+
+- **Allow this conversation** for the current chat only.
+- **Always allow** to remember the app (offered only when the runtime allows it).
+- **Deny** to refuse.
+
+Only you can answer: the model cannot see, press or fake the pane. High-risk apps show the runtime's own warning, and the app hosting the agent is never approved. Needs the Claude app or Claude Code 2.1.287+. [How it works](docs/ADAPTERS.md#native-app-approvals-in-claude-code-and-the-claude-app), [how to remove it](docs/INSTALLATION.md#uninstall).
+
+In the Claude app, register LCU through Claude Code (`lcu setup --agent claude-code`), not through Settings > Connectors; see [installation](docs/INSTALLATION.md#native-approvals-in-the-claude-app).
+
+## Manage approved apps with Touch ID
+
+"Always allow" is remembered. Review and change that list from the terminal (macOS), without opening the Codex app:
 
 ```sh
 lcu apps                 # what is always allowed today
@@ -36,14 +50,18 @@ lcu apps allow Zed       # Touch ID (or your password), then Zed is allowed
 lcu apps revoke Zed      # take it back
 ```
 
-<!-- TODO: add a screenshot or GIF of the Touch ID prompt here (docs/assets/lcu-apps-touch-id.gif) -->
+<p align="center"><img src="docs/assets/lcu-apps-touch-id.png" width="480" alt="The Touch ID prompt for lcu apps allow"></p>
 
 - Pass an app name, a bundle identifier or an `.app` path.
-- Listing is free; `allow` and `revoke` need you at the machine, with Touch ID or your login password.
+- Listing is free; `allow` and `revoke` need you at the machine, so an agent running them is stopped by the prompt.
 - Running sessions pick the change up immediately.
-- Browsers, password managers and other high-risk apps come with a warning, and apps Computer Use refuses outright (Terminal, iTerm2) are declined.
+- Browsers, password managers and other high-risk apps come with a warning; apps Computer Use refuses outright (Terminal, iTerm2) are declined.
 
-Details: [Manage approved apps](docs/INSTALLATION.md#manage-approved-apps).
+[Details](docs/INSTALLATION.md#manage-approved-apps).
+
+## Permissions
+
+Your harness decides whether the agent may call LCU's tools (Claude's "don't ask again" on the first card, Codex's tool approval, and so on). LCU decides, per app, whether that agent may touch it, in every permission mode. `lcu setup --approval auto` is optional and meant for unattended machines (VMs, CI): it pre-allows LCU's two model tools in the harness, and leaves per-app approval in force. See [approval mode](docs/INSTALLATION.md#approval-mode).
 
 ## Requirements
 
@@ -92,20 +110,6 @@ Pass `--audio` when setting up a maintained harness, for example:
 The installer does not add `lcu` to your `PATH`; run its installed path (`/opt/lcu/current/bin/lcu` on Linux). See [the `lcu` command](docs/INSTALLATION.md#the-lcu-command).
 
 This enables the installed original runtime's optional computer-audio recording API and its original approval flow. LCU does not add audio-specific instructions, and a saved recording is not audio delivered to the model. See the [audio opt-in verification record](docs/verification/audio-opt-in-2026-09-27.md).
-
-## Native approvals in the Claude app
-
-The first time an agent controls an app (Zed, Notes, Safari), the computer-use runtime asks you to allow it. Claude Code in a terminal shows that question, but the Claude app's Code tab and the VS Code extension cannot, so the request used to fail with "Computer Use was not approved".
-
-`lcu setup --agent claude-code` now installs a small Claude Code mod, `lcu-approve`, that shows the same question as a native approval in the Claude app and in the terminal:
-
-<!-- TODO: screenshot of the "Computer use approval" pane in the Claude app (docs/assets/claude-app-approval.png) -->
-
-- **Allow this conversation** for the current chat only.
-- **Always allow** to remember the app (offered only when the runtime allows it).
-- **Deny** to refuse.
-
-High-risk apps show the runtime's own warning. Only you can answer: the model cannot see, press or fake the approval, and a terminal narrower than 144 columns gets the same choices as a question dialog. Without the mod nothing changes. It needs the Claude app, or Claude Code 2.1.287 or later; see [how it works](docs/ADAPTERS.md#native-app-approvals-in-claude-code-and-the-claude-app) and [how to remove it](docs/INSTALLATION.md#uninstall).
 
 ## Pi commands
 

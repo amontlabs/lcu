@@ -661,7 +661,7 @@ def parser():
     p.add_argument('--audio', action='store_true', help='Opt into the original optional computer-audio recording API')
     p.add_argument('--no-audio', action='store_true', help='Disable computer-audio recording, overriding a saved opt-in')
     p.add_argument('--approval', choices=['ask', 'auto'],
-                   help='auto adds only LCU\'s own harness approval entries so its tools run without a per-call prompt; '
+                   help='optional, for unattended machines: auto adds only LCU\'s own harness approval entries so its tools run without a per-call prompt (per-app approval stays); '
                         'ask removes exactly those entries and leaves harness defaults (the default, kept from the previous setup)')
     p.add_argument('--session', choices=['discover', 'direct'], default='direct' if sys.platform in ('darwin', 'win32') else 'discover', help='discover attaches through lcu-session (XFCE); direct uses the current desktop account')
     p.add_argument('--allow-missing', action='store_true',

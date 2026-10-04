@@ -171,7 +171,7 @@ Native-app approval requests come from the original runtime only on macOS and Wi
 
 The supported native-app and external Chrome flows have not produced generic schema-field or URL-mode approval requests. Those unobserved shapes are not baseline parity failures. Current tests preserve the original message, origin, and requested native-app persistence scope; a host that cannot present a request fails closed.
 
-Harness approval of LCU's own tools is separate from those requests and is the harness's decision by default. The optional [approval mode](INSTALLATION.md#approval-mode) (`lcu setup --approval auto|ask`) adds or removes only LCU's entries, reversibly. Every entry names the model-visible tools `js` and `js_reset` exactly, never the whole `lcu` server, so a tool LCU adds later (including one annotated as requiring the user) is not allowed by an earlier `auto`; host-only tools are never allowed:
+Harness approval of LCU's own tools is separate from those requests and is the harness's decision by default. Per-app approval holds in every harness permission mode, including `--approval auto`, which is optional and meant for unattended machines. The optional [approval mode](INSTALLATION.md#approval-mode) (`lcu setup --approval auto|ask`) adds or removes only LCU's entries, reversibly. Every entry names the model-visible tools `js` and `js_reset` exactly, never the whole `lcu` server, so a tool LCU adds later (including one annotated as requiring the user) is not allowed by an earlier `auto`; host-only tools are never allowed:
 
 | Harness | Default | `auto` entry |
 | --- | --- | --- |
