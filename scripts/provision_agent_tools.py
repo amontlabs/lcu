@@ -88,6 +88,8 @@ def provision(release, source, *, target='linux', mac_node=None, adapters_source
                 for filename in ('package.json', 'package-lock.json', 'client.mjs', 'claude.mjs',
                                  'audio-files.mjs', 'codex.mjs'):
                     shutil.copy2(adapters_source / filename, adapters / filename)
+                shutil.copytree(adapters_source / 'claude-mod', adapters / 'claude-mod',
+                                ignore=shutil.ignore_patterns('node_modules', 'types', 'tests', '.DS_Store'))
                 (adapters / 'pi').mkdir()
                 shutil.copy2(adapters_source / 'pi/index.ts', adapters / 'pi/index.ts')
                 (adapters / 'hermes').mkdir()

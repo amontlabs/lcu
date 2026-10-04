@@ -1,6 +1,7 @@
 """Windows setup selects the registered app's exact platform instructions."""
 
 import json
+import shutil
 import os
 from pathlib import Path
 import tempfile
@@ -69,6 +70,7 @@ class WindowsSetupTests(unittest.TestCase):
             adapter = base / 'adapters/claude.mjs'
             adapter.parent.mkdir()
             adapter.write_text('fixture relay')
+            shutil.copytree(Path(__file__).resolve().parents[1] / 'adapters/claude-mod', adapter.parent / 'claude-mod')
             with mock.patch.object(setup, 'installer_paths', return_value=(node, base / 'skills.mjs', base / 'mcp.mjs')), \
                  mock.patch.object(setup, 'installed_app_resources', return_value=base / 'resources'), \
                  mock.patch.object(setup, 'host_policy', return_value={}), \

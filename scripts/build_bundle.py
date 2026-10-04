@@ -92,7 +92,7 @@ def build(output, package=None, *, target='linux', app=None):
         modules = ('__init__.py', 'app_layout.py', 'asar.py', 'runtime.py', 'setup.py',
                          'setup_clients.py', 'codex_hooks.py', 'app_server.py', 'browser.py', 'doctor.py',
                          'maintenance.py', 'native_host.py', 'claude_visibility.py', 'harness_setup.py',
-                         'tested.py', 'status.py', 'approval.py', 'interpreter.py')
+                         'tested.py', 'status.py', 'approval.py', 'interpreter.py', 'claude_mod.py')
         if target != 'windows':
             modules += ('session.py', 'platforms.py')
         for filename in modules:
@@ -135,7 +135,7 @@ def build(output, package=None, *, target='linux', app=None):
         provision_agents(release, SOURCE / 'scripts/agent-tools', target=target,
                          mac_node=selected_node, adapters_source=SOURCE / 'adapters')
         # The installer selects and validates the matching app before registration.
-        imports = 'import lcu.runtime, lcu.setup, lcu.browser, lcu.doctor, lcu.codex_hooks, lcu.maintenance, lcu.tested, lcu.status, lcu.approval'
+        imports = 'import lcu.runtime, lcu.setup, lcu.browser, lcu.doctor, lcu.codex_hooks, lcu.maintenance, lcu.tested, lcu.status, lcu.approval, lcu.claude_mod'
         if target != 'windows':
             imports += ', lcu.session'
         subprocess.run([sys.executable, '-B', '-c', imports],
