@@ -8,10 +8,14 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
+  APPROVAL_TIMEOUT_MS,
   callTimeout,
+  callWithDeadline,
+  createApprovalGate,
   isMainModule,
   nativeAppApprovalOptions,
   nativeAppApprovalResponse,
+  relayElicitation,
   TURN_END_TIMEOUT_MS,
 } from './client.mjs';
 
@@ -105,6 +109,7 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
   const cleanupInFlight = new Map();
   const cleanedTurns = new Set();
   let server;
+  const approvals = createApprovalGate();
   let connected = false;
   let shutdown;
   let serverClose;
@@ -235,10 +240,11 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
       });
       metadata[TURN_CONTEXT_META] = turnMetadata;
       try {
-        return await upstream.callTool({ name, arguments: toolArgs, _meta: metadata }, undefined, {
-          signal: extra.signal,
-          timeout: callTimeout(name, toolArgs),
-        });
+        return await callWithDeadline(approvals, callTimeout(name, toolArgs), extra.signal,
+          signal => upstream.callTool({ name, arguments: toolArgs, _meta: metadata }, undefined, {
+            signal,
+            timeout: APPROVAL_TIMEOUT_MS,
+          }));
       } finally {
         // Never let cleanup mask the original tool result or abort error.
         if (extra.signal.aborted) {
@@ -255,10 +261,8 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
       const params = request.params;
       const approval = nativeAppApprovalOptions(params);
       try {
-        const response = await server.elicitInput(
-          approval ? nativeForm(params, approval) : params,
-          { signal: extra.signal },
-        );
+        const response = await relayElicitation(
+          server, approvals, approval ? nativeForm(params, approval) : params, extra.signal);
         if (!approval) return response;
         if (response.action !== 'accept') return nativeAppApprovalResponse(params, response.action);
         return nativeAppApprovalResponse(params, response.content?.choice);

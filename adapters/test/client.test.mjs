@@ -4,9 +4,13 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
-  createCuaClient, nativeAppApprovalOptions, nativeAppApprovalResponse,
-  sendControlRequest,
+  callWithDeadline, createApprovalGate, createCuaClient, nativeAppApprovalOptions,
+  nativeAppApprovalResponse, relayElicitation, sendControlRequest,
 } from '../client.mjs';
 
 const command = [process.execPath, new URL('./mcp-fixture.mjs', import.meta.url).pathname];
@@ -239,4 +243,81 @@ test('native app approval classifier leaves unrelated or unsupported elicitation
   assert.deepEqual(nativeAppApprovalOptions(malformedScopes).choices.map(choice => choice.value),
     ['once', 'decline']);
   assert.deepEqual(nativeAppApprovalResponse(malformedScopes, 'always'), { action: 'cancel' });
+});
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
+
+async function elicitationPair(answer) {
+  const server = new Server({ name: 'relay', version: '1' }, { capabilities: {} });
+  const client = new Client({ name: 'host', version: '1' }, { capabilities: { elicitation: {} } });
+  client.setRequestHandler(ElicitRequestSchema, answer);
+  const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+  return { server, close: () => client.close() };
+}
+
+test('a forwarded approval outlives the default 60 s request timeout', async t => {
+  let answer;
+  const answered = new Promise(resolve => { answer = resolve; });
+  const { server, close } = await elicitationPair(() => answered);
+  try {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const pending = relayElicitation(server, createApprovalGate(), nativeApproval(), undefined);
+    await flush();
+    t.mock.timers.tick(10 * 60_000);
+    answer({ action: 'accept', content: {} });
+    assert.deepEqual(await pending, { action: 'accept', content: {} });
+  } finally { await close(); }
+});
+
+test('an abandoned forwarded approval is cancelled when its signal aborts', async t => {
+  const { server, close } = await elicitationPair(() => new Promise(() => {}));
+  try {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const controller = new AbortController();
+    const pending = relayElicitation(server, createApprovalGate(), nativeApproval(), controller.signal);
+    await flush();
+    controller.abort(new Error('interrupted'));
+    await assert.rejects(pending, /interrupted/);
+  } finally { await close(); }
+});
+
+test('a tool-call deadline stands still while an approval is pending and still expires afterwards', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const gate = createApprovalGate();
+  let finish;
+  const call = callWithDeadline(gate, 120_000, undefined, signal => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    finish = resolve;
+  }));
+  t.mock.timers.tick(100_000);
+  let decide;
+  const approval = gate.track(() => new Promise(resolve => { decide = resolve; }));
+  t.mock.timers.tick(10 * 60_000);
+  decide();
+  await approval;
+  t.mock.timers.tick(19_999);
+  finish('done');
+  assert.equal(await call, 'done');
+
+  const hung = callWithDeadline(gate, 120_000, undefined, signal => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  }));
+  t.mock.timers.tick(120_000);
+  await assert.rejects(hung, /Request timed out/);
+});
+
+test('aborting a tool call cancels the approval it is waiting on', async () => {
+  let seen;
+  const bridge = createCuaClient({ command, onElicitation: params => new Promise(resolve => {
+    seen = resolve;
+  }) });
+  const controller = new AbortController();
+  try {
+    await bridge.connect();
+    const call = bridge.call('js', { code: 'approval' }, { sessionId: 's', turnId: 't', signal: controller.signal });
+    while (!seen) await flush();
+    controller.abort(new Error('interrupted'));
+    await assert.rejects(call, /interrupted/);
+  } finally { await bridge.close(); }
 });
