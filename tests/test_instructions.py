@@ -1,4 +1,5 @@
 import io
+import shutil
 import json
 import os
 from contextlib import nullcontext
@@ -202,6 +203,7 @@ class InstalledInstructionTests(unittest.TestCase):
         adapter = self.release / 'adapters/claude.mjs'
         adapter.parent.mkdir(parents=True)
         adapter.write_text('fixture relay')
+        shutil.copytree(Path(__file__).resolve().parents[1] / 'adapters/claude-mod', adapter.parent / 'claude-mod')
         project = self.root / 'project'
         project.mkdir()
         user_settings = self.home / '.claude/settings.json'
@@ -276,6 +278,9 @@ class InstalledInstructionTests(unittest.TestCase):
         register('project', project_command)
         self.assertEqual(project_settings.read_bytes(), configured_project)
         self.assertEqual(user_settings.read_bytes(), configured_user)
+        # The approval mod is a plugin folder in the skills directory of each selected scope.
+        self.assertTrue((self.home / '.claude/skills/lcu-approve/.claude-plugin/plugin.json').is_file())
+        self.assertTrue((project / '.claude/skills/lcu-approve/hooks/register.tsx').is_file())
 
     def test_codex_setup_wraps_original_lcu_command_and_retains_host_policy(self):
         original_codex = self.resources / 'codex-cli/bin/codex'

@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema, ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { randomUUID } from 'node:crypto';
 import { chmodSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -189,6 +190,109 @@ export function nativeAppApprovalResponse(params, value) {
     return { action: 'accept', content: {}, _meta: { persist: value } };
   }
   return { action: 'cancel' };
+}
+
+/** How long a recorded mod choice stays valid; the host's answer follows it within milliseconds. */
+export const APPROVAL_CHOICE_TTL_MS = 30_000;
+
+/** Tool-use ids the Claude host assigns to calls a mod makes (the model's ids come from the API). */
+export const MOD_TOOL_USE_PREFIX = 'toolu_plugin_';
+
+const MOD_CHOICES = new Set(['session', 'always', 'deny', 'cancel']);
+
+/**
+ * Pending native-app approvals and the human choices a host mod records for them.
+ * A record exists only while the runtime's elicitation is open. A choice is bound
+ * to its record id, is accepted once, and only from a mod-originated call.
+ */
+export function createApprovalBroker({ now = Date.now, ttlMs = APPROVAL_CHOICE_TTL_MS } = {}) {
+  const records = new Map();
+  const fail = reason => ({ ok: false, error: reason });
+
+  return {
+    get size() { return records.size; },
+    /** Register an open native-app approval; returns its id. */
+    open(params) {
+      const approval = nativeAppApprovalOptions(params);
+      if (!approval) return undefined;
+      const meta = params._meta;
+      const display = Array.isArray(meta.tool_params_display)
+        ? meta.tool_params_display.find(item => item?.name === 'app') : undefined;
+      const warning = [meta.warningSubtitle, meta.subtitle].find(
+        value => typeof value === 'string' && value.trim());
+      const id = randomUUID();
+      records.set(id, {
+        id,
+        app: meta.tool_params.app,
+        label: typeof display?.value === 'string' && display.value ? display.value : meta.tool_params.app,
+        scopes: approval.choices.map(choice => choice.value).filter(value => value === 'session' || value === 'always'),
+        riskLevel: typeof meta.riskLevel === 'string' ? meta.riskLevel : 'low',
+        ...(warning ? { warning } : {}),
+        message: params.message,
+        createdAt: now(),
+        claimedAt: undefined,
+        choice: undefined,
+        waiters: [],
+      });
+      return id;
+    },
+    /** The mod asks for the display data of the oldest unclaimed record with this exact message. */
+    describe(message, toolUseId) {
+      if (typeof toolUseId !== 'string' || !toolUseId.startsWith(MOD_TOOL_USE_PREFIX)) {
+        return fail('approval_request accepts only host-mod calls');
+      }
+      if (typeof message !== 'string' || !message) return fail('approval_request requires the elicitation message');
+      const record = [...records.values()].find(item => item.message === message && item.claimedAt === undefined);
+      if (!record) return fail('No pending native-app approval matches this message');
+      record.claimedAt = now();
+      const { id, app, label, scopes, riskLevel, warning } = record;
+      return { ok: true, approval: { id, message: record.message, app, label, scopes, riskLevel, ...(warning ? { warning } : {}) } };
+    },
+    /** Record the human's choice for one pending record. */
+    choose(id, choice, toolUseId) {
+      if (typeof toolUseId !== 'string' || !toolUseId.startsWith(MOD_TOOL_USE_PREFIX)) {
+        return fail('approval_choice accepts only host-mod calls');
+      }
+      const record = typeof id === 'string' ? records.get(id) : undefined;
+      if (!record || record.claimedAt === undefined) return fail('Unknown approval id');
+      if (record.choice !== undefined) return fail('This approval already has a choice');
+      if (!MOD_CHOICES.has(choice)) return fail('Unknown approval choice');
+      if (choice === 'always' && !record.scopes.includes('always')) {
+        return fail('Always allow was not offered for this app');
+      }
+      record.choice = choice === 'session' && !record.scopes.includes('session') ? 'once' : choice;
+      record.chosenAt = now();
+      record.chosenInput = choice;
+      for (const waiter of record.waiters.splice(0)) waiter(choice);
+      return { ok: true };
+    },
+    /**
+     * Resolve with the recorded choice once there is one (immediately if already recorded), or
+     * with 'none' when the request ends or `signal` aborts without a choice. A mod waits here
+     * because a call in flight does not count against its hook's time limit.
+     */
+    wait(id, toolUseId, signal) {
+      if (typeof toolUseId !== 'string' || !toolUseId.startsWith(MOD_TOOL_USE_PREFIX)) {
+        return Promise.resolve(fail('approval_wait accepts only host-mod calls'));
+      }
+      const record = typeof id === 'string' ? records.get(id) : undefined;
+      if (!record || record.claimedAt === undefined) return Promise.resolve(fail('Unknown approval id'));
+      if (record.choice !== undefined) return Promise.resolve({ ok: true, choice: record.chosenInput });
+      return new Promise(resolve => {
+        const finish = choice => resolve({ ok: true, choice });
+        record.waiters.push(finish);
+        signal?.addEventListener('abort', () => finish('none'), { once: true });
+      });
+    },
+    /** Remove the record and return its still-valid recorded choice, if any. */
+    settle(id) {
+      const record = records.get(id);
+      records.delete(id);
+      for (const waiter of record?.waiters.splice(0) ?? []) waiter('none');
+      if (!record || record.choice === undefined || now() - record.chosenAt > ttlMs) return undefined;
+      return record.choice === 'deny' ? 'decline' : record.choice;
+    },
+  };
 }
 
 function originApproval(params, allowedOrigins) {

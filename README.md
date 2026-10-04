@@ -93,6 +93,20 @@ The installer does not add `lcu` to your `PATH`; run its installed path (`/opt/l
 
 This enables the installed original runtime's optional computer-audio recording API and its original approval flow. LCU does not add audio-specific instructions, and a saved recording is not audio delivered to the model. See the [audio opt-in verification record](docs/verification/audio-opt-in-2026-09-27.md).
 
+## Native approvals in the Claude app
+
+The first time an agent controls an app (Zed, Notes, Safari), the computer-use runtime asks you to allow it. Claude Code in a terminal shows that question, but the Claude app's Code tab and the VS Code extension cannot, so the request used to fail with "Computer Use was not approved".
+
+`lcu setup --agent claude-code` now installs a small Claude Code mod, `lcu-approve`, that shows the same question as a native approval in the Claude app and in the terminal:
+
+<!-- TODO: screenshot of the "Computer use approval" pane in the Claude app (docs/assets/claude-app-approval.png) -->
+
+- **Allow this conversation** for the current chat only.
+- **Always allow** to remember the app (offered only when the runtime allows it).
+- **Deny** to refuse.
+
+High-risk apps show the runtime's own warning. Only you can answer: the model cannot see, press or fake the approval, and a terminal narrower than 144 columns gets the same choices as a question dialog. Without the mod nothing changes. It needs the Claude app, or Claude Code 2.1.287 or later; see [how it works](docs/ADAPTERS.md#native-app-approvals-in-claude-code-and-the-claude-app) and [how to remove it](docs/INSTALLATION.md#uninstall).
+
 ## Pi commands
 
 In interactive Pi, `/lcu stop` requests original Computer Use Stop for a selected app during the active LCU turn (macOS only). `/lcu pick` selects an original app or browser target and appends it to the editor draft while Pi is idle; review and submit the draft yourself. See [adapter command behavior and limits](docs/ADAPTERS.md#pi-extension).

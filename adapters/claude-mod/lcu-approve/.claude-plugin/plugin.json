@@ -1,0 +1,6 @@
+{
+  "name": "lcu-approve",
+  "version": "0.1.0",
+  "description": "Native per-app approval for LCU computer use in the Claude app and Claude Code: Allow this conversation, Always allow, Deny.",
+  "author": { "name": "LCU" }
+}

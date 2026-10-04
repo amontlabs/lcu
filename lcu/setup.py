@@ -558,6 +558,9 @@ def configure(names, home, command, tools_root, release_root, *, scope='user', p
                 elif name == 'claude-code' and phase == 'MCP':
                     from .claude_visibility import install as hide_host_only_tools
                     hide_host_only_tools(home, project=project if scope == 'project' else None)
+                    from .claude_mod import install as install_approval_mod
+                    mod = install_approval_mod(home, release_root, project=project if scope == 'project' else None)
+                    print(f'{client.label}: approval mod installed at {mod}.')
                 print(f'{client.label}: {phase} registered.')
                 if phase == name_final_phase(name):
                     apply_approval(name, client, codex_plan)

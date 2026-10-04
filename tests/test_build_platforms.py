@@ -62,6 +62,7 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertIn(prefix + 'lcu/interpreter.py', names)
                 self.assertIn(prefix + 'lcu/apps.py', names)
                 self.assertIn(prefix + 'bin/lcu-owner-auth', names)
+                self.assertIn(prefix + 'lcu/claude_mod.py', names)
                 self.assertIn(prefix + 'lcu/doctor.py', names)
                 self.assertIn(prefix + 'lcu/app_layout.py', names)
                 self.assertIn(prefix + 'lcu/asar.py', names)
@@ -97,6 +98,7 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/interpreter.py', names)
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/apps.py', names)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/bin/lcu-owner-auth', names)
+                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/claude_mod.py', names)
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/linux_sky_service.mjs', names)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/lcu/macos_sky_service.mjs', names)
 
@@ -167,6 +169,10 @@ class BuildPlatformTests(unittest.TestCase):
             self.assertTrue((release / 'adapters/audio-files.mjs').is_file())
             self.assertTrue((release / 'adapters/codex.mjs').is_file())
             self.assertTrue((release / 'adapters/pi/index.ts').is_file())
+            mod = release / 'adapters/claude-mod/lcu-approve'
+            for name in ('.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.tsx'):
+                self.assertTrue((mod / name).is_file(), name)
+            self.assertFalse((mod / 'tests').exists())
             for name in ('plugin.yaml', '__init__.py', 'bridge.mjs'):
                 self.assertTrue((release / 'adapters/hermes' / name).is_file())
             self.assertFalse((release / 'adapters/hermes/lcu-config.json').exists())
