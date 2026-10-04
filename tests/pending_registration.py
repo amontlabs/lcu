@@ -32,9 +32,11 @@ assert (state['approval'], state['pending']) == ('auto', ['pi', 'omp', 'hermes']
 assert not settings.exists(), 'Pi must not be registered before it is installed'
 # Codex and Claude Code register without their CLIs, with the approval mode applied.
 registered = tomllib.loads((home / '.codex/config.toml').read_text())['mcp_servers']['lcu']
-assert registered['default_tools_approval_mode'] == 'approve', registered
+assert registered['tools']['js']['approval_mode'] == 'approve', registered
+assert 'default_tools_approval_mode' not in registered, registered
 assert 'lcu' in json.loads((home / '.claude.json').read_text())['mcpServers']
-assert 'mcp__lcu' in json.loads((home / '.claude/settings.json').read_text())['permissions']['allow']
+allowed = json.loads((home / '.claude/settings.json').read_text())['permissions']['allow']
+assert 'mcp__lcu__js' in allowed and 'mcp__lcu__js_reset' in allowed and 'mcp__lcu' not in allowed, allowed
 status = json.loads(lcu('status', '--json').stdout)
 assert status['pending'] == ['pi', 'omp', 'hermes'], status
 

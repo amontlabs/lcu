@@ -59,7 +59,7 @@ function approvalRequest(code) {
       connector_id: 'computer-use',
       persist: code === 'approval-native-session-only' ? ['session'] : ['session', 'always'],
       tool_name: 'get_app_state',
-      tool_params: { app: 'dev.lcu.NativeFixture.generated' },
+      tool_params: { app: code === 'approval-native-host' ? 'com.anthropic.claudefordesktop' : 'dev.lcu.NativeFixture.generated' },
       fixtureOpaque: { keep: true },
     } : { fixture: 'unrelated-form', opaque: { id: 39 } },
   };

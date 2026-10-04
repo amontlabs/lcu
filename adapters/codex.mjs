@@ -18,6 +18,7 @@ import {
   isMainModule,
   relayElicitation,
 } from './client.mjs';
+import { declineAgentHostApp } from './host-guard.mjs';
 
 const HOST_ONLY_TOOLS = new Set(['js_add_node_module_dir', 'turn_ended']);
 
@@ -50,6 +51,8 @@ export async function runCodexBridge({ command, args = [], cwd, env } = {}) {
   const progressHandlers = new Map();
 
   upstream.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
+    const refused = declineAgentHostApp(request.params);
+    if (refused) return refused;
     try {
       return await relayElicitation(server, approvals, request.params, extra.signal);
     } catch {

@@ -5,7 +5,7 @@ account) calls the `js` tool of an MCP server named `lcu` that is the repository
 SDK fixture. The server table is written exactly as `lcu setup` registers it: the
 same keys that `--approval ask` and `--approval auto` produce. Under approval
 policy `never` the CLI cannot ask, so a tool call that needs approval does not
-run. Expected: no tool call without `default_tools_approval_mode`, one with it.
+run. Expected: no tool call without the per-tool `approval_mode`, one with it.
 
 Run it on a host with the Codex CLI under test and `npm ci --prefix adapters`:
     python3 tests/codex_approval_mode.py --cli "$(command -v codex)"
@@ -40,7 +40,14 @@ def write_config(config, node, port, log, mode):
         'startup_timeout_sec = 20',
     ]
     # The keys setup registers for this mode.
-    lines += [f'{key} = {quote(value)}' for key, value in approval.codex_policy(mode).items()]
+    with tempfile.TemporaryDirectory() as scratch_dir:
+        scratch = str(Path(scratch_dir).resolve())
+        policy = approval.codex_plan(mode, scratch, scope='user', project=scratch,
+                                     env={'HOME': scratch})['policy']
+    lines += [f'{key} = {quote(value)}' for key, value in policy.items() if key != 'tools']
+    for tool, entry in policy.get('tools', {}).items():
+        lines += ['', f'[mcp_servers.lcu.tools.{tool}]']
+        lines += [f'{key} = {quote(value)}' for key, value in entry.items()]
     lines += ['', '[mcp_servers.lcu.env]', f'LCU_FIXTURE_LOG = {quote(log)}', '',
               '[model_providers.fixture]', 'name = "Local approval fixture"',
               f'base_url = "http://127.0.0.1:{port}/v1"', 'wire_api = "responses"',

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { pathToFileURL } from 'node:url';
+import { declineAgentHostApp } from './host-guard.mjs';
 
 const MODEL_TOOLS = new Set(['js', 'js_reset']);
 
@@ -246,6 +247,8 @@ export function createCuaClient({ command, cwd, env, onElicitation, allowedOrigi
   const callSignals = new Set();
   client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
     const params = request.params;
+    const refused = declineAgentHostApp(params);
+    if (refused) return refused;
     if (originApproval(params, approved)) return { action: 'accept', content: {} };
     if (typeof onElicitation !== 'function') return { action: 'cancel' };
     const signal = AbortSignal.any([extra.signal, ...callSignals]);

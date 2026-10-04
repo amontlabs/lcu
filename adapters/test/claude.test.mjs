@@ -17,6 +17,7 @@ function installedCurrentEntryPoint(directory) {
   mkdirSync(releaseAdapters, { recursive: true });
   copyFileSync(relay, join(releaseAdapters, 'claude.mjs'));
   copyFileSync(clientModule, join(releaseAdapters, 'client.mjs'));
+  copyFileSync(fileURLToPath(new URL('../host-guard.mjs', import.meta.url)), join(releaseAdapters, 'host-guard.mjs'));
   symlinkSync(join(dirname(relay), 'node_modules'), join(releaseAdapters, 'node_modules'), 'dir');
   symlinkSync(join(directory, 'releases', '0.3.0-test'), join(directory, 'current'), 'dir');
   return join(directory, 'current', 'adapters', 'claude.mjs');
@@ -508,5 +509,20 @@ test('Claude relay interrupts an active turn on cancel and drains cleanup before
       entry.args.session_id === 'close-session').length, 1);
   } finally {
     await closed.close();
+  }
+});
+
+test('Claude relay declines an approval for an agent host app without asking the host', async () => {
+  const bridge = await connectRelay();
+  try {
+    const before = bridge.elicitationRequests.length;
+    bridge.respondToNextElicitation({ action: 'accept', content: { choice: 'always' } });
+    const result = await callWithContext(bridge.client, 'js', { code: 'approval-native-host' }, {
+      toolUseId: 'approval-agent-host',
+    });
+    assert.deepEqual(JSON.parse(result.content[0].text), { action: 'decline' });
+    assert.equal(bridge.elicitationRequests.length, before);
+  } finally {
+    await bridge.close();
   }
 });

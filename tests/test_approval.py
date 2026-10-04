@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -41,7 +42,7 @@ class ClaudeApprovalTests(unittest.TestCase):
         self.write(self.user, original)
         self.assertIn('added', approval.apply_claude('auto', self.home))
         added = self.read(self.user)
-        self.assertEqual(added['permissions']['allow'], ['Read', 'mcp__lcu'])
+        self.assertEqual(added['permissions']['allow'], ['Read', 'mcp__lcu__js', 'mcp__lcu__js_reset'])
         self.assertEqual({k: v for k, v in added.items() if k != 'permissions'},
                          {k: v for k, v in original.items() if k != 'permissions'})
         self.assertEqual(added['permissions']['deny'], ['Bash(rm *)'])
@@ -53,7 +54,7 @@ class ClaudeApprovalTests(unittest.TestCase):
         self.write(self.user, {'permissions': {'allow': ['Read']}})
         before = self.user.read_bytes()
         approval.apply_claude('auto', self.home, project=self.project)
-        self.assertEqual(self.read(self.local), {'permissions': {'allow': ['mcp__lcu']}})
+        self.assertEqual(self.read(self.local), {'permissions': {'allow': ['mcp__lcu__js', 'mcp__lcu__js_reset']}})
         self.assertFalse((self.project / '.claude/settings.json').exists())
         self.assertEqual(self.user.read_bytes(), before)
         approval.apply_claude('ask', self.home, project=self.project)
@@ -64,7 +65,7 @@ class ClaudeApprovalTests(unittest.TestCase):
         first = self.user.read_bytes()
         self.assertTrue(approval.apply_claude('auto', self.home).startswith('unchanged'))
         self.assertEqual(self.user.read_bytes(), first)
-        self.assertEqual(self.read(self.user)['permissions']['allow'], ['mcp__lcu'])
+        self.assertEqual(self.read(self.user)['permissions']['allow'], ['mcp__lcu__js', 'mcp__lcu__js_reset'])
 
     def test_ask_without_a_rule_or_file_writes_nothing(self):
         self.assertTrue(approval.apply_claude('ask', self.home).startswith('unchanged'))
@@ -77,6 +78,8 @@ class ClaudeApprovalTests(unittest.TestCase):
     def test_ask_keeps_other_lcu_tool_rules_and_other_servers(self):
         self.write(self.user, {'permissions': {'allow': ['mcp__lcu__js', 'mcp__other']}})
         approval.apply_claude('auto', self.home)
+        self.assertEqual(self.read(self.user)['permissions']['allow'],
+                         ['mcp__lcu__js', 'mcp__other', 'mcp__lcu__js_reset'])
         approval.apply_claude('ask', self.home)
         self.assertEqual(self.read(self.user)['permissions']['allow'], ['mcp__lcu__js', 'mcp__other'])
 
@@ -106,13 +109,62 @@ class ClaudeApprovalTests(unittest.TestCase):
         claude_visibility.install(self.home)
         approval.apply_claude('auto', self.home)
         permissions = self.read(self.user)['permissions']
-        self.assertEqual(permissions['allow'], ['mcp__lcu'])
+        self.assertEqual(permissions['allow'], ['mcp__lcu__js', 'mcp__lcu__js_reset'])
         self.assertEqual(permissions['deny'], list(claude_visibility.HOST_ONLY))
-        # Claude Code evaluates deny before allow, so the blanket rule does not expose them.
+        # The allow rules name only the model-visible tools, and deny wins over allow anyway.
         approval.apply_claude('ask', self.home)
         permissions = self.read(self.user)['permissions']
         self.assertNotIn('allow', permissions)
         self.assertEqual(permissions['deny'], list(claude_visibility.HOST_ONLY))
+
+    def test_allow_entries_are_exactly_the_model_visible_tools(self):
+        claude_visibility.install(self.home)
+        approval.apply_claude('auto', self.home)
+        permissions = self.read(self.user)['permissions']
+        self.assertEqual(sorted(permissions['allow']), sorted(f'mcp__lcu__{tool}' for tool in approval.MODEL_TOOLS))
+        self.assertNotIn('mcp__lcu', permissions['allow'])
+        for rule in claude_visibility.HOST_ONLY:
+            self.assertIn(rule, permissions['deny'])
+            self.assertNotIn(rule, permissions['allow'])
+        # Every host-only or future tool is outside the allow list; a wildcard would cover it.
+        self.assertFalse([rule for rule in permissions['allow'] if '*' in rule or rule == 'mcp__lcu'])
+
+    def test_model_tool_lists_agree_across_python_and_adapters(self):
+        root = Path(__file__).resolve().parents[1]
+        client = (root / 'adapters/client.mjs').read_text()
+        relay = (root / 'adapters/claude.mjs').read_text()
+        names = lambda text, constant: re.search(constant + r" = new Set\(\[([^\]]*)\]\)", text).group(1)
+        expected = ', '.join(f"'{tool}'" for tool in approval.MODEL_TOOLS)
+        self.assertEqual(names(client, 'MODEL_TOOLS'), expected)
+        self.assertEqual(names(relay, 'PUBLIC_TOOLS'), expected)
+        self.assertEqual(approval.OMP_TOOLS, approval.MODEL_TOOLS)
+        self.assertIn('|'.join(f'mcp__lcu__{tool}' for tool in approval.MODEL_TOOLS),
+                      (root / 'lcu/claude_visibility.py').read_text())
+
+    def test_legacy_blanket_rule_is_migrated_by_auto_and_removed_by_ask(self):
+        self.write(self.user, {'permissions': {'allow': ['Read']}})
+        approval.save_record(self.home, {f'claude-code|{self.user}': {'added': ['mcp__lcu']}})
+        self.write(self.user, {'permissions': {'allow': ['Read', 'mcp__lcu']}})
+        self.assertTrue(approval.apply_claude('auto', self.home).startswith('added'))
+        self.assertEqual(self.read(self.user)['permissions']['allow'], ['Read', 'mcp__lcu__js', 'mcp__lcu__js_reset'])
+        self.assertEqual(approval.load_record(self.home)[f'claude-code|{self.user}']['added'],
+                         ['mcp__lcu__js', 'mcp__lcu__js_reset'])
+        approval.apply_claude('ask', self.home)
+        self.assertEqual(self.read(self.user), {'permissions': {'allow': ['Read']}})
+
+    def test_ask_removes_a_recorded_legacy_rule_without_migrating(self):
+        self.write(self.user, {'permissions': {'allow': ['Read', 'mcp__lcu']}})
+        approval.save_record(self.home, {f'claude-code|{self.user}': {'added': ['mcp__lcu']}})
+        self.assertIn('removed', approval.apply_claude('ask', self.home))
+        self.assertEqual(self.read(self.user), {'permissions': {'allow': ['Read']}})
+        self.assertFalse(approval.load_record(self.home))
+
+    def test_ask_never_removes_exact_rules_the_user_wrote(self):
+        original = {'permissions': {'allow': ['mcp__lcu__js', 'mcp__lcu__js_reset']}}
+        self.write(self.user, original)
+        self.assertTrue(approval.apply_claude('auto', self.home).startswith('unchanged'))
+        self.assertIn('kept your own', approval.apply_claude('ask', self.home))
+        self.assertEqual(self.read(self.user), original)
 
     def test_malformed_settings_are_rejected_without_a_write(self):
         for content in ('{ not json', '[]', '{"permissions": []}', '{"permissions": {"allow": "x"}}',
@@ -278,27 +330,56 @@ class CodexApprovalTests(unittest.TestCase):
                        env={'HOME': str(self.home)}, plan=plan)
         return plan
 
-    def test_policy_is_only_present_for_auto_when_nothing_was_there(self):
-        self.assertEqual(self.plan('auto')['policy'], {'default_tools_approval_mode': 'approve'})
+    TOOLS = {'js': {'approval_mode': 'approve'}, 'js_reset': {'approval_mode': 'approve'}}
+
+    def test_auto_approves_exactly_the_model_tools_and_never_the_server(self):
+        policy = self.plan('auto')['policy']
+        self.assertEqual(policy, {'tools': self.TOOLS})
+        self.assertNotIn('default_tools_approval_mode', policy)
         self.assertEqual(self.plan('ask')['policy'], {})
         self.assertEqual(self.plan(None)['policy'], {})
 
-    def test_ask_restores_the_previous_value_auto_replaced(self):
+    def test_ask_removes_only_the_tool_entries_auto_added(self):
         self.write('[mcp_servers.lcu]\ndefault_tools_approval_mode = "prompt"\n')
-        self.assertEqual(self.cycle('auto')['policy'], {'default_tools_approval_mode': 'approve'})
-        self.write('[mcp_servers.lcu]\ndefault_tools_approval_mode = "approve"\n')
-        # Reapplying auto keeps the original prior value.
-        self.cycle('auto')
-        restored = self.plan('ask')
-        self.assertEqual(restored['policy'], {'default_tools_approval_mode': 'prompt'})
+        self.assertEqual(self.cycle('auto')['policy'],
+                         {'default_tools_approval_mode': 'prompt', 'tools': self.TOOLS})
+        self.write('[mcp_servers.lcu]\ndefault_tools_approval_mode = "prompt"\n'
+                   '[mcp_servers.lcu.tools.js]\napproval_mode = "approve"\n'
+                   '[mcp_servers.lcu.tools.js_reset]\napproval_mode = "approve"\n')
+        self.cycle('auto')  # idempotent
+        self.assertEqual(self.plan('ask')['policy'], {'default_tools_approval_mode': 'prompt'})
         self.cycle('ask')
-        self.write('[mcp_servers.lcu]\ndefault_tools_approval_mode = "prompt"\n')
-        self.assertFalse(approval.load_record(self.home))  # nothing recorded now: the value is the user's
+        self.assertFalse(approval.load_record(self.home))
 
-    def test_ask_after_auto_with_no_prior_value_registers_without_one(self):
-        self.cycle('auto')
+    def test_a_tool_mode_the_user_set_is_kept_and_never_removed(self):
+        self.write('[mcp_servers.lcu.tools.js]\napproval_mode = "prompt"\n'
+                   '[mcp_servers.lcu.tools.js_reset]\napproval_mode = "approve"\n')
+        self.assertEqual(self.cycle('auto')['policy']['tools'],
+                         {'js': {'approval_mode': 'prompt'}, 'js_reset': {'approval_mode': 'approve'}})
+        self.assertFalse(approval.load_record(self.home))
+        self.assertEqual(self.plan('ask')['policy']['tools'],
+                         {'js': {'approval_mode': 'prompt'}, 'js_reset': {'approval_mode': 'approve'}})
+
+    def test_legacy_server_wide_record_is_migrated_by_auto_and_restored_by_ask(self):
+        key = f'codex|{self.config}'
+        for mode, expected in (('auto', {'default_tools_approval_mode': 'prompt', 'tools': self.TOOLS}),
+                               ('ask', {'default_tools_approval_mode': 'prompt'})):
+            approval.save_record(self.home, {key: {'prior': 'prompt'}})
+            self.write('[mcp_servers.lcu]\ndefault_tools_approval_mode = "approve"\n')
+            self.assertEqual(self.plan(mode)['policy'], expected)
+        approval.save_record(self.home, {key: {'prior': None}})
         self.write('[mcp_servers.lcu]\ndefault_tools_approval_mode = "approve"\n')
+        self.assertEqual(self.plan('auto')['policy'], {'tools': self.TOOLS})
         self.assertEqual(self.plan('ask')['policy'], {})
+        self.cycle('auto')
+        self.assertEqual(approval.load_record(self.home)[key], {'tools': ['js', 'js_reset']})
+
+    def test_registration_policy_merges_tools_over_the_host_contract(self):
+        host = {'startup_timeout_sec': 120, 'tools': {'js': {'output_token_limit': 25000}}}
+        merged = approval.merge_codex_policy(host, {'tools': self.TOOLS})
+        self.assertEqual(merged['tools']['js'], {'output_token_limit': 25000, 'approval_mode': 'approve'})
+        self.assertEqual(merged['tools']['js_reset'], {'approval_mode': 'approve'})
+        self.assertEqual(approval.merge_codex_policy(host, {}), host)
 
     def test_value_not_recorded_by_lcu_is_preserved_by_ask_and_default(self):
         self.write('[mcp_servers.lcu]\ndefault_tools_approval_mode = "approve"\n')
@@ -341,9 +422,9 @@ class CodexApprovalTests(unittest.TestCase):
         self.assertEqual(failures, [])
         return json.loads(next(argv for argv in calls if '--input-type=module' in argv)[-1]), host
 
-    def test_registration_policy_carries_the_approval_default_only_for_auto(self):
+    def test_registration_policy_carries_the_tool_approvals_only_for_auto(self):
         policy, host = self.register('auto')
-        self.assertEqual(policy, {**host, 'default_tools_approval_mode': 'approve'})
+        self.assertEqual(policy, {**host, 'tools': self.TOOLS})
         for mode in ('ask', None):
             policy, host = self.register(mode)
             self.assertEqual(policy, host)
@@ -418,7 +499,7 @@ class SetupApprovalPersistenceTests(unittest.TestCase):
         self.assertEqual(self.configured, ['auto'])
         self.assertEqual(self.saved(), 'auto')
         self.assertIn('Approval mode auto', output)
-        self.assertIn('Codex: `default_tools_approval_mode = "approve"`', output)
+        self.assertIn('Codex: `approval_mode = "approve"` for the `js` and `js_reset` tools', output)
         self.assertIn('Pi and Hermes have no such gate', output)
         self.assertIn('Native-app and Chrome approvals from the original runtime are unchanged', output)
         output = self.drive()
