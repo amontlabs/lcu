@@ -56,6 +56,9 @@ def provision(release, source, *, target='linux', mac_node=None, adapters_source
                     Path(mac_node) if mac_node is not None else None)
                 npm_command = shutil.which('npm')
                 npm = Path(npm_command).resolve() if npm_command else None
+                if os.name == 'nt' and node is not None:
+                    # Windows npm is a .cmd shim; Node runs the CLI script beside node.exe.
+                    npm = node.parent / 'node_modules/npm/bin/npm-cli.js'
                 if node is None or not node.is_file() or not os.access(node, os.X_OK):
                     raise ValueError('A local Node executable is required to build these locked JavaScript tools.')
                 if npm is None or not npm.is_file():
@@ -70,6 +73,9 @@ def provision(release, source, *, target='linux', mac_node=None, adapters_source
                 'NPM_CONFIG_GLOBALCONFIG': str(scratch / 'global.npmrc'),
                 'NPM_CONFIG_UPDATE_NOTIFIER': 'false',
             }
+            if os.name == 'nt':
+                # Node cannot initialize its CSPRNG on Windows without SystemRoot.
+                environment['SYSTEMROOT'] = os.environ['SYSTEMROOT']
             subprocess.run([str(node), str(npm), 'ci',
                             '--cache', str(scratch / 'npm-cache'), '--ignore-scripts',
                             *(['--no-bin-links'] if target == 'windows' else []),
