@@ -4,6 +4,11 @@ import sys
 sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lcu import interpreter
+try:
+    interpreter.ensure(Path(__file__).resolve(), sys.argv[1:])
+except ValueError as exc:
+    sys.exit(f'LCU session: {exc}')
 from lcu.session import main
 try:
     main()
