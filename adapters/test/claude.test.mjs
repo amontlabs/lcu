@@ -65,7 +65,8 @@ async function connectRelay({ throughCurrentSymlink = false } = {}) {
   const elicitationResponses = [];
   client.setRequestHandler(ElicitRequestSchema, async request => {
     elicitationRequests.push(structuredClone(request.params));
-    return elicitationResponses.shift() ?? { action: 'cancel' };
+    const next = elicitationResponses.shift();
+    return (typeof next === 'function' ? await next(request.params) : next) ?? { action: 'cancel' };
   });
   try {
     await client.connect(transport);
@@ -508,5 +509,158 @@ test('Claude relay interrupts an active turn on cancel and drains cleanup before
       entry.args.session_id === 'close-session').length, 1);
   } finally {
     await closed.close();
+  }
+});
+
+const MOD = { 'claudecode/toolUseId': 'toolu_plugin_0123456789abcdef' };
+const approvalCall = (client, name, args, meta = MOD) =>
+  client.callTool({ name, arguments: args, _meta: meta });
+const NATIVE_MESSAGE = 'Allow Computer Use to use "LCU Fixture App"?';
+
+test('Claude relay answers a native-app approval from the choice the lcu-approve mod recorded', async () => {
+  const bridge = await connectRelay();
+  try {
+    for (const [choice, expected] of [
+      ['session', { action: 'accept', content: {}, _meta: { persist: 'session' } }],
+      ['always', { action: 'accept', content: {}, _meta: { persist: 'always' } }],
+      ['deny', { action: 'decline' }],
+      ['cancel', { action: 'cancel' }],
+    ]) {
+      let described;
+      bridge.respondToNextElicitation(async () => {
+        const request = await approvalCall(bridge.client, 'approval_request', { message: NATIVE_MESSAGE });
+        described = JSON.parse(request.content[0].text);
+        const recorded = await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice });
+        assert.notEqual(recorded.isError, true);
+        // The host's own form is blocked by the mod, so Claude Code answers decline.
+        return { action: 'decline' };
+      });
+      const result = await callWithContext(bridge.client, 'js', { code: 'approval-native' }, {
+        toolUseId: `mod-${choice}`,
+      });
+      assert.deepEqual(JSON.parse(result.content[0].text), expected, choice);
+      assert.deepEqual({ ...described, id: 'ID' }, {
+        id: 'ID',
+        message: NATIVE_MESSAGE,
+        app: 'dev.lcu.NativeFixture.generated',
+        label: 'dev.lcu.NativeFixture.generated',
+        scopes: ['session', 'always'],
+        riskLevel: 'low',
+      });
+      // The record is gone with the elicitation: the choice cannot be replayed.
+      const replay = await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'session' });
+      assert.equal(replay.isError, true);
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay falls back to the host answer when the mod recorded nothing', async () => {
+  const bridge = await connectRelay();
+  try {
+    bridge.respondToNextElicitation(async () => ({ action: 'accept', content: { choice: 'session' } }));
+    const accepted = await callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'host-session' });
+    assert.deepEqual(JSON.parse(accepted.content[0].text),
+      { action: 'accept', content: {}, _meta: { persist: 'session' } });
+
+    // A mod that only asked for the description and never chose leaves the host decline in force.
+    bridge.respondToNextElicitation(async () => {
+      await approvalCall(bridge.client, 'approval_request', { message: NATIVE_MESSAGE });
+      return { action: 'decline' };
+    });
+    const declined = await callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'host-decline' });
+    assert.deepEqual(JSON.parse(declined.content[0].text), { action: 'decline' });
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay rejects approval choices that are not the mod\'s, current, single use and offered', async () => {
+  const bridge = await connectRelay();
+  try {
+    const attempts = [];
+    bridge.respondToNextElicitation(async () => {
+      const described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
+        { message: NATIVE_MESSAGE })).content[0].text);
+      const choose = (args, meta) => approvalCall(bridge.client, 'approval_choice', args, meta);
+      attempts.push(
+        // The model's own tool-use ids, no id, and a hook-type call carry no plugin prefix.
+        await choose({ id: described.id, choice: 'session' }, { 'claudecode/toolUseId': 'toolu_01ABC' }),
+        await choose({ id: described.id, choice: 'session' }, {}),
+        await choose({ id: 'not-the-pending-id', choice: 'session' }),
+        await choose({ id: described.id, choice: 'forever' }),
+        // A second description for the same message finds nothing left to claim.
+        await approvalCall(bridge.client, 'approval_request', { message: NATIVE_MESSAGE }),
+        await approvalCall(bridge.client, 'approval_request', { message: 'Some other question?' }),
+        await approvalCall(bridge.client, 'approval_request', { message: NATIVE_MESSAGE }, { 'claudecode/toolUseId': 'toolu_01model' }),
+      );
+      const first = await choose({ id: described.id, choice: 'session' });
+      const second = await choose({ id: described.id, choice: 'always' });
+      attempts.push(second);
+      assert.notEqual(first.isError, true);
+      return { action: 'decline' };
+    });
+    const result = await callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'rejects' });
+    assert.deepEqual(attempts.map(attempt => attempt.isError), [true, true, true, true, true, true, true, true]);
+    assert.deepEqual(JSON.parse(result.content[0].text),
+      { action: 'accept', content: {}, _meta: { persist: 'session' } });
+
+    // Persistent approval not offered: "always" is refused and the host's answer stands.
+    let refused;
+    bridge.respondToNextElicitation(async () => {
+      const described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
+        { message: NATIVE_MESSAGE })).content[0].text);
+      assert.deepEqual(described.scopes, ['session']);
+      refused = await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'always' });
+      return { action: 'decline' };
+    });
+    const sessionOnly = await callWithContext(bridge.client, 'js', { code: 'approval-native-session-only' }, {
+      toolUseId: 'rejects-always',
+    });
+    assert.equal(refused.isError, true);
+    assert.deepEqual(JSON.parse(sessionOnly.content[0].text), { action: 'decline' });
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay holds approval_wait until the mod records the choice from a button press', async () => {
+  const bridge = await connectRelay();
+  try {
+    let waited;
+    bridge.respondToNextElicitation(async () => {
+      const described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
+        { message: NATIVE_MESSAGE })).content[0].text);
+      const pending = approvalCall(bridge.client, 'approval_wait', { id: described.id });
+      const modelWait = await approvalCall(bridge.client, 'approval_wait', { id: described.id },
+        { 'claudecode/toolUseId': 'toolu_01model' });
+      assert.equal(modelWait.isError, true);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'always' });
+      waited = JSON.parse((await pending).content[0].text);
+      return { action: 'decline' };
+    });
+    const result = await callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'wait' });
+    assert.deepEqual(waited, { choice: 'always' });
+    assert.deepEqual(JSON.parse(result.content[0].text),
+      { action: 'accept', content: {}, _meta: { persist: 'always' } });
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay lists the host-only approval tools for the mod and answers none of them to the model', async () => {
+  const bridge = await connectRelay();
+  try {
+    const names = (await bridge.client.listTools()).tools.map(tool => tool.name);
+    for (const name of ['approval_request', 'approval_wait', 'approval_choice']) assert.ok(names.includes(name), name);
+    for (const [name, args] of [['approval_request', { message: NATIVE_MESSAGE }],
+      ['approval_wait', { id: 'x' }], ['approval_choice', { id: 'x', choice: 'always' }]]) {
+      const refused = await approvalCall(bridge.client, name, args, { 'claudecode/toolUseId': 'toolu_01model' });
+      assert.equal(refused.isError, true, name);
+    }
+  } finally {
+    await bridge.close();
   }
 });

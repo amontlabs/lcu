@@ -11,6 +11,7 @@ import {
   APPROVAL_TIMEOUT_MS,
   callTimeout,
   callWithDeadline,
+  createApprovalBroker,
   createApprovalGate,
   isMainModule,
   nativeAppApprovalOptions,
@@ -21,6 +22,9 @@ import {
 
 const PUBLIC_TOOLS = new Set(['js', 'js_reset']);
 const CONTEXT_TOOL = 'set_turn_context';
+const APPROVAL_REQUEST_TOOL = 'approval_request';
+const APPROVAL_CHOICE_TOOL = 'approval_choice';
+const APPROVAL_WAIT_TOOL = 'approval_wait';
 const TURN_END_TOOL = 'turn_ended';
 const TURN_CONTEXT_META = 'x-codex-turn-metadata';
 const CLAUDE_TOOL_USE_META = 'claudecode/toolUseId';
@@ -33,6 +37,28 @@ const TURN_CONTEXT_SCHEMA = {
     agent_id: { type: 'string' },
   },
   required: ['session_id', 'turn_id', 'tool_use_id'],
+  additionalProperties: false,
+};
+
+const APPROVAL_REQUEST_SCHEMA = {
+  type: 'object',
+  properties: { message: { type: 'string', minLength: 1 } },
+  required: ['message'],
+  additionalProperties: false,
+};
+const APPROVAL_WAIT_SCHEMA = {
+  type: 'object',
+  properties: { id: { type: 'string', minLength: 1 } },
+  required: ['id'],
+  additionalProperties: false,
+};
+const APPROVAL_CHOICE_SCHEMA = {
+  type: 'object',
+  properties: {
+    id: { type: 'string', minLength: 1 },
+    choice: { type: 'string', enum: ['session', 'always', 'deny', 'cancel'] },
+  },
+  required: ['id', 'choice'],
   additionalProperties: false,
 };
 
@@ -110,6 +136,7 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
   const cleanedTurns = new Set();
   let server;
   const approvals = createApprovalGate();
+  const broker = createApprovalBroker();
   let connected = false;
   let shutdown;
   let serverClose;
@@ -163,14 +190,33 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
         !upstreamTools.some(tool => tool.name === TURN_END_TOOL)) {
       throw new Error('Original CUA js/js_reset and turn_ended tools are required');
     }
-    if (upstreamTools.some(tool => tool.name === CONTEXT_TOOL)) {
-      throw new Error('Original CUA server already uses the Claude relay context tool name');
+    if (upstreamTools.some(tool => [CONTEXT_TOOL, APPROVAL_REQUEST_TOOL, APPROVAL_WAIT_TOOL, APPROVAL_CHOICE_TOOL].includes(tool.name))) {
+      throw new Error('Original CUA server already uses a Claude relay host-only tool name');
     }
     const turnEndedTool = upstreamTools.find(tool => tool.name === TURN_END_TOOL);
     const contextTool = {
       name: CONTEXT_TOOL,
       description: 'Internal Claude host hook: bind the exact prompt and tool-use identity.',
       inputSchema: TURN_CONTEXT_SCHEMA,
+    };
+
+    // These two cannot be hidden with deny rules like the tools above: a denied MCP tool is
+    // removed from Claude Code's tool list, and the mod's `$.mcp.call` needs it listed.
+    // The relay rejects any call without a mod-originated tool-use id, and the mod denies the model's.
+    const approvalRequestTool = {
+      name: APPROVAL_REQUEST_TOOL,
+      description: 'Internal Claude host mod: describe the pending native-app approval for an elicitation message.',
+      inputSchema: APPROVAL_REQUEST_SCHEMA,
+    };
+    const approvalWaitTool = {
+      name: APPROVAL_WAIT_TOOL,
+      description: 'Internal Claude host mod: wait until the person has chosen for a pending native-app approval.',
+      inputSchema: APPROVAL_WAIT_SCHEMA,
+    };
+    const approvalChoiceTool = {
+      name: APPROVAL_CHOICE_TOOL,
+      description: 'Internal Claude host mod: record the person\'s choice for a pending native-app approval.',
+      inputSchema: APPROVAL_CHOICE_SCHEMA,
     };
 
     server = new Server({ name: 'lcu-claude-relay', version: '0.1.0' }, {
@@ -181,7 +227,7 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
     upstream.onerror = error => console.error('Claude MCP relay upstream error:', asError(error));
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [...publicTools, turnEndedTool, contextTool],
+      tools: [...publicTools, turnEndedTool, contextTool, approvalRequestTool, approvalWaitTool, approvalChoiceTool],
     }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -208,6 +254,16 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
           turnId: context.turnId,
         });
         return { content: [{ type: 'text', text: 'Turn context bound.' }] };
+      }
+      if (name === APPROVAL_REQUEST_TOOL || name === APPROVAL_WAIT_TOOL || name === APPROVAL_CHOICE_TOOL) {
+        // Host-only: answered for the lcu-approve mod, which Claude Code marks with a plugin tool-use id.
+        const modCall = _meta?.[CLAUDE_TOOL_USE_META];
+        const outcome = name === APPROVAL_REQUEST_TOOL ? broker.describe(toolArgs.message, modCall)
+          : name === APPROVAL_WAIT_TOOL ? await broker.wait(toolArgs.id, modCall, extra.signal)
+            : broker.choose(toolArgs.id, toolArgs.choice, modCall);
+        if (!outcome.ok) return { isError: true, content: [{ type: 'text', text: outcome.error }] };
+        const body = outcome.approval ?? (outcome.choice ? { choice: outcome.choice } : { ok: true });
+        return { content: [{ type: 'text', text: JSON.stringify(body) }] };
       }
       if (name === TURN_END_TOOL) {
         const event = toolArgs.hook_event_name;
@@ -260,14 +316,20 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
     upstream.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
       const params = request.params;
       const approval = nativeAppApprovalOptions(params);
+      const pendingId = approval ? broker.open(params) : undefined;
       try {
         const response = await relayElicitation(
           server, approvals, approval ? nativeForm(params, approval) : params, extra.signal);
         if (!approval) return response;
+        // A choice the lcu-approve mod recorded for this exact request answers for the person.
+        const modChoice = broker.settle(pendingId);
+        if (modChoice) return nativeAppApprovalResponse(params, modChoice);
         if (response.action !== 'accept') return nativeAppApprovalResponse(params, response.action);
         return nativeAppApprovalResponse(params, response.content?.choice);
       } catch {
         return { action: 'cancel' };
+      } finally {
+        if (pendingId) broker.settle(pendingId);
       }
     });
 
