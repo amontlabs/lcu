@@ -26,16 +26,27 @@ class ClaudeModTests(unittest.TestCase):
         for event in ("'classic.Elicitation'", "'tool.call'", "'tool.check'", "'ui.render'"):
             self.assertIn(event, source)
         for label in ('Allow this conversation', 'Always allow', 'Deny'):
-            self.assertIn(label, source)
+            self.assertIn(label, (MOD / 'hooks/views.tsx').read_text())
+        self.assertIn("'computer-use-apps'", source)
 
     def test_user_scope_install_is_idempotent_and_omits_the_mod_tests(self):
         target = claude_mod.install(self.home, ROOT)
         self.assertEqual(target, self.home / '.claude/skills/lcu-approve')
         files = {path.relative_to(target).as_posix() for path in target.rglob('*') if path.is_file()}
-        self.assertEqual(files, {'.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.tsx'})
+        self.assertEqual(files, {'.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.tsx',
+                                 'hooks/views.tsx', 'hooks/data.ts', 'types/index.d.ts', 'lcu.json'})
         before = {path: path.read_bytes() for path in target.rglob('*') if path.is_file()}
         claude_mod.install(self.home, ROOT)
         self.assertEqual({path: path.read_bytes() for path in target.rglob('*') if path.is_file()}, before)
+
+    def test_install_records_where_the_lcu_command_is(self):
+        target = claude_mod.install(self.home, ROOT)
+        self.assertEqual(json.loads((target / 'lcu.json').read_text()), {'lcu': str(ROOT / 'bin/lcu')})
+        release = Path(self.temporary.name) / 'prefix/releases/1.0-abc'
+        shutil.copytree(MOD, release / claude_mod.SOURCE, ignore=shutil.ignore_patterns('tests'))
+        target = claude_mod.install(self.home, release)
+        self.assertEqual(json.loads((target / 'lcu.json').read_text()),
+                         {'lcu': str(Path(self.temporary.name) / 'prefix/current/bin/lcu')})
 
     def test_project_scope_installs_under_the_project_and_not_the_home(self):
         project = Path(self.temporary.name) / 'project'

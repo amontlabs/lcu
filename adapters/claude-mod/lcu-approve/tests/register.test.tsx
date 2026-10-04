@@ -63,6 +63,9 @@ test('the hook blocks at once; a pane press then records the choice with LCU', a
     'Allow this conversation', 'Always allow', 'Deny',
   ])
   expect(await ui.find({ type: 'Text', text: /new risks/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Computer use will be able to see and control Zed.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'dev.zed.Zed' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /High risk/ })).toBeDefined()
   await ui.press({ key: 'lcu-approve:abc:always' })
   expect(calls.filter(call => call.tool === 'choice').map(call => call.args.choice)).toEqual(['always'])
   expect(calls.find(call => call.tool === 'choice')?.args.id).toBe(APPROVAL.id)
@@ -116,4 +119,186 @@ test('the model may not call the host-only tools', async ($, on) => {
     const denied: any = await $.tool.call({ tool: `mcp__lcu__${name}`, tool_use_id: 'toolu_01abc' } as any)
     expect(JSON.stringify(denied)).toContain('host-only')
   }
+})
+
+// The host beneath the mod: processes, files, the store, the session, toasts.
+function host(on: any, { files = {} as Record<string, string>, processes = (argv: string[]): any => undefined, session = 'sess-1' } = {}) {
+  const ran: string[][] = []
+  const toasts: string[] = []
+  const store = new Map<string, unknown>()
+  on('process.run', (_$: any, e: any) => {
+    ran.push([...e.argv])
+    const made = processes([...e.argv])
+    return { value: { exitCode: 0, stdout: '', stderr: '', ...(made ?? {}) } }
+  })
+  // A file the setup wrote beside the mod is named `lcu.json` here, wherever the mod's folder is.
+  const key = (path: string) => (path.endsWith('/lcu.json') ? 'lcu.json' : path)
+  on('fs.exists', (_$: any, e: any) => ({ value: key(e.path) in files }))
+  on('fs.read', (_$: any, e: any) =>
+    key(e.path) in files
+      ? { value: e.as === 'bytes' ? { base64: files[key(e.path)] } : files[key(e.path)] }
+      : { deny: `no such file: ${e.path}` })
+  on('env.get', (_$: any, e: any) => ({ value: ({ HOME: '/home/me' } as Record<string, string>)[e.name] }))
+  on('session.id', () => ({ value: session }))
+  on('store.get', (_$: any, e: any) => ({ value: store.get(e.key) }))
+  on('store.set', (_$: any, e: any) => { store.set(e.key, e.value); return { value: undefined } })
+  on('ui.toast', (_$: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  return { ran, toasts, store }
+}
+
+const LCU = '/home/me/.local/share/lcu/current/bin/lcu'
+const ZED_ICON = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+
+const iconProcesses = (argv: string[]) => {
+  if (argv[0] === '/usr/bin/mdfind') return { stdout: '/Applications/Zed.app\n' }
+  if (argv[0] === '/usr/bin/mktemp') return { stdout: '/tmp/icons\n' }
+  if (argv[0] === '/usr/bin/plutil') return { stdout: 'Zed\n' }
+}
+const ICON_FILES = { '/Applications/Zed.app/Contents/Resources/Zed.icns': '', '/tmp/icons/icon.png': ZED_ICON }
+
+test('the approval shows the app icon made with sips, on a terminal and on the app, and caches it', async ($, on) => {
+  const clock = mock.clock(on)
+  const calls = lcu(on)
+  const { ran, store } = host(on, { files: ICON_FILES, processes: iconProcesses })
+  const { ui } = await openPane($, clock, calls)
+  expect(ran.some(argv => argv[0] === '/usr/bin/sips' && argv.includes('/Applications/Zed.app/Contents/Resources/Zed.icns'))).toBe(true)
+  expect(ran.at(-1)).toEqual(['/bin/rm', '-rf', '/tmp/icons'])
+  expect(store.get('icon:dev.zed.Zed')).toEqual({ png: ZED_ICON })
+  expect(await ui.find({ type: 'Image' })).toBeDefined()
+  const app = await $.ui.mount({
+    plugin: 'lcu-approve', surface: 'desktop', component: 'Pane', requestId: `lcu-approval-${APPROVAL.id}`,
+    props: { title: 'Computer use approval', isFocused: true, bodyColumns: 100, placement: 'dock' } as any,
+  })
+  expect(await app.find({ type: 'Svg' })).toBeDefined()
+  expect(await app.find({ type: 'Image' })).toBeUndefined()
+  const before = ran.length
+  await $.classic.Elicitation(ELICITATION as any)
+  await until(clock, () => calls.filter(call => call.tool === 'request').length === 2)
+  expect(ran.slice(before).filter(argv => argv[0] === '/usr/bin/sips')).toEqual([])
+})
+
+test('an approval without an icon still opens; the primary, secondary and dismiss buttons keep their order', async ($, on) => {
+  const clock = mock.clock(on)
+  const calls = lcu(on)
+  host(on, { processes: () => ({ exitCode: 1 }) })
+  const { ui } = await openPane($, clock, calls)
+  expect(await ui.find({ type: 'Image' })).toBeUndefined()
+  const buttons = await ui.findAll({ type: 'Button' })
+  expect(buttons.map(button => button.text)).toEqual(['Allow this conversation', 'Always allow', 'Deny'])
+})
+
+test('a press confirms with a toast and takes the pane down', async ($, on) => {
+  const clock = mock.clock(on)
+  const calls = lcu(on)
+  const { toasts } = host(on)
+  const { ui } = await openPane($, clock, calls)
+  await ui.press({ key: 'lcu-approve:abc:session' })
+  expect(toasts).toEqual(['Zed allowed for this conversation'])
+})
+
+test('the toast says what was chosen', async ($, on) => {
+  const clock = mock.clock(on)
+  const calls = lcu(on)
+  const { toasts } = host(on)
+  const { ui } = await openPane($, clock, calls)
+  await ui.press({ key: 'lcu-approve:abc:deny' })
+  expect(toasts).toEqual(['Zed denied'])
+})
+
+const APPS_JSON = JSON.stringify({
+  file: '/x/ComputerUseAppApprovals.json',
+  apps: [
+    { name: 'Safari', bundleId: 'com.apple.Safari', installed: true, risk: 'high', blocked: false },
+    { name: 'Zed', bundleId: 'dev.zed.Zed', installed: true, risk: 'normal', blocked: false },
+  ],
+})
+const SESSION_FILE = '/home/me/.codex/computer-use/sessions/sess-1.toml'
+
+function appsHost(on: any, extra: { files?: Record<string, string>; bare?: true; processes?: (argv: string[]) => any } = {}) {
+  on('session.start', () => ({ cwd: '/work' }))
+    on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('command.register', () => ({ value: undefined }))
+  return host(on, {
+    files: extra.bare ? {} : { [LCU]: '', [SESSION_FILE]: '[apps]\nallowed = [\n  "com.apple.calculator",\n]\n', ...extra.files },
+    processes: argv => {
+      if (argv[0] === LCU && argv[2] === '--json') return { stdout: APPS_JSON }
+      if (argv[0] === '/usr/bin/mdfind') return { stdout: '/System/Applications/Calculator.app\n' }
+      return extra.processes?.(argv)
+    },
+  })
+}
+
+async function openApps($: any, surface: 'terminal' | 'desktop' = 'desktop') {
+  await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: true } as any)
+  await $.command.run({ command: 'computer-use-apps' } as any)
+  return $.ui.mount({
+    plugin: 'lcu-approve', surface, component: 'Pane', requestId: 'lcu-approved-apps',
+    props: { title: 'Approved apps', isFocused: true, bodyColumns: 100, placement: 'inline' } as any,
+  })
+}
+
+test('the apps panel lists the always-allowed apps and this conversation\'s grants', async ($, on) => {
+  const { ran } = appsHost(on)
+  const ui = await openApps($)
+  expect(ran).toContainEqual([LCU, 'apps', '--json'])
+  const texts = (await ui.findAll({ type: 'Text' })).map(text => text.text)
+  expect(texts).toEqual(expect.arrayContaining([
+    'Always allowed (2)', 'Safari', 'com.apple.Safari', ' High risk ', 'Zed', 'dev.zed.Zed',
+    'This conversation (1)', 'Calculator', 'com.apple.calculator', 'Ends with this conversation',
+  ]))
+  expect((await ui.findAll({ type: 'Button' })).map(button => button.text)).toEqual(['Refresh', 'Revoke', 'Revoke'])
+})
+
+test('Revoke runs lcu apps revoke, toasts its message and lists again', async ($, on) => {
+  const { ran, toasts } = appsHost(on, {
+    processes: argv => argv[2] === 'revoke' ? { stdout: 'Removed: Zed (dev.zed.Zed). Computer Use asks again.\n' } : undefined,
+  })
+  const ui = await openApps($)
+  ran.length = 0
+  await ui.press({ key: 'lcu-approve:apps:revoke:dev.zed.Zed' })
+  expect(ran.filter(argv => argv[0] === LCU)).toEqual([[LCU, 'apps', 'revoke', 'dev.zed.Zed'], [LCU, 'apps', '--json']])
+  expect(toasts).toEqual(['Removed: Zed (dev.zed.Zed). Computer Use asks again.'])
+  expect(await ui.find({ type: 'Text', text: /Removed: Zed/ })).toBeDefined()
+})
+
+test('the Allow field runs lcu apps allow and shows a failure as it came', async ($, on) => {
+  const { ran, toasts } = appsHost(on, {
+    processes: argv => argv[2] === 'allow' ? { exitCode: 1, stderr: 'lcu apps: authentication was cancelled or failed. Nothing was changed.\n' } : undefined,
+  })
+  const ui = await openApps($)
+  ran.length = 0
+  await ui.input({ key: 'lcu-approve:apps:allow:0', text: ' Notes ' })
+  expect(ran.filter(argv => argv[2] === 'allow')).toEqual([[LCU, 'apps', 'allow', 'Notes']])
+  expect(toasts.at(-1)).toBe('authentication was cancelled or failed. Nothing was changed.')
+  expect(await ui.find({ type: 'Text', text: /authentication was cancelled/ })).toBeDefined()
+})
+
+test('Refresh lists again without changing anything', async ($, on) => {
+  const { ran } = appsHost(on)
+  const ui = await openApps($)
+  ran.length = 0
+  await ui.press({ key: 'lcu-approve:apps:refresh' })
+  expect(ran.filter(argv => argv[0] === LCU)).toEqual([[LCU, 'apps', '--json']])
+})
+
+test('the apps panel says so when lcu is not installed, and runs nothing', async ($, on) => {
+  const { ran } = appsHost(on, { bare: true })
+  const ui = await openApps($, 'terminal')
+  expect(ran).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /lcu command was not found at \/home\/me\/\.local\/share\/lcu\/current\/bin\/lcu/ })).toBeDefined()
+})
+
+test('the lcu path setup wrote beside the mod wins over the default', async ($, on) => {
+  const { ran } = appsHost(on, {
+    files: { 'lcu.json': '{"lcu":"/opt/lcu/bin/lcu"}', '/opt/lcu/bin/lcu': '' },
+    processes: argv => (argv[0] === '/opt/lcu/bin/lcu' ? { stdout: APPS_JSON } : undefined),
+  })
+  await openApps($)
+  expect(ran.find(argv => argv.includes('--json'))?.[0]).toBe('/opt/lcu/bin/lcu')
+})
+
+test('the panel never offers to revoke a conversation grant', async ($, on) => {
+  appsHost(on)
+  const ui = await openApps($)
+  expect((await ui.findAll({ type: 'Button' })).map(button => button.key ?? button.text).join()).not.toContain('calculator')
 })

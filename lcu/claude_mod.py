@@ -13,6 +13,8 @@ from pathlib import Path
 NAME = 'lcu-approve'
 SOURCE = Path('adapters/claude-mod') / NAME
 MANIFEST = Path('.claude-plugin/plugin.json')
+# Written beside the mod at install time: where the `lcu` command of this installation is.
+CONFIG = Path('lcu.json')
 
 
 def source_files(release_root):
@@ -23,6 +25,14 @@ def source_files(release_root):
     # The mod's own tests (run by `claude plugin test`) stay in the repository.
     return {path.relative_to(root): path.read_bytes() for path in sorted(root.rglob('*'))
             if path.is_file() and path.relative_to(root).parts[0] != 'tests' and path.name != '.DS_Store'}
+
+
+def lcu_command(release_root):
+    """The stable `lcu` path of an installation: through `current` when the release sits in a prefix."""
+    root = Path(release_root)
+    if root.parent.name == 'releases':
+        root = root.parent.parent / 'current'
+    return root / 'bin' / 'lcu'
 
 
 def destination(home, project=None):
@@ -45,6 +55,8 @@ def install(home, release_root, *, project=None):
     if target.exists() and not _owned(target):
         raise ValueError(f'{target} exists and is not the LCU mod; move it aside, then rerun setup.')
     files = source_files(release_root)
+    # The approved-apps panel runs `lcu apps`; this is where it finds the command.
+    files[CONFIG] = (json.dumps({'lcu': str(lcu_command(release_root))}, indent=2) + '\n').encode()
     changes = [Change(target / relative, read_file(target / relative), data)
                for relative, data in files.items()]
     apply_changes(changes)

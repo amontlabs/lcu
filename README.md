@@ -105,7 +105,7 @@ The first time an agent controls an app (Zed, Notes, Safari), the computer-use r
 - **Always allow** to remember the app (offered only when the runtime allows it).
 - **Deny** to refuse.
 
-High-risk apps show the runtime's own warning. Only you can answer: the model cannot see, press or fake the approval, and a terminal narrower than 144 columns gets the same choices as a question dialog. Without the mod nothing changes. It needs the Claude app, or Claude Code 2.1.287 or later; see [how it works](docs/ADAPTERS.md#native-app-approvals-in-claude-code-and-the-claude-app) and [how to remove it](docs/INSTALLATION.md#uninstall).
+The pane names the app (with its icon where one can be shown) and says that Computer use will be able to see and control it; High-risk apps add a "High risk" badge and the runtime's own warning. Press `a` (Allow this conversation), `l` (Always allow) or `d` (Deny), and a toast confirms the choice. The `/computer-use-apps` command opens an **Approved apps** panel: the apps always allowed (with Revoke, which shows macOS's Touch ID or password prompt through `lcu apps revoke`), this conversation's grants, and an Allow field (`lcu apps allow`). Only you can answer: the model cannot see, press or fake the approval, and a terminal narrower than 144 columns gets the same choices as a question dialog. Without the mod nothing changes. It needs the Claude app, or Claude Code 2.1.287 or later; see [how it works](docs/ADAPTERS.md#native-app-approvals-in-claude-code-and-the-claude-app) and [how to remove it](docs/INSTALLATION.md#uninstall).
 
 ## Pi commands
 

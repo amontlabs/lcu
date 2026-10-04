@@ -1,30 +1,30 @@
+import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
+
+import { BUNDLE_ID, CONFIG_FILE, DEFAULT_LCU, ICON_PIXELS, ICON_TTL_MS, firstLine, ok, parseAllowed } from './data'
+import type { AppRow, AppsData, SessionRow } from './data'
+import {
+  APPS_PREFIX, AppsView, ApprovalView, INITIAL_APPS, KEY_PREFIX, LABEL_ALWAYS, LABEL_DENY, LABEL_SESSION,
+  appsRows, approvalRows,
+} from './views'
+import type { Approval, AppsState } from './views'
 
 // The MCP server name `lcu setup` registers.
 const SERVER = 'lcu'
 const REQUEST_TOOL = 'approval_request'
 const CHOICE_TOOL = 'approval_choice'
 const ASK_HEADER = 'Computer use'
-const LABEL_SESSION = 'Allow this conversation'
-const LABEL_ALWAYS = 'Always allow'
-const LABEL_DENY = 'Deny'
 const WARNING_TITLE = 'Elevated risk'
-const KEY_PREFIX = 'lcu-approve:'
+const APPROVAL_TITLE = 'Computer use approval'
+const APPS_COMMAND = 'computer-use-apps'
+const APPS_PANE = 'lcu-approved-apps'
 
 type Choice = 'session' | 'always' | 'deny' | 'cancel'
 
-type Approval = {
-  id: string
-  message: string
-  app: string
-  label: string
-  scopes: string[]
-  riskLevel: string
-  warning?: string
-}
+// Panes on screen, by pane id: the request and the app's icon, if one could be made.
+const shown = new Map<string, { approval: Approval; icon?: string }>()
 
-// Panes on screen, by pane id.
-const shown = new Map<string, Approval>()
+const apps = atom({ plugin: 'lcu-approve', key: 'apps' } as const, INITIAL_APPS)
 
 type McpResult = { isError?: boolean; content?: { type: string; text?: string }[] }
 
@@ -49,10 +49,13 @@ export const register: Register = on => {
       return next(e)
     }
 
+    // The icon is made here, in an event hook: a render closure cannot run a process.
+    const icon = await appIcon($, approval.app).catch(() => undefined)
+
     // No hook stays pending while the person decides: a pending hook keeps the desktop surface from
     // delivering the pane's presses. The pane's button (or Esc) records the choice with LCU, whose
     // relay keeps the runtime's elicitation open until then; this hook only blocks the engine's form.
-    if (!(await showPane($, approval))) {
+    if (!(await showPane($, approval, icon))) {
       // A narrow terminal seats no pane: ask from a timer, which is a dispatch of its own.
       $.clock.after(0, () => askAndRecord($, approval))
     }
@@ -60,61 +63,70 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    const approval = shown.get(e.requestId)
-    if (!approval) return next(e)
+    if (e.requestId === APPS_PANE) {
+      const state = await read($, apps)
+      return <AppsView ui={$.ui.resolve(e)} state={state} />
+    }
+    const entry = shown.get(e.requestId)
+    if (!entry) return next(e)
     // Presses are handled by the `ui.press` hook below, with that dispatch's own `$`.
-    const press = () => {}
-    const key = (choice: Choice) => `${KEY_PREFIX}${approval.id}:${choice}`
-    const { Box, Text, Button } = $.ui.resolve(e)
-    const isHigh = approval.riskLevel === 'high'
-    return (
-      <Box flexDirection="column">
-        {isHigh && <Text bold color="yellow">{WARNING_TITLE}</Text>}
-        <Text bold>{approval.message}</Text>
-        <Text dimColor>
-          {approval.label === approval.app ? approval.app : `${approval.label} (${approval.app})`}
-        </Text>
-        {approval.warning && <Text color={isHigh ? 'yellow' : undefined}>{approval.warning}</Text>}
-        <Box flexDirection="row">
-          <Button key={key('session')} variant="primary" hotkey="1" onPress={press}>
-            {LABEL_SESSION}
-          </Button>
-          {approval.scopes.includes('always') && (
-            <Button key={key('always')} hotkey="2" onPress={press}>
-              {LABEL_ALWAYS}
-            </Button>
-          )}
-          <Button key={key('deny')} hotkey="3" onPress={press}>
-            {LABEL_DENY}
-          </Button>
-        </Box>
-      </Box>
-    )
+    return <ApprovalView ui={$.ui.resolve(e)} surface={e.surface} approval={entry.approval} icon={entry.icon} />
   })
 
   // A button press: record the choice with LCU from this dispatch, then take the pane down.
   on('ui.press', async ($, e, next) => {
     if (e.plugin !== $.plugin.name || !String(e.element).startsWith(KEY_PREFIX)) return next(e)
-    const rest = String(e.element).slice(KEY_PREFIX.length)
+    const element = String(e.element)
+    if (element.startsWith(APPS_PREFIX)) {
+      await pressApps($, element.slice(APPS_PREFIX.length))
+      return { element: e.element }
+    }
+    const rest = element.slice(KEY_PREFIX.length)
     const id = rest.slice(0, rest.lastIndexOf(':'))
     const choice = rest.slice(rest.lastIndexOf(':') + 1)
     const pane = `lcu-approval-${id}`
-    const approval = shown.get(pane)
-    if (approval) {
+    const entry = shown.get(pane)
+    if (entry) {
       shown.delete(pane)
-      await finish($, approval, choice as Choice)
+      await finish($, entry.approval, choice as Choice)
     }
     return { element: e.element }
   })
 
+  // The Allow field of the approved-apps panel.
+  on('ui.input', async ($, e, next) => {
+    if (e.plugin !== $.plugin.name || !String(e.element).startsWith(`${APPS_PREFIX}allow:`)) return next(e)
+    const name = e.value.trim()
+    if (e.kind === 'submit' && name) {
+      await update($, apps, state => ({ ...state, nonce: state.nonce + 1 }))
+      await runLcu($, ['allow', name], `Allowing ${name}. Confirm with Touch ID or your password...`)
+    }
+    return { element: e.element, value: e.value }
+  })
+
   // Esc or the close mark dismisses the pane: that is a cancel.
   on('ui.close', async ($, e, next) => {
-    const approval = shown.get(e.id)
-    if (approval && e.origin.kind === 'person') {
+    const entry = shown.get(e.id)
+    if (entry && e.origin.kind === 'person') {
       shown.delete(e.id)
-      await record($, approval.id, 'cancel')
+      await record($, entry.approval.id, 'cancel')
+      $.ui.toast(`Approval for ${entry.approval.label} dismissed`)
     }
     return next(e)
+  })
+
+  on('session.start', async ($, e, next) => {
+    await $.command.register({
+      name: APPS_COMMAND,
+      description: 'Show the apps Computer use may control, and allow or revoke them',
+    })
+    return next(e)
+  })
+
+  on('command.run', { command: APPS_COMMAND }, async $ => {
+    await refresh($)
+    await openApps($)
+    return { text: 'Approved apps panel opened.' }
   })
 
   // The approval tools are for this mod alone: the model gets a refusal,
@@ -132,6 +144,181 @@ export const register: Register = on => {
       return { decision: 'allow', reason: 'LCU approval mod' }
     })
   }
+}
+
+// The lcu executable: the path `lcu setup` wrote beside the mod, else the stable install location.
+export async function findLcu($: any): Promise<{ path?: string; tried: string[] }> {
+  const tried: string[] = []
+  try {
+    const config = JSON.parse(await $.fs.read(`${$.plugin.root}/${CONFIG_FILE}`))
+    if (typeof config.lcu === 'string' && config.lcu) tried.push(config.lcu)
+  } catch {
+    // No install-time path.
+  }
+  const home = await $.env.get('HOME')
+  if (home) tried.push(`${home}/${DEFAULT_LCU}`)
+  for (const path of tried) {
+    if (await $.fs.exists(path).catch(() => false)) return { path, tried }
+  }
+  return { tried }
+}
+
+export async function appPath($: any, bundleId: string): Promise<string | undefined> {
+  if (!BUNDLE_ID.test(bundleId)) return undefined
+  const found = await $.process.run(['/usr/bin/mdfind', `kMDItemCFBundleIdentifier == '${bundleId}'`], { timeoutMs: 4000 })
+  const paths = found.stdout.split('\n').filter((line: string) => line.endsWith('.app'))
+  return paths.find((path: string) => !path.includes('/Volumes/')) ?? paths[0]
+}
+
+const displayName = (path: string) => path.slice(path.lastIndexOf('/') + 1).replace(/\.app$/, '')
+
+// This conversation's grants: the session file the runtime keeps, keyed by the Claude session id.
+async function sessionGrants($: any): Promise<SessionRow[]> {
+  const id = await $.session.id()
+  const codex = (await $.env.get('CODEX_HOME')) || `${await $.env.get('HOME')}/.codex`
+  const file = `${codex}/computer-use/sessions/${id}.toml`
+  if (!/^[A-Za-z0-9._-]+$/.test(String(id)) || !(await $.fs.exists(file).catch(() => false))) return []
+  const ids = parseAllowed(await $.fs.read(file))
+  const rows: SessionRow[] = []
+  for (const bundleId of ids) {
+    const path = await appPath($, bundleId).catch(() => undefined)
+    const risk = await $.store.get(`risk:${bundleId}`)
+    rows.push({ name: path ? displayName(path) : bundleId, bundleId, risk: typeof risk === 'string' ? risk : undefined })
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+export async function loadApps($: any, lcu: string): Promise<AppsData> {
+  const run = await $.process.run([lcu, 'apps', '--json'], { timeoutMs: 20000 })
+  if (!ok(run)) throw new Error(firstLine(run.stderr) || `lcu apps exited ${run.exitCode}`)
+  let always: AppRow[]
+  try {
+    always = JSON.parse(run.stdout).apps
+  } catch {
+    throw new Error('lcu apps --json printed something unreadable')
+  }
+  return { always, session: await sessionGrants($).catch(() => []) }
+}
+
+// The app's icon as base64 PNG, or undefined: converted once with sips and kept in the store.
+export async function appIcon($: any, bundleId: string, timeoutMs = 3500): Promise<string | undefined> {
+  const key = `icon:${bundleId}`
+  const cached = (await $.store.get(key)) as { png?: string; at?: number } | undefined
+  if (cached?.png) return cached.png
+  if (cached && typeof cached.at === 'number' && Date.now() - cached.at < ICON_TTL_MS) return undefined
+  let timer: { cancel: () => void } | undefined
+  const gave = new Promise<undefined>(resolve => { timer = $.clock.after(timeoutMs, () => resolve(undefined)) })
+  const png = await Promise.race([convertIcon($, bundleId).catch(() => undefined), gave])
+  timer?.cancel()
+  await $.store.set(key, png ? { png } : { at: Date.now() }).catch(() => {})
+  return png
+}
+
+async function convertIcon($: any, bundleId: string): Promise<string | undefined> {
+  const app = await appPath($, bundleId)
+  if (!app) return undefined
+  const made = await $.process.run(['/usr/bin/mktemp', '-d'], { timeoutMs: 2000 })
+  const dir = made.stdout.trim()
+  if (!ok(made) || !dir.startsWith('/')) return undefined
+  try {
+    const out = `${dir}/icon.png`
+    let source: string | undefined
+    const named = await $.process.run(['/usr/bin/plutil', '-extract', 'CFBundleIconFile', 'raw', '-o', '-', `${app}/Contents/Info.plist`], { timeoutMs: 2000 })
+    if (ok(named) && named.stdout.trim()) {
+      const file = named.stdout.trim()
+      source = `${app}/Contents/Resources/${file.endsWith('.icns') ? file : `${file}.icns`}`
+      if (!(await $.fs.exists(source).catch(() => false))) source = undefined
+    }
+    if (source) {
+      const sips = await $.process.run(['/usr/bin/sips', '-s', 'format', 'png', '-Z', ICON_PIXELS, source, '--out', out], { timeoutMs: 3000 })
+      if (!ok(sips)) source = undefined
+    }
+    if (!source) {
+      // Asset-catalog icons have no .icns: ask the system for the icon.
+      const script = 'ObjC.import("AppKit");var i=$.NSWorkspace.sharedWorkspace.iconForFile(' + JSON.stringify(app) +
+        ');var r=$.NSBitmapImageRep.imageRepWithData(i.TIFFRepresentation);' +
+        'r.representationUsingTypeProperties($.NSBitmapImageRepFileTypePNG,$({})).writeToFileAtomically(' + JSON.stringify(`${dir}/full.png`) + ',true)'
+      const drawn = await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script], { timeoutMs: 3000 })
+      if (!ok(drawn)) return undefined
+      const small = await $.process.run(['/usr/bin/sips', '-Z', ICON_PIXELS, `${dir}/full.png`, '--out', out], { timeoutMs: 3000 })
+      if (!ok(small)) return undefined
+    }
+    const { base64 } = await $.fs.read(out, { as: 'bytes' })
+    // A picture the surface would refuse would replace the whole pane with the engine's own.
+    return typeof base64 === 'string' && base64.startsWith('iVBORw0KGgo') ? base64 : undefined
+  } finally {
+    await $.process.run(['/bin/rm', '-rf', dir], { timeoutMs: 2000 }).catch(() => {})
+  }
+}
+
+async function openApps($: any): Promise<void> {
+  const state = await read($, apps)
+  await $.ui.open({
+    id: APPS_PANE,
+    title: 'Approved apps',
+    focus: true,
+    closeOnEscape: true,
+    rows: appsRows(state),
+  })
+}
+
+// Read the lists again; a failure leaves the panel saying so.
+async function refresh($: any): Promise<void> {
+  const { path, tried } = await findLcu($)
+  if (!path) {
+    const where = tried.length ? tried.join(' or ') : '~/.local/share/lcu/current/bin/lcu'
+    await update($, apps, state => ({
+      ...state, isLoaded: true, always: [], session: [],
+      unavailable: `The lcu command was not found at ${where}. Run lcu setup --agent claude-code again.`,
+    }))
+    return
+  }
+  try {
+    const data = await loadApps($, path)
+    await update($, apps, state => ({ ...state, ...data, isLoaded: true, unavailable: undefined }))
+  } catch (error) {
+    const text = `Could not list the apps: ${(error as Error).message}`
+    await update($, apps, state => ({
+      ...state, isLoaded: true, unavailable: state.always.length || state.session.length ? undefined : text,
+      notice: { tone: 'error', text },
+    }))
+  }
+}
+
+async function pressApps($: any, action: string): Promise<void> {
+  if (action === 'refresh') {
+    await update($, apps, state => ({ ...state, notice: undefined }))
+    await refresh($)
+    return
+  }
+  if (action.startsWith('revoke:')) {
+    const bundleId = action.slice('revoke:'.length)
+    await runLcu($, ['revoke', bundleId], `Revoking ${bundleId}. Confirm with Touch ID or your password...`)
+  }
+}
+
+// Run `lcu apps <args>`, which asks macOS for Touch ID or the password itself; show what it says.
+async function runLcu($: any, args: string[], working: string): Promise<void> {
+  if ((await read($, apps)).busy) return
+  const { path } = await findLcu($)
+  if (!path) {
+    await refresh($)
+    return
+  }
+  await update($, apps, (state: AppsState) => ({ ...state, busy: working, notice: undefined }))
+  let notice: AppsState['notice']
+  try {
+    const run = await $.process.run([path, 'apps', ...args], { timeoutMs: 180000 })
+    notice = run.exitCode === 0
+      ? { tone: 'ok', text: firstLine(run.stdout) || 'Done.' }
+      : { tone: 'error', text: firstLine(run.stderr).replace(/^lcu apps: /, '') || `lcu apps exited ${run.exitCode}` }
+  } catch (error) {
+    notice = { tone: 'error', text: `Could not run lcu: ${(error as Error).message}` }
+  }
+  $.ui.toast(notice.text)
+  await update($, apps, (state: AppsState) => ({ ...state, busy: undefined, notice }))
+  await refresh($)
+  await openApps($)
 }
 
 // Tell LCU what the person chose; false when LCU refused it.
@@ -152,25 +339,37 @@ function report($: any, text: string): void {
   $.ui.toast(`Computer use approval: ${text}`)
 }
 
-// Record the person's choice, then take the pane down. A refused record means the request ended.
+const CONFIRMATION: Record<Choice, (name: string) => string> = {
+  session: name => `${name} allowed for this conversation`,
+  always: name => `${name} always allowed`,
+  deny: name => `${name} denied`,
+  cancel: name => `Approval for ${name} dismissed`,
+}
+
+// Record the person's choice, confirm it, then take the pane down. A refused record means the request ended.
 async function finish($: any, approval: Approval, choice: Choice): Promise<void> {
-  await record($, approval.id, choice)
+  const recorded = await record($, approval.id, choice)
   const id = paneId(approval)
   await $.ui.close({ id }).catch(() => {})
+  if (!recorded) return
+  if (choice === 'session' || choice === 'always') {
+    if (approval.riskLevel === 'high') await $.store.set(`risk:${approval.app}`, 'high').catch(() => {})
+  }
+  $.ui.toast(CONFIRMATION[choice](approval.label))
 }
 
 // Open the pane; false when it waits undrawn (a narrow terminal) and the person needs another prompt.
-async function showPane($: any, approval: Approval): Promise<boolean> {
+async function showPane($: any, approval: Approval, icon?: string): Promise<boolean> {
   const id = paneId(approval)
-  shown.set(id, approval)
+  shown.set(id, { approval, icon })
   try {
     const opened = await $.ui.open({
       id,
-      title: 'Computer use approval',
+      title: APPROVAL_TITLE,
       focus: true,
       closeOnEscape: true,
       holdToasts: true,
-      rows: 9,
+      rows: approvalRows(approval),
     })
     if (opened.isPlaced) return true
   } catch {
@@ -185,10 +384,11 @@ async function showPane($: any, approval: Approval): Promise<boolean> {
 async function askAndRecord($: any, approval: Approval): Promise<void> {
   const options = [LABEL_SESSION, ...(approval.scopes.includes('always') ? [LABEL_ALWAYS] : []), LABEL_DENY]
   const risk = approval.riskLevel === 'high' && approval.warning ? `\n${WARNING_TITLE}: ${approval.warning}` : ''
+  const question = `Computer use will be able to see and control ${approval.label} (${approval.app}).${risk}`
   const started = Date.now()
   let choice: Choice = 'cancel'
   try {
-    const answer: string = await $.ui.ask(`${approval.message}${risk}`, { options, header: ASK_HEADER })
+    const answer: string = await $.ui.ask(question, { options, header: ASK_HEADER })
     choice = 'deny'
     // A person cannot answer in under a few hundred milliseconds; anything faster was not a person.
     if (Date.now() - started >= 400) {
@@ -198,5 +398,10 @@ async function askAndRecord($: any, approval: Approval): Promise<void> {
   } catch {
     // Dismissed.
   }
-  await record($, approval.id, choice)
+  if (await record($, approval.id, choice)) {
+    if ((choice === 'session' || choice === 'always') && approval.riskLevel === 'high') {
+      await $.store.set(`risk:${approval.app}`, 'high').catch(() => {})
+    }
+    $.ui.toast(CONFIRMATION[choice](approval.label))
+  }
 }
