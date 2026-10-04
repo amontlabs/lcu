@@ -55,6 +55,7 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertIn(prefix + 'lcu/macos_host.py', names)
                 self.assertIn(prefix + 'lcu/macos_sky_service.mjs', names)
                 self.assertNotIn(prefix + 'lcu/linux_sky_service.mjs', names)
+                self.assertIn(prefix + 'lcu/interpreter.py', names)
                 self.assertIn(prefix + 'lcu/doctor.py', names)
                 self.assertIn(prefix + 'lcu/app_layout.py', names)
                 self.assertIn(prefix + 'lcu/asar.py', names)
@@ -86,6 +87,7 @@ class BuildPlatformTests(unittest.TestCase):
                 manifest = json.load(bundle.extractfile(f'lcu-{VERSION}-linux-x64/bundle.json'))
                 self.assertEqual((manifest['platform'], manifest['architecture']), ('linux', 'x64'))
                 names = {member.name for member in bundle}
+                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/interpreter.py', names)
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/linux_sky_service.mjs', names)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/lcu/macos_sky_service.mjs', names)
 
