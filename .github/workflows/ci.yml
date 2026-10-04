@@ -52,10 +52,9 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-      # Hermes tests run the adapter bridge. The adapter suite's fixtures
-      # are not Windows-ready yet (URL pathnames, Unix socket paths).
       - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
       - run: python -m unittest discover -b -s tests -p 'test_*.py'
+      - run: npm test --prefix adapters
       - run: python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"
       - run: python scripts/check_archive.py (Get-ChildItem "$env:RUNNER_TEMP\dist\*.zip").FullName
 

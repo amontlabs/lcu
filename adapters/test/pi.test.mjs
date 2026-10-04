@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import piExtension from '../pi/index.ts';
 
-const fixture = new URL('./mcp-fixture.mjs', import.meta.url).pathname;
+const fixture = fileURLToPath(new URL('./mcp-fixture.mjs', import.meta.url));
 
 async function waitForFileMatch(path, predicate, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;

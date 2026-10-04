@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,13 @@ import {
   nativeAppApprovalResponse, relayElicitation, sendControlRequest,
 } from '../client.mjs';
 
-const command = [process.execPath, new URL('./mcp-fixture.mjs', import.meta.url).pathname];
+// Host control is a macOS feature, but sendControlRequest only needs a net
+// endpoint; Windows has no Unix sockets in temp directories, so use a pipe.
+const controlEndpoint = directory => process.platform === 'win32'
+  ? `\\\\.\\pipe\\${directory.split(/[\\/]/).at(-1)}`
+  : join(directory, 'control.sock');
+
+const command = [process.execPath, fileURLToPath(new URL('./mcp-fixture.mjs', import.meta.url))];
 
 const nativeApproval = (persist = ['session', 'always']) => ({
   mode: 'form',
@@ -84,7 +91,7 @@ test('forwards real call context and retains unrelated caller metadata', async (
 
 test('host-control requests use the private newline JSON protocol and surface original errors', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-control-contract-'));
-  const socketPath = join(directory, 'control.sock');
+  const socketPath = controlEndpoint(directory);
   const requests = [];
   let rejectNext = false;
   const server = createServer(socket => {
@@ -136,7 +143,7 @@ test('host-control requests use the private newline JSON protocol and surface or
 
 test('host-control client expires an unresponsive request at its finite outer deadline', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-control-deadline-'));
-  const socketPath = join(directory, 'control.sock');
+  const socketPath = controlEndpoint(directory);
   let received;
   const requestReceived = new Promise(resolve => { received = resolve; });
   const server = createServer(socket => socket.once('data', received));
@@ -156,7 +163,8 @@ test('host-control client expires an unresponsive request at its finite outer de
   }
 });
 
-test('macOS control endpoint is optional, private to a live client, and unavailable after close', async () => {
+test('macOS control endpoint is optional, private to a live client, and unavailable after close',
+  { skip: process.platform === 'win32' && 'the macOS host-control endpoint is a Unix socket' }, async () => {
   const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { ...platformDescriptor, value: 'darwin' });
   const bridge = createCuaClient({ command });
