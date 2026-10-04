@@ -56,7 +56,7 @@ def provision(release, source, *, target='linux', mac_node=None, adapters_source
                     Path(mac_node) if mac_node is not None else None)
                 npm_command = shutil.which('npm')
                 npm = Path(npm_command).resolve() if npm_command else None
-                if os.name == 'nt' and node is not None:
+                if os.name == 'nt' and target == 'windows' and node is not None:
                     # Windows npm is a .cmd shim; Node runs the CLI script beside node.exe.
                     npm = node.parent / 'node_modules/npm/bin/npm-cli.js'
                 if node is None or not node.is_file() or not os.access(node, os.X_OK):
