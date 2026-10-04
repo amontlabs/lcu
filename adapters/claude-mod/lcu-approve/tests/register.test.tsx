@@ -63,7 +63,7 @@ test('the hook blocks at once; a pane press then records the choice with LCU', a
     'Allow this conversation', 'Always allow', 'Deny',
   ])
   expect(await ui.find({ type: 'Text', text: /new risks/ })).toBeDefined()
-  await ui.press({ key: 'always' })
+  await ui.press({ key: 'lcu-approve:abc:always' })
   expect(calls.filter(call => call.tool === 'choice').map(call => call.args.choice)).toEqual(['always'])
   expect(calls.find(call => call.tool === 'choice')?.args.id).toBe(APPROVAL.id)
 })
@@ -73,7 +73,7 @@ test('the pane leaves out Always allow when the runtime did not offer it', async
   const calls = lcu(on, { approval: { ...APPROVAL, scopes: ['session'], riskLevel: 'low', warning: undefined as any } })
   const { ui } = await openPane($, clock, calls)
   expect((await ui.findAll({ type: 'Button' })).map(button => button.text)).toEqual(['Allow this conversation', 'Deny'])
-  await ui.press({ key: 'deny' })
+  await ui.press({ key: 'lcu-approve:abc:deny' })
   expect(calls.filter(call => call.tool === 'choice').map(call => call.args.choice)).toEqual(['deny'])
 })
 

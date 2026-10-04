@@ -9,6 +9,7 @@ const LABEL_SESSION = 'Allow this conversation'
 const LABEL_ALWAYS = 'Always allow'
 const LABEL_DENY = 'Deny'
 const WARNING_TITLE = 'Elevated risk'
+const KEY_PREFIX = 'lcu-approve:'
 
 type Choice = 'session' | 'always' | 'deny' | 'cancel'
 
@@ -61,7 +62,9 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     const approval = shown.get(e.requestId)
     if (!approval) return next(e)
-    const settle = (choice: Choice) => void finish($, approval, choice)
+    // Presses are handled by the `ui.press` hook below, with that dispatch's own `$`.
+    const press = () => {}
+    const key = (choice: Choice) => `${KEY_PREFIX}${approval.id}:${choice}`
     const { Box, Text, Button } = $.ui.resolve(e)
     const isHigh = approval.riskLevel === 'high'
     return (
@@ -73,20 +76,35 @@ export const register: Register = on => {
         </Text>
         {approval.warning && <Text color={isHigh ? 'yellow' : undefined}>{approval.warning}</Text>}
         <Box flexDirection="row">
-          <Button key="session" variant="primary" hotkey="1" onPress={() => settle('session')}>
+          <Button key={key('session')} variant="primary" hotkey="1" onPress={press}>
             {LABEL_SESSION}
           </Button>
           {approval.scopes.includes('always') && (
-            <Button key="always" hotkey="2" onPress={() => settle('always')}>
+            <Button key={key('always')} hotkey="2" onPress={press}>
               {LABEL_ALWAYS}
             </Button>
           )}
-          <Button key="deny" hotkey="3" onPress={() => settle('deny')}>
+          <Button key={key('deny')} hotkey="3" onPress={press}>
             {LABEL_DENY}
           </Button>
         </Box>
       </Box>
     )
+  })
+
+  // A button press: record the choice with LCU from this dispatch, then take the pane down.
+  on('ui.press', async ($, e, next) => {
+    if (e.plugin !== $.plugin.name || !String(e.element).startsWith(KEY_PREFIX)) return next(e)
+    const rest = String(e.element).slice(KEY_PREFIX.length)
+    const id = rest.slice(0, rest.lastIndexOf(':'))
+    const choice = rest.slice(rest.lastIndexOf(':') + 1)
+    const pane = `lcu-approval-${id}`
+    const approval = shown.get(pane)
+    if (approval) {
+      shown.delete(pane)
+      await finish($, approval, choice as Choice)
+    }
+    return { element: e.element }
   })
 
   // Esc or the close mark dismisses the pane: that is a cancel.
@@ -120,17 +138,24 @@ export const register: Register = on => {
 async function record($: any, id: string, choice: Choice): Promise<boolean> {
   try {
     const reply = (await $.mcp.call(SERVER, CHOICE_TOOL, { id, choice })) as McpResult
-    return !reply.isError
-  } catch {
-    return false
+    if (!reply.isError) return true
+    report($, `LCU refused the choice: ${textOf(reply)}`)
+  } catch (error) {
+    report($, `could not send the choice to LCU: ${String(error)}`)
   }
+  return false
+}
+
+// A failure the person should see, and the debug log keeps.
+function report($: any, text: string): void {
+  $.ui.log(`lcu-approve: ${text}`, { to: 'debug' })
+  $.ui.toast(`Computer use approval: ${text}`)
 }
 
 // Record the person's choice, then take the pane down. A refused record means the request ended.
 async function finish($: any, approval: Approval, choice: Choice): Promise<void> {
   await record($, approval.id, choice)
   const id = paneId(approval)
-  shown.delete(id)
   await $.ui.close({ id }).catch(() => {})
 }
 
