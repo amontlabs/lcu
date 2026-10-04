@@ -140,6 +140,27 @@ class ClaudeApprovalTests(unittest.TestCase):
         self.assertEqual(approval.OMP_TOOLS, approval.MODEL_TOOLS)
         self.assertIn('|'.join(f'mcp__lcu__{tool}' for tool in approval.MODEL_TOOLS),
                       (root / 'lcu/claude_visibility.py').read_text())
+        # Mod-only tools: the same names in the relay and in Python.
+        mod_only = ', '.join(f"'{rule.removeprefix('mcp__lcu__')}'" for rule in claude_visibility.MOD_ONLY)
+        self.assertEqual(names(relay, 'MOD_ONLY_TOOLS'), mod_only)
+        self.assertIn('toolu_plugin_', client)
+
+    def test_tool_categories_are_disjoint_and_each_is_handled_consistently(self):
+        claude_visibility.install(self.home)
+        approval.apply_claude('auto', self.home)
+        permissions = self.read(self.user)['permissions']
+        model = {f'mcp__lcu__{tool}' for tool in approval.MODEL_TOOLS}
+        host_only, mod_only = set(claude_visibility.HOST_ONLY), set(claude_visibility.MOD_ONLY)
+        self.assertFalse(model & host_only or model & mod_only or host_only & mod_only)
+        self.assertEqual(set(permissions['allow']), model)
+        self.assertEqual(set(permissions['deny']), host_only)
+        # Mod-only tools are never allowed and never denied, in any mode.
+        for mode in ('auto', 'ask'):
+            approval.apply_claude(mode, self.home)
+            permissions = self.read(self.user)['permissions']
+            for rule in mod_only:
+                self.assertNotIn(rule, permissions.get('allow', []))
+                self.assertNotIn(rule, permissions.get('deny', []))
 
     def test_legacy_blanket_rule_is_migrated_by_auto_and_removed_by_ask(self):
         self.write(self.user, {'permissions': {'allow': ['Read']}})

@@ -27,6 +27,8 @@ const APPROVAL_REQUEST_TOOL = 'approval_request';
 const APPROVAL_CHOICE_TOOL = 'approval_choice';
 const APPROVAL_WAIT_TOOL = 'approval_wait';
 const TURN_END_TOOL = 'turn_ended';
+/** Listed for the lcu-approve mod but never allowed or denied in Claude's permissions; refused without a plugin tool-use id. */
+const MOD_ONLY_TOOLS = new Set(['approval_request', 'approval_wait', 'approval_choice']);
 const TURN_CONTEXT_META = 'x-codex-turn-metadata';
 const CLAUDE_TOOL_USE_META = 'claudecode/toolUseId';
 const TURN_CONTEXT_SCHEMA = {
@@ -256,7 +258,7 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
         });
         return { content: [{ type: 'text', text: 'Turn context bound.' }] };
       }
-      if (name === APPROVAL_REQUEST_TOOL || name === APPROVAL_WAIT_TOOL || name === APPROVAL_CHOICE_TOOL) {
+      if (MOD_ONLY_TOOLS.has(name)) {
         // Host-only: answered for the lcu-approve mod, which Claude Code marks with a plugin tool-use id.
         const modCall = _meta?.[CLAUDE_TOOL_USE_META];
         const outcome = name === APPROVAL_REQUEST_TOOL ? broker.describe(toolArgs.message, modCall)

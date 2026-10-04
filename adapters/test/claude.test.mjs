@@ -528,6 +528,25 @@ test('Claude relay declines an approval for an agent host app without asking the
   }
 });
 
+test('a refused agent host app never gets a pending approval record for the mod to show', async () => {
+  const bridge = await connectRelay();
+  try {
+    const mod = { 'claudecode/toolUseId': 'toolu_plugin_0123456789abcdef' };
+    const message = 'Allow Computer Use to use "LCU Fixture App"?';
+    const result = await callWithContext(bridge.client, 'js', { code: 'approval-native-host' }, {
+      toolUseId: 'host-no-record',
+    });
+    assert.deepEqual(JSON.parse(result.content[0].text), { action: 'decline' });
+    // The decline short-circuited before broker.open: the mod finds nothing to describe or choose.
+    const described = await bridge.client.callTool({
+      name: 'approval_request', arguments: { message }, _meta: mod });
+    assert.equal(described.isError, true);
+    assert.match(described.content[0].text, /No pending native-app approval/);
+  } finally {
+    await bridge.close();
+  }
+});
+
 const MOD = { 'claudecode/toolUseId': 'toolu_plugin_0123456789abcdef' };
 const approvalCall = (client, name, args, meta = MOD) =>
   client.callTool({ name, arguments: args, _meta: meta });
