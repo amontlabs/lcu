@@ -31,3 +31,15 @@ export function parseAllowed(toml: string): string[] {
 
 
 export const firstLine = (text: string) => String(text ?? '').trim().split('\n').filter(Boolean).pop() ?? ''
+
+// The runtime's risk warning names its own agent; the person is using Claude, so say what it means.
+export const plainWarning = (text: string) =>
+  text
+    .replace(/Allowing ChatGPT to use this app/g, 'Allowing computer use to control this app')
+    .replace(/monitor ChatGPT while it uses this app/g, 'monitor the agent while it uses this app')
+    .replace(/ChatGPT/g, 'the agent')
+
+// Whether the terminal draws the picture of an Image (the kitty graphics protocol: kitty, Ghostty); elsewhere
+// the Image would leave blank cells before the app's name.
+export const drawsImages = (vars: Record<string, string | undefined>) =>
+  !vars.TMUX && (Boolean(vars.KITTY_WINDOW_ID || vars.GHOSTTY_RESOURCES_DIR) || vars.TERM === 'xterm-kitty' || vars.TERM_PROGRAM === 'ghostty')

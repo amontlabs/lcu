@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import { BUNDLE_ID, CONFIG_FILE, DEFAULT_LCU, ICON_PIXELS, ICON_TTL_MS, firstLine, ok, parseAllowed } from './data'
+import { BUNDLE_ID, CONFIG_FILE, DEFAULT_LCU, ICON_PIXELS, ICON_TTL_MS, drawsImages, firstLine, ok, parseAllowed, plainWarning } from './data'
 import type { AppRow, AppsData, SessionRow } from './data'
 import {
   APPS_PREFIX, AppsView, ApprovalView, INITIAL_APPS, KEY_PREFIX, LABEL_ALWAYS, LABEL_DENY, LABEL_SESSION,
@@ -22,7 +22,7 @@ const APPS_PANE = 'lcu-approved-apps'
 type Choice = 'session' | 'always' | 'deny' | 'cancel'
 
 // Panes on screen, by pane id: the request and the app's icon, if one could be made.
-const shown = new Map<string, { approval: Approval; icon?: string }>()
+const shown = new Map<string, { approval: Approval; icon?: string; graphics: boolean }>()
 
 const apps = atom({ plugin: 'lcu-approve', key: 'apps' } as const, INITIAL_APPS)
 
@@ -51,11 +51,12 @@ export const register: Register = on => {
 
     // The icon is made here, in an event hook: a render closure cannot run a process.
     const icon = await appIcon($, approval.app).catch(() => undefined)
+    const graphics = await terminalDrawsImages($)
 
     // No hook stays pending while the person decides: a pending hook keeps the desktop surface from
     // delivering the pane's presses. The pane's button (or Esc) records the choice with LCU, whose
     // relay keeps the runtime's elicitation open until then; this hook only blocks the engine's form.
-    if (!(await showPane($, approval, icon))) {
+    if (!(await showPane($, approval, icon, graphics))) {
       // A narrow terminal seats no pane: ask from a timer, which is a dispatch of its own.
       $.clock.after(0, () => askAndRecord($, approval))
     }
@@ -70,7 +71,7 @@ export const register: Register = on => {
     const entry = shown.get(e.requestId)
     if (!entry) return next(e)
     // Presses are handled by the `ui.press` hook below, with that dispatch's own `$`.
-    return <ApprovalView ui={$.ui.resolve(e)} surface={e.surface} approval={entry.approval} icon={entry.icon} />
+    return <ApprovalView ui={$.ui.resolve(e)} surface={e.surface} approval={entry.approval} icon={entry.icon} graphics={entry.graphics} />
   })
 
   // A button press: record the choice with LCU from this dispatch, then take the pane down.
@@ -144,6 +145,17 @@ export const register: Register = on => {
       return { decision: 'allow', reason: 'LCU approval mod' }
     })
   }
+}
+
+export async function terminalDrawsImages($: any): Promise<boolean> {
+  const get = (value: Promise<unknown>) => value.then(v => (typeof v === 'string' ? v : undefined), () => undefined)
+  return drawsImages({
+    TMUX: await get($.env.get('TMUX')),
+    KITTY_WINDOW_ID: await get($.env.get('KITTY_WINDOW_ID')),
+    GHOSTTY_RESOURCES_DIR: await get($.env.get('GHOSTTY_RESOURCES_DIR')),
+    TERM: await get($.env.get('TERM')),
+    TERM_PROGRAM: await get($.env.get('TERM_PROGRAM')),
+  })
 }
 
 // The lcu executable: the path `lcu setup` wrote beside the mod, else the stable install location.
@@ -359,9 +371,9 @@ async function finish($: any, approval: Approval, choice: Choice): Promise<void>
 }
 
 // Open the pane; false when it waits undrawn (a narrow terminal) and the person needs another prompt.
-async function showPane($: any, approval: Approval, icon?: string): Promise<boolean> {
+async function showPane($: any, approval: Approval, icon: string | undefined, graphics: boolean): Promise<boolean> {
   const id = paneId(approval)
-  shown.set(id, { approval, icon })
+  shown.set(id, { approval, icon, graphics })
   try {
     const opened = await $.ui.open({
       id,
@@ -383,7 +395,7 @@ async function showPane($: any, approval: Approval, icon?: string): Promise<bool
 // The engine's question dialog, for where no pane is seated.
 async function askAndRecord($: any, approval: Approval): Promise<void> {
   const options = [LABEL_SESSION, ...(approval.scopes.includes('always') ? [LABEL_ALWAYS] : []), LABEL_DENY]
-  const risk = approval.riskLevel === 'high' && approval.warning ? `\n${WARNING_TITLE}: ${approval.warning}` : ''
+  const risk = approval.riskLevel === 'high' && approval.warning ? `\n${WARNING_TITLE}: ${plainWarning(approval.warning)}` : ''
   const question = `Computer use will be able to see and control ${approval.label} (${approval.app}).${risk}`
   const started = Date.now()
   let choice: Choice = 'cancel'

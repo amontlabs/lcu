@@ -63,6 +63,8 @@ test('the hook blocks at once; a pane press then records the choice with LCU', a
     'Allow this conversation', 'Always allow', 'Deny',
   ])
   expect(await ui.find({ type: 'Text', text: /new risks/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /ChatGPT/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Allowing computer use to control this app/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Computer use will be able to see and control Zed.' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'dev.zed.Zed' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /High risk/ })).toBeDefined()
@@ -122,7 +124,7 @@ test('the model may not call the host-only tools', async ($, on) => {
 })
 
 // The host beneath the mod: processes, files, the store, the session, toasts.
-function host(on: any, { files = {} as Record<string, string>, processes = (argv: string[]): any => undefined, session = 'sess-1' } = {}) {
+function host(on: any, { files = {} as Record<string, string>, processes = (argv: string[]): any => undefined, session = 'sess-1', terminal = 'ghostty' } = {}) {
   const ran: string[][] = []
   const toasts: string[] = []
   const store = new Map<string, unknown>()
@@ -138,7 +140,7 @@ function host(on: any, { files = {} as Record<string, string>, processes = (argv
     key(e.path) in files
       ? { value: e.as === 'bytes' ? { base64: files[key(e.path)] } : files[key(e.path)] }
       : { deny: `no such file: ${e.path}` })
-  on('env.get', (_$: any, e: any) => ({ value: ({ HOME: '/home/me' } as Record<string, string>)[e.name] }))
+  on('env.get', (_$: any, e: any) => ({ value: ({ HOME: '/home/me', TERM_PROGRAM: terminal } as Record<string, string>)[e.name] }))
   on('session.id', () => ({ value: session }))
   on('store.get', (_$: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_$: any, e: any) => { store.set(e.key, e.value); return { value: undefined } })
@@ -210,6 +212,7 @@ const APPS_JSON = JSON.stringify({
   apps: [
     { name: 'Safari', bundleId: 'com.apple.Safari', installed: true, risk: 'high', blocked: false },
     { name: 'Zed', bundleId: 'dev.zed.Zed', installed: true, risk: 'normal', blocked: false },
+    { name: 'org.gone.App', bundleId: 'org.gone.App', installed: false, risk: 'normal', blocked: false },
   ],
 })
 const SESSION_FILE = '/home/me/.codex/computer-use/sessions/sess-1.toml'
@@ -243,10 +246,10 @@ test('the apps panel lists the always-allowed apps and this conversation\'s gran
   expect(ran).toContainEqual([LCU, 'apps', '--json'])
   const texts = (await ui.findAll({ type: 'Text' })).map(text => text.text)
   expect(texts).toEqual(expect.arrayContaining([
-    'Always allowed (2)', 'Safari', 'com.apple.Safari', ' High risk ', 'Zed', 'dev.zed.Zed',
+    'Always allowed (2)', 'Not installed (1)', 'org.gone.App', 'Safari', 'com.apple.Safari', ' High risk ', 'Zed', 'dev.zed.Zed',
     'This conversation (1)', 'Calculator', 'com.apple.calculator', 'Ends with this conversation',
   ]))
-  expect((await ui.findAll({ type: 'Button' })).map(button => button.text)).toEqual(['Refresh', 'Revoke', 'Revoke'])
+  expect((await ui.findAll({ type: 'Button' })).map(button => button.text)).toEqual(['Refresh', 'Revoke', 'Revoke', 'Revoke'])
 })
 
 test('Revoke runs lcu apps revoke, toasts its message and lists again', async ($, on) => {
@@ -301,4 +304,44 @@ test('the panel never offers to revoke a conversation grant', async ($, on) => {
   appsHost(on)
   const ui = await openApps($)
   expect((await ui.findAll({ type: 'Button' })).map(button => button.key ?? button.text).join()).not.toContain('calculator')
+})
+
+test('the warning is shown without the runtime\'s product name', async () => {
+  const { plainWarning } = await import('../hooks/data')
+  expect(plainWarning('Allowing ChatGPT to use this app introduces new risks. Carefully monitor ChatGPT while it uses this app. ChatGPT may err.'))
+    .toBe('Allowing computer use to control this app introduces new risks. Carefully monitor the agent while it uses this app. the agent may err.')
+})
+
+test('the ask fallback shows the warning without the product name', async ($, on) => {
+  const clock = mock.clock(on)
+  const calls = lcu(on, { placed: false })
+  const questions: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_$: any, e: any) => {
+    questions.push(JSON.stringify(e))
+    await clock.advance(1000)
+    return { value: { content: 'Deny' } } as any
+  })
+  await $.classic.Elicitation(ELICITATION as any)
+  await until(clock, () => calls.some(call => call.tool === 'choice'))
+  expect(questions[0]).toContain('Allowing computer use to control this app')
+  expect(questions[0]).not.toContain('ChatGPT')
+})
+
+test('not installed apps are grouped after the installed ones and stay revocable', async ($, on) => {
+  appsHost(on)
+  const ui = await openApps($)
+  const texts = (await ui.findAll({ type: 'Text' })).map(text => text.text)
+  expect(texts.indexOf('Not installed (1)')).toBeGreaterThan(texts.indexOf('Zed'))
+  expect(texts.indexOf('org.gone.App')).toBeGreaterThan(texts.indexOf('Not installed (1)'))
+  expect(texts).not.toContain('Not installed')
+  expect((await ui.findAll({ type: 'Button' })).map(button => button.key)).toContain('lcu-approve:apps:revoke:org.gone.App')
+})
+
+test('a terminal that cannot draw pictures gets no icon cell before the name', async ($, on) => {
+  const clock = mock.clock(on)
+  const calls = lcu(on)
+  const { store } = host(on, { files: ICON_FILES, processes: iconProcesses, terminal: 'Apple_Terminal' })
+  const { ui } = await openPane($, clock, calls)
+  expect(store.get('icon:dev.zed.Zed')).toEqual({ png: ZED_ICON })
+  expect(await ui.find({ type: 'Image' })).toBeUndefined()
 })

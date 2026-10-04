@@ -1,5 +1,6 @@
 // What the panes draw. Pure functions of their data, so no side effect can sit in a render closure:
 // every Button's press is handled by the `ui.press` hook of the mod that draws them.
+import { plainWarning } from './data'
 import type { AppRow, SessionRow } from './data'
 
 export const KEY_PREFIX = 'lcu-approve:'
@@ -34,10 +35,15 @@ export const INITIAL_APPS: AppsState = { isLoaded: false, always: [], session: [
 
 const noop = () => {}
 
-// A pane's body rows: the request, and what the panel lists.
+// A pane's body rows: the request, and what the panel lists. Past the cap the pane scrolls.
 export const approvalRows = (approval: Approval) => (approval.riskLevel === 'high' ? 11 : 8)
-export const appsRows = (state: AppsState) =>
-  Math.min(24, 12 + 2 * state.always.length + state.session.length + (state.notice ? 2 : 0))
+export const APPS_MAX_ROWS = 26
+export const appsRows = (state: AppsState) => {
+  const kept = state.always.filter(app => app.installed).length
+  const gone = state.always.length - kept
+  const listed = 11 + kept + (gone ? 2 + gone : 0) + Math.max(1, state.session.length) + (state.notice || state.busy ? 1 : 0)
+  return Math.min(APPS_MAX_ROWS, listed)
+}
 
 const esc = (text: string) => text.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`)
 
@@ -76,21 +82,23 @@ const RiskBadge = ({ ui }: { ui: any }) => {
 }
 
 // The approval request: the app, one sentence, the risk when high, the choices.
-export function ApprovalView({ ui, surface, approval, icon }: { ui: any; surface: string; approval: Approval; icon?: string }) {
+export function ApprovalView({ ui, surface, approval, icon, graphics = true }: { ui: any; surface: string; approval: Approval; icon?: string; graphics?: boolean }) {
   const { Box, Text, Button } = ui
   const isHigh = approval.riskLevel === 'high'
+  // A terminal that cannot draw the picture gets no icon cell, so the name starts at the pane's edge.
+  const shownIcon = surface === 'terminal' && !graphics ? undefined : icon
   const key = (choice: string) => `${KEY_PREFIX}${approval.id}:${choice}`
   return (
     <Box flexDirection="column" gap={1} paddingY={surface === 'terminal' ? 0 : 1}>
-      <Box flexDirection="row" gap={2} alignItems="center">
-        <Icon ui={ui} surface={surface} name={approval.label} icon={icon} />
+      <Box flexDirection="row" gap={surface === 'terminal' && !shownIcon ? 0 : 2} alignItems="center">
+        <Icon ui={ui} surface={surface} name={approval.label} icon={shownIcon} />
         <AppTitle ui={ui} name={approval.label} bundleId={approval.app} />
       </Box>
       <Text>{`Computer use will be able to see and control ${approval.label}.`}</Text>
       {isHigh && (
         <Box flexDirection="column">
           <RiskBadge ui={ui} />
-          {approval.warning && <Text color="yellow">{approval.warning}</Text>}
+          {approval.warning && <Text color="yellow">{plainWarning(approval.warning)}</Text>}
         </Box>
       )}
       <Box flexDirection="row" gap={1}>
@@ -110,28 +118,49 @@ export function ApprovalView({ ui, surface, approval, icon }: { ui: any; surface
   )
 }
 
+// One line per app: name, the dim bundle id, the badges, Revoke at the right.
 function AppRowView({ ui, name, bundleId, children }: { ui: any; name: string; bundleId: string; children: any }) {
-  const { Box } = ui
+  const { Box, Text } = ui
   return (
     <Box flexDirection="row" gap={2} alignItems="center">
-      <AppTitle ui={ui} name={name} bundleId={bundleId} />
+      <Box flexShrink={0}>
+        <Text bold>{name}</Text>
+      </Box>
+      {bundleId !== name && (
+        <Box flexShrink={1}>
+          <Text dimColor wrap="truncate-end">{bundleId}</Text>
+        </Box>
+      )}
+      <Box flexGrow={1} />
       {children}
     </Box>
   )
 }
 
 // The approved apps: the always-allowed list with Revoke, this conversation's grants, an Allow field.
+// The pane's body scrolls when it is taller than the pane.
 export function AppsView({ ui, state }: { ui: any; state: AppsState }) {
   const { Box, Text, Button, Input } = ui
   const busy = Boolean(state.busy)
+  const present = state.always.filter(app => app.installed)
+  const missing = state.always.filter(app => !app.installed)
+  const row = (app: AppRow) => (
+    <AppRowView key={app.bundleId} ui={ui} name={app.name} bundleId={app.bundleId}>
+      {app.risk === 'high' && <RiskBadge ui={ui} />}
+      {app.blocked && <Text color="red">Blocked by Computer use</Text>}
+      <Button key={`${APPS_PREFIX}revoke:${app.bundleId}`} onPress={noop}>Revoke</Button>
+    </AppRowView>
+  )
   return (
     <Box flexDirection="column" gap={1}>
-      <Box flexDirection="row" gap={2} alignItems="center">
-        <Box flexDirection="column" flexGrow={1}>
-          <Text bold>Approved apps</Text>
-          <Text dimColor>Computer use can control these apps without asking.</Text>
+      <Box flexDirection="column">
+        <Text bold>Approved apps</Text>
+        <Box flexDirection="row" gap={2} alignItems="center">
+          <Box flexGrow={1}>
+            <Text dimColor>Computer use can control these apps without asking.</Text>
+          </Box>
+          <Button key={`${APPS_PREFIX}refresh`} onPress={noop}>Refresh</Button>
         </Box>
-        <Button key={`${APPS_PREFIX}refresh`} onPress={noop}>Refresh</Button>
       </Box>
       {state.unavailable ? (
         <Text color="yellow">{state.unavailable}</Text>
@@ -139,19 +168,18 @@ export function AppsView({ ui, state }: { ui: any; state: AppsState }) {
         <Text dimColor>Loading...</Text>
       ) : (
         <Box flexDirection="column" gap={1}>
-          <Box flexDirection="column" gap={1}>
-            <Text bold dimColor>{`Always allowed (${state.always.length})`}</Text>
-            {state.always.length === 0 && <Text dimColor>None. Allow one below.</Text>}
-            {state.always.map(app => (
-              <AppRowView key={app.bundleId} ui={ui} name={app.name} bundleId={app.bundleId}>
-                {app.risk === 'high' && <RiskBadge ui={ui} />}
-                {app.blocked && <Text color="red">Blocked by Computer use</Text>}
-                {!app.installed && <Text dimColor>Not installed</Text>}
-                <Button key={`${APPS_PREFIX}revoke:${app.bundleId}`} onPress={noop}>Revoke</Button>
-              </AppRowView>
-            ))}
+          <Box flexDirection="column">
+            <Text bold dimColor>{`Always allowed (${present.length})`}</Text>
+            {present.length === 0 && <Text dimColor>None. Allow one below.</Text>}
+            {present.map(row)}
           </Box>
-          <Box flexDirection="column" gap={1}>
+          {missing.length > 0 && (
+            <Box flexDirection="column">
+              <Text bold dimColor>{`Not installed (${missing.length})`}</Text>
+              {missing.map(row)}
+            </Box>
+          )}
+          <Box flexDirection="column">
             <Text bold dimColor>{`This conversation (${state.session.length})`}</Text>
             {state.session.length === 0 && <Text dimColor>None.</Text>}
             {state.session.map(app => (
