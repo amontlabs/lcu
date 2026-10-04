@@ -17,8 +17,10 @@ REPO = 'amontlabs/lcu'
 LATEST_URL = f'https://github.com/{REPO}/releases/latest'
 RELEASE_URL = f'https://github.com/{REPO}/releases/tag/'
 NOTES_URL = f'https://raw.githubusercontent.com/{REPO}/%s/docs/releases/%s.md'
-INTERVAL = 24 * 3600
+INTERVAL = 600
 RETRY = 3600
+STAMP_TTL = 120
+ANNOUNCE_TTL = 7 * 24 * 3600
 TIMEOUT = 5
 SEVERITIES = ('security', 'breaking')
 
@@ -190,6 +192,23 @@ def stable_command(root):
     return lcu_command(root)
 
 
+def refresh_claimed(now=None):
+    """True when this caller should spawn a refresh (touches refresh.stamp); never raises."""
+    try:
+        stamp = cache_path().with_name('refresh.stamp')
+        now = time.time() if now is None else now
+        try:
+            if 0 <= now - stamp.stat().st_mtime < STAMP_TTL:
+                return False
+        except OSError:
+            pass
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+        return True
+    except Exception:
+        return True
+
+
 def spawn_refresh(root):
     """Start a detached `lcu update --refresh`; never waits."""
     options = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
@@ -214,12 +233,55 @@ def notice(root):
             return None
         if stale(read_cache()):
             try:
-                spawn_refresh(root)
+                if refresh_claimed():
+                    spawn_refresh(root)
             except Exception:
                 pass
         return notice_cached(root)
     except Exception:
         return None
+
+
+def hook_session_id():
+    """session_id from the hook input JSON on stdin (the harness closes it), or None."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return None
+        data = json.loads(sys.stdin.read(1 << 20))
+        value = data.get('session_id') if isinstance(data, dict) else None
+        return value if isinstance(value, str) and value else None
+    except Exception:
+        return None
+
+
+def announce(session_id, version, now=None):
+    """True when this session should be told about `version`; records it. Never raises."""
+    try:
+        if not session_id:
+            return True
+        now = time.time() if now is None else now
+        path = cache_path().with_name('announced.json')
+        try:
+            data = json.loads(path.read_text())
+            data = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            data = {}
+        data = {k: v for k, v in data.items() if isinstance(v, dict) and isinstance(v.get('at'), (int, float))
+                and 0 <= now - v['at'] < ANNOUNCE_TTL}
+        if data.get(session_id, {}).get('version') == version:
+            return False
+        data[session_id] = {'version': version, 'at': now}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(dir=path.parent, prefix='.announced-')
+            with os.fdopen(fd, 'w') as handle:
+                json.dump(data, handle)
+            os.replace(name, path)
+        except OSError:
+            pass
+        return True
+    except Exception:
+        return True
 
 
 def cached_notice(root):
@@ -266,8 +328,9 @@ def codex_needs_setup(home=None, env=None):
         return False
     if 'lcu' not in (data.get('mcp_servers') or {}):
         return False
-    groups = (data.get('hooks') or {}).get('SessionStart') or []
-    return not any(is_notice_group(group) for group in groups if isinstance(group, dict))
+    hooks = data.get('hooks') or {}
+    return not all(any(is_notice_group(group) for group in hooks.get(event) or [] if isinstance(group, dict))
+                   for event in ('SessionStart', 'UserPromptSubmit'))
 
 
 def post_install(root, home=None):
@@ -291,18 +354,20 @@ def main(root, argv=None):
     mode.add_argument('--refresh', action='store_true', help=argparse.SUPPRESS)
     mode.add_argument('--post-install', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--json', action='store_true', help='Print JSON (with --check or --notice)')
-    parser.add_argument('--hook-json', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--hook', choices=('SessionStart', 'UserPromptSubmit'), help=argparse.SUPPRESS)
     parser.add_argument('--yes', action='store_true', help='Do not ask before installing')
     args = parser.parse_args(argv)
     root = Path(root)
     if args.notice:
         try:
             found = notice(root)
-            if args.hook_json:
-                # A SessionStart hook's documented way to add model context; nothing when there is no notice.
+            if args.hook:
+                # A hook's documented way to add model context: once per session and release, else silent.
                 if found:
-                    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart',
-                                                             'additionalContext': found['message']}}))
+                    session = hook_session_id()
+                    if (session or args.hook == 'SessionStart') and announce(session, found['latest']):
+                        print(json.dumps({'hookSpecificOutput': {'hookEventName': args.hook,
+                                                                 'additionalContext': found['message']}}))
             else:
                 print(json.dumps(found or {}) if args.json else (found['message'] if found else ''),
                       end='\n' if args.json or found else '')

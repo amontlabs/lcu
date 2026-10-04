@@ -31,7 +31,12 @@ type McpResult = { isError?: boolean; content?: { type: string; text?: string }[
 const textOf = (result: McpResult) =>
   (result.content ?? []).map(item => item.text ?? '').join('')
 
-let noticeToasted = false
+// Update notices: per session (the classic event's session_id), what was last announced and when the cache
+// was last asked; one toast per version per process.
+const NOTICE_RECHECK_MS = 600000
+const DEFAULT_SESSION = 'default'
+const noticeSessions = new Map<string, { announced?: string; lastCheck?: number }>()
+const toastedVersions = new Set<string>()
 
 const paneId = (approval: Approval) => `lcu-approval-${approval.id}`
 
@@ -130,13 +135,34 @@ export const register: Register = on => {
   // context (`session.start` cannot carry any; the classic SessionStart hook can), the person one toast.
   on('classic.SessionStart', async ($, e, next) => {
     const result = await next(e)
+    const state = sessionState(e)
+    state.lastCheck = await now($)
     const notice = await updateNotice($)
     if (!notice) return result
-    if (!noticeToasted && (await $.session.surfaces().catch(() => [])).length > 0) {
-      noticeToasted = true
-      $.ui.toast(noticeToast(notice))
-    }
+    state.announced = notice.latest ?? notice.message
+    await toastOnce($, notice)
     return { ...result, additionalContext: [...(result.additionalContext ?? []), notice.message] }
+  })
+
+  // A release published while the session is open: the cache refreshes in the background, so the first
+  // prompt and then at most one check per NOTICE_RECHECK_MS reads it; each version is announced once.
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const state = sessionState(e)
+      const at = await now($)
+      if (state.lastCheck !== undefined && at - state.lastCheck < NOTICE_RECHECK_MS) return result
+      state.lastCheck = at
+      const notice = await updateNotice($)
+      if (!notice) return result
+      const version = notice.latest ?? notice.message
+      if (version === state.announced) return result
+      state.announced = version
+      await toastOnce($, notice)
+      return { ...result, additionalContext: [...(result.additionalContext ?? []), notice.message] }
+    } catch {
+      return result
+    }
   })
 
   on('command.run', { command: APPS_COMMAND }, async $ => {
@@ -160,6 +186,30 @@ export const register: Register = on => {
       return { decision: 'allow', reason: 'LCU approval mod' }
     })
   }
+}
+
+const now = async ($: any): Promise<number> => {
+  try {
+    const t = await $.clock.now()
+    return typeof t === 'number' ? t : Date.now()
+  } catch {
+    return Date.now()
+  }
+}
+
+const sessionState = (e: any) => {
+  const id = typeof e?.session_id === 'string' && e.session_id ? e.session_id : DEFAULT_SESSION
+  let state = noticeSessions.get(id)
+  if (!state) noticeSessions.set(id, (state = {}))
+  return state
+}
+
+async function toastOnce($: any, notice: UpdateNotice) {
+  const version = notice.latest ?? notice.message
+  if (toastedVersions.has(version)) return
+  if ((await $.session.surfaces().catch(() => [])).length === 0) return
+  toastedVersions.add(version)
+  $.ui.toast(noticeToast(notice))
 }
 
 // `lcu update --notice --json`: cache only, never blocks on the network. Any failure means no notice.

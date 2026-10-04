@@ -120,7 +120,7 @@ LCU checks the actual `codex` on `PATH` for the native MCP tool hook type. The i
 
 The Codex relay preserves progress before successful and failed tool responses using the SDK's public notification API; the deterministic regression and upstream race are recorded in [Codex progress verification](verification/codex-progress-2026-09-28.md).
 
-Setup also adds an LCU-owned `SessionStart` command hook (matcher `startup|resume`) running `lcu update --notice --hook-json`. It prints Codex's `hookSpecificOutput.additionalContext` only when a newer LCU release is known (see [update notices](INSTALLATION.md#update-notices)), reads only a local cache, and is trusted by its exact hash like the lifecycle hooks; other `SessionStart` hooks are left in place and untrusted. Rerunning setup replaces it. It is not part of the original lifecycle contract or the plugin export, and has not yet been observed in a live Codex turn.
+Setup also adds two LCU-owned command hooks: `SessionStart` (matcher `startup|resume`) running `lcu update --notice --hook SessionStart`, and `UserPromptSubmit` running `lcu update --notice --hook UserPromptSubmit`. Each prints Codex's `hookSpecificOutput.additionalContext` only when a newer LCU release is known and that session has not been told about it yet (sessions are tracked by Codex's `session_id` in a per-account `announced.json` beside the cache) (see [update notices](INSTALLATION.md#update-notices)), reads only a local cache, and is trusted by its exact hash like the lifecycle hooks; other hooks on those events are left in place and untrusted. Rerunning setup replaces them. It is not part of the original lifecycle contract or the plugin export, and has not yet been observed in a live Codex turn.
 
 ## Claude Code adapter
 
@@ -165,9 +165,9 @@ The Claude tools fall into three groups. Model tools (`js`, `js_reset`) are the 
 
 Verification: `adapters/test/claude.test.mjs` and `adapters/test/approval-broker.test.mjs` cover the relay and the choice rules; `claude plugin test adapters/claude-mod/lcu-approve` runs the mod against the engine's test kit; `python3 tests/claude_approval_mod.py --claude PATH` drives a real interactive Claude Code (with a scripted local Messages API and the relay in front of the original-runtime fixture, a temporary HOME, no model and no computer use) through the pane, the narrow-terminal dialog, dismissal, a slow answer (past the hook's 10 s) and the model's refused calls. It needs a Claude Code with mods; the `claude` of 2.1.204 has none. The Claude app itself has not been driven by this record.
 
-### Update notice at session start
+### Update notices
 
-The `lcu-approve` mod also runs `lcu update --notice` when a session starts. When a newer release is cached, the agent receives the notice as context, told to tell the user and offer `lcu update` and not to upgrade without asking, and the user sees a toast. The command reads only the local cache and never blocks the session start; see [update notices](INSTALLATION.md#update-notices). `LCU_NO_UPDATE_CHECK=1` disables it. Pi, Oh My Pi and Hermes have no equivalent session hook; their notice appears in `lcu status`, `lcu doctor` and `lcu update --check`.
+The `lcu-approve` mod also runs `lcu update --notice` when a session starts and on prompts, at most every 10 minutes per session (a cache read; the cache itself refreshes in the background every 10 minutes). Each session is told about a given release once. When a newer release is cached, the agent receives the notice as context, told to tell the user and offer `lcu update` and not to upgrade without asking, and the user sees a toast. The command reads only the local cache and never blocks the session start; see [update notices](INSTALLATION.md#update-notices). `LCU_NO_UPDATE_CHECK=1` disables it. Pi, Oh My Pi and Hermes have no equivalent session hook; their notice appears in `lcu status`, `lcu doctor` and `lcu update --check`.
 
 ## Harnesses installed after setup
 

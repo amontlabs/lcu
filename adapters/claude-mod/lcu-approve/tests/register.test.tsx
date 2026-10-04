@@ -401,3 +401,73 @@ test('without lcu installed nothing is run for the notice', async ($, on) => {
   await $.classic.SessionStart({ source: 'startup' } as any)
   expect(ran.some(argv => argv[1] === 'update')).toBe(false)
 })
+
+// Prompts after the session started: the first checks, later ones at most every ten minutes.
+const MIN = 60000
+function promptHost(on: any, processes: (argv: string[]) => any) {
+  on('classic.UserPromptSubmit', () => ({}))
+  return noticeHost(on, processes)
+}
+const prompt = ($: any, session_id = 's1') => $.classic.UserPromptSubmit({ prompt: 'hi', session_id } as any)
+const checks = (ran: string[][]) => ran.filter(argv => argv[1] === 'update').length
+const NEWER = { ...NOTICE, latest: '0.9.3', message: 'LCU 0.9.3 is available.' }
+
+test('the first prompt checks for a notice', async ($, on) => {
+  const { ran, toasts } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
+  const result: any = await prompt($)
+  expect(checks(ran)).toBe(1)
+  expect(result.additionalContext).toEqual([NOTICE.message])
+  expect(toasts.length).toBe(1)
+})
+
+test('a prompt within ten minutes of a check does not run the command', async ($, on) => {
+  const clock = mock.clock(on)
+  const { ran } = promptHost(on, noticeRun('{}'))
+  await prompt($)
+  await clock.advance(9 * MIN)
+  await prompt($)
+  expect(checks(ran)).toBe(1)
+  await clock.advance(2 * MIN)
+  await prompt($)
+  expect(checks(ran)).toBe(2)
+})
+
+test('a version announced at session start is not repeated', async ($, on) => {
+  const clock = mock.clock(on)
+  const { ran } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
+  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  await clock.advance(11 * MIN)
+  const result: any = await prompt($)
+  expect(checks(ran)).toBe(2)
+  expect(result.additionalContext).toBeUndefined()
+})
+
+test('a newer version is announced once', async ($, on) => {
+  const clock = mock.clock(on)
+  let out = JSON.stringify(NOTICE)
+  const { toasts } = promptHost(on, argv => (argv[1] === 'update' ? { stdout: out } : undefined))
+  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  out = JSON.stringify(NEWER)
+  await clock.advance(11 * MIN)
+  const result: any = await prompt($)
+  expect(result.additionalContext).toEqual([NEWER.message])
+  expect(toasts.length).toBe(2)
+  await clock.advance(11 * MIN)
+  expect(((await prompt($)) as any).additionalContext).toBeUndefined()
+})
+
+test('sessions are independent', async ($, on) => {
+  const { ran } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
+  const a: any = await prompt($, 'a')
+  const b: any = await prompt($, 'b')
+  expect(checks(ran)).toBe(2)
+  expect(a.additionalContext).toEqual([NOTICE.message])
+  expect(b.additionalContext).toEqual([NOTICE.message])
+})
+
+test('a failing check on a prompt gives nothing and does not throw', async ($, on) => {
+  const { toasts } = promptHost(on, () => { throw new Error('no processes') })
+  const result: any = await prompt($)
+  expect(result.additionalContext).toBeUndefined()
+  expect(toasts).toEqual([])
+})
