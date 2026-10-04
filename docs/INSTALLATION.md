@@ -26,7 +26,7 @@ Where a command below is written as `lcu ...`, run it through the installed path
 
 - **An existing desktop:** Apple Silicon macOS, or Ubuntu 24.04-compatible glibc Linux on ARM64 or x86-64 with an X11 desktop and D-Bus session owned by the target account. Native Wayland and musl are unsupported; Windows is deferred.
 - **The official ChatGPT desktop app:** [install it first](https://chatgpt.com/download/). Default paths are `/Applications/ChatGPT.app` on macOS and `/usr/lib/chatgpt` on Linux. Use `--existing-app /absolute/path` for another location. LCU never downloads or installs the app and does not require ChatGPT sign-in.
-- **Python 3.12+** and the host's normal sandbox facilities.
+- **Python 3.12+** and the host's normal sandbox facilities. `scripts/install.sh` picks the first `python3.14`, `python3.13`, `python3.12` or `python3` on `PATH` that is 3.12 or newer. The installed `lcu` and `lcu-session` launchers do the same, also searching `/opt/homebrew/bin`, `/usr/local/bin` and `/usr/bin`, so a harness that starts them with a minimal `PATH` (macOS's Python 3.9 first) still works. Set `LCU_PYTHON` to an absolute interpreter path to choose one explicitly. When none qualifies they exit with a message naming the requirement and the interpreter found.
 - **Your installed, authenticated harness:** Pi, Codex CLI, Claude Code, Oh My Pi, or Hermes Agent. Codex CLI must support `mcp_tool` lifecycle hooks; update the public standalone CLI if setup reports a parser error. See [harness prerequisites](ADAPTERS.md).
 
 LCU does not install a desktop or create a VM. Native computer use is the default; Chrome and computer-audio recording are opt-in.

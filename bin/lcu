@@ -6,6 +6,11 @@ sys.dont_write_bytecode = True
 
 root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root))
+from lcu import interpreter
+try:
+    interpreter.ensure(Path(__file__).resolve(), sys.argv[1:])
+except ValueError as exc:
+    sys.exit(f'LCU: {exc}')
 from lcu.runtime import main
 try:
     main(root, sys.argv[1:])
