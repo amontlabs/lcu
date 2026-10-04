@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { ElicitRequestSchema, ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { chmodSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -19,6 +19,69 @@ export function callTimeout(name, args) {
   return name === 'js' && Number.isFinite(requested) && requested > 0
     ? Math.max(TURN_END_TIMEOUT_MS, requested + 30_000)
     : TURN_END_TIMEOUT_MS;
+}
+
+/** Longest timer delay Node accepts; an approval wait ends only by answer or abort. */
+export const APPROVAL_TIMEOUT_MS = 2 ** 31 - 1;
+
+/** Count pending approvals so tool-call deadlines stand still while a human decides. */
+export function createApprovalGate() {
+  let pending = 0;
+  const listeners = new Set();
+  const notify = () => { for (const listener of [...listeners]) listener(); };
+  return {
+    get pending() { return pending; },
+    onChange(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    async track(run) {
+      pending++;
+      notify();
+      try { return await run(); } finally {
+        pending--;
+        notify();
+      }
+    },
+  };
+}
+
+/** Run `run(signal)` under a deadline that does not elapse while the gate has a pending approval. */
+export async function callWithDeadline(gate, timeout, signal, run) {
+  const controller = new AbortController();
+  const forward = () => controller.abort(signal.reason);
+  if (signal?.aborted) forward();
+  else signal?.addEventListener('abort', forward, { once: true });
+  let remaining = timeout;
+  let started;
+  let timer;
+  const sync = () => {
+    if (gate.pending > 0) {
+      if (timer === undefined) return;
+      clearTimeout(timer);
+      timer = undefined;
+      remaining -= Date.now() - started;
+    } else if (timer === undefined) {
+      started = Date.now();
+      timer = setTimeout(() => controller.abort(
+        McpError.fromError(ErrorCode.RequestTimeout, 'Request timed out', { timeout })),
+      Math.max(remaining, 0));
+    }
+  };
+  const unsubscribe = gate.onChange(sync);
+  sync();
+  try {
+    return await run(controller.signal);
+  } finally {
+    unsubscribe();
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', forward);
+  }
+}
+
+/** Forward an upstream approval to the downstream host without the SDK's default request timeout. */
+export function relayElicitation(server, gate, params, signal) {
+  return gate.track(() => server.elicitInput(params, { signal, timeout: APPROVAL_TIMEOUT_MS }));
 }
 
 /** True when importMetaUrl is the process entrypoint, resolving symlinks robustly. */
@@ -179,11 +242,18 @@ export function createCuaClient({ command, cwd, env, onElicitation, allowedOrigi
   });
   let connected = false;
   let tools;
-  client.setRequestHandler(ElicitRequestSchema, async request => {
+  const approvals = createApprovalGate();
+  const callSignals = new Set();
+  client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
     const params = request.params;
     if (originApproval(params, approved)) return { action: 'accept', content: {} };
     if (typeof onElicitation !== 'function') return { action: 'cancel' };
-    const answer = await onElicitation(params);
+    const signal = AbortSignal.any([extra.signal, ...callSignals]);
+    const aborted = new Promise(resolve => {
+      if (signal.aborted) resolve({ action: 'cancel' });
+      else signal.addEventListener('abort', () => resolve({ action: 'cancel' }), { once: true });
+    });
+    const answer = await approvals.track(() => Promise.race([onElicitation(params, { signal }), aborted]));
     if (answer?.action === 'accept' || answer?.action === 'decline' || answer?.action === 'cancel') return answer;
     return { action: 'cancel' };
   });
@@ -240,10 +310,17 @@ export function createCuaClient({ command, cwd, env, onElicitation, allowedOrigi
         ...(model ? { model } : {}),
         ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       });
-      return client.callTool({ name, arguments: args, _meta: {
-        ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
-        'x-codex-turn-metadata': turnMetadata,
-      } }, undefined, { signal, timeout });
+      if (signal) callSignals.add(signal);
+      try {
+        return await callWithDeadline(approvals, timeout, signal, deadlineSignal => client.callTool({
+          name, arguments: args, _meta: {
+            ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+            'x-codex-turn-metadata': turnMetadata,
+          },
+        }, undefined, { signal: deadlineSignal, timeout: APPROVAL_TIMEOUT_MS }));
+      } finally {
+        if (signal) callSignals.delete(signal);
+      }
     },
     async turnEnded({ sessionId, turnId, event = 'Stop' }) {
       if (!connected) return;

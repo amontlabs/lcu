@@ -402,14 +402,14 @@ export default function (pi: ExtensionAPI, options: {
           command: commandFromEnvironment(options.command),
           cwd: process.cwd(),
           allowedOrigins: originsFromEnvironment(),
-          onElicitation: async params => {
+          onElicitation: async (params, { signal }) => {
             const ctx = approvalContext;
             if (!ctx?.hasUI) return { action: 'cancel' as const };
             const nativeApproval = nativeAppApprovalOptions(params);
             if (nativeApproval) {
               if (typeof ctx.ui.select !== 'function') return { action: 'cancel' as const };
               const selectedLabel = await ctx.ui.select(nativeApproval.message,
-                nativeApproval.choices.map(choice => choice.label));
+                nativeApproval.choices.map(choice => choice.label), { signal });
               const selectedValue = nativeApproval.choices.find(choice => choice.label === selectedLabel)?.value ?? 'cancel';
               return nativeAppApprovalResponse(params, selectedValue);
             }
@@ -420,7 +420,7 @@ export default function (pi: ExtensionAPI, options: {
               return { action: 'cancel' as const };
             }
             if (typeof ctx.ui.select !== 'function') return { action: 'cancel' as const };
-            const selected = await ctx.ui.select(params.message, ['Allow', 'Decline']);
+            const selected = await ctx.ui.select(params.message, ['Allow', 'Decline'], { signal });
             if (selected === 'Allow') return { action: 'accept' as const, content: {} };
             if (selected === 'Decline') return { action: 'decline' as const };
             return { action: 'cancel' as const };

@@ -10,7 +10,14 @@ import {
   ToolListChangedNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { persistAudioContent } from './audio-files.mjs';
-import { callTimeout, isMainModule } from './client.mjs';
+import {
+  APPROVAL_TIMEOUT_MS,
+  callTimeout,
+  callWithDeadline,
+  createApprovalGate,
+  isMainModule,
+  relayElicitation,
+} from './client.mjs';
 
 const HOST_ONLY_TOOLS = new Set(['js_add_node_module_dir', 'turn_ended']);
 
@@ -39,11 +46,12 @@ export async function runCodexBridge({ command, args = [], cwd, env } = {}) {
   let connected = false;
   let shutdown;
   let nextProgressToken = 0;
+  const approvals = createApprovalGate();
   const progressHandlers = new Map();
 
   upstream.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
     try {
-      return await server.elicitInput(request.params, { signal: extra.signal });
+      return await relayElicitation(server, approvals, request.params, extra.signal);
     } catch {
       return { action: 'cancel' };
     }
@@ -85,10 +93,6 @@ export async function runCodexBridge({ command, args = [], cwd, env } = {}) {
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { params } = request;
       const progressSends = [];
-      const options = {
-        signal: extra.signal,
-        timeout: callTimeout(params.name, params.arguments),
-      };
       let upstreamParams = params;
       const downstreamProgressToken = extra._meta?.progressToken;
       let upstreamProgressToken;
@@ -108,7 +112,11 @@ export async function runCodexBridge({ command, args = [], cwd, env } = {}) {
         });
       }
       try {
-        const result = await upstream.callTool(upstreamParams, undefined, options);
+        const result = await callWithDeadline(approvals, callTimeout(params.name, params.arguments),
+          extra.signal, signal => upstream.callTool(upstreamParams, undefined, {
+            signal,
+            timeout: APPROVAL_TIMEOUT_MS,
+          }));
         return persistAudioContent(result);
       } finally {
         if (upstreamProgressToken !== undefined) progressHandlers.delete(upstreamProgressToken);

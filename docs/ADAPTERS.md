@@ -132,6 +132,8 @@ Registration stays with each harness's own tool: `pi install`, `omp plugin link`
 
 ## Approval boundary
 
+An approval lasts as long as the person needs; no LCU or SDK timer ends it. The Claude and Codex relays forward each request downstream without the MCP SDK's default 60 s request timeout, and the shared client waits on `onElicitation` the same way. While any approval is pending, the deadline of every tool call (`TURN_END_TIMEOUT_MS`, or a `js` call's requested run plus 30 s) stands still and resumes with its remaining time afterwards, so a call that is genuinely hung still expires. Aborting the tool call (interrupt or turn end) cancels the pending approval at once: the relays pass the abort signal downstream, and the shared client resolves `onElicitation` as cancelled and passes `{ signal }` to it (Pi forwards it to its selector). Hermes shows the selector synchronously and does not cancel it on abort. The host's own limits on how long it keeps a prompt or a tool call open are outside LCU.
+
 Native-app approval requests come from the original runtime only on macOS and Windows. The original Linux runtime (observed in ChatGPT 26.915.31945 and 26.930.41038) has no per-app approval: an MCP client that supports elicitation receives no request while `js` lists, focuses and types into any window. On Linux, harness approval of LCU's tools is therefore the only gate before desktop control.
 
 The supported native-app and external Chrome flows have not produced generic schema-field or URL-mode approval requests. Those unobserved shapes are not baseline parity failures. Current tests preserve the original message, origin, and requested native-app persistence scope; a host that cannot present a request fails closed.
