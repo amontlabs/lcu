@@ -193,23 +193,31 @@ def approval_setup(mode, scope):
 
 key = 'default_tools_approval_mode'
 assert key not in approval_state()[0] and key not in approval_state()[1]
+exact = ['mcp__lcu__js', 'mcp__lcu__js_reset']
+
+
+def tool_modes(table):
+    return {tool: table.get('tools', {}).get(tool, {}).get('approval_mode') for tool in ('js', 'js_reset')}
+
 user_before, project_before = approval_state()[2], approval_state()[3]
 for scope in ('user', 'project'):
     approval_setup('auto', scope)
     codex_user, codex_project, claude_user, claude_project = approval_state()
-    assert (codex_user if scope == 'user' else codex_project)[key] == 'approve', scope
-    assert (claude_user if scope == 'user' else claude_project)['allow'][-1] == 'mcp__lcu', scope
+    chosen = codex_user if scope == 'user' else codex_project
+    assert key not in chosen and tool_modes(chosen) == {'js': 'approve', 'js_reset': 'approve'}, scope
+    assert (claude_user if scope == 'user' else claude_project)['allow'][-2:] == exact, scope
     approval_setup('auto', scope)  # idempotent
     fresh = approval_state()
-    assert fresh[2 if scope == 'user' else 3]['allow'].count('mcp__lcu') == 1, scope
+    assert all(fresh[2 if scope == 'user' else 3]['allow'].count(rule) == 1 for rule in exact), scope
+    assert 'mcp__lcu' not in fresh[2 if scope == 'user' else 3]['allow'], scope
 assert json.loads((home / '.local/state/lcu/setup.json').read_text())['approval'] == 'auto'
 # A later setup that does not name --approval keeps the remembered auto.
 subprocess.run([command, 'setup', '--user', account, '--agent', 'codex', '--session', 'direct', '--yes'], check=True)
-assert approval_state()[0][key] == 'approve'
+assert tool_modes(approval_state()[0]) == {'js': 'approve', 'js_reset': 'approve'}
 for scope in ('user', 'project'):
     approval_setup('ask', scope)
 codex_user, codex_project, claude_user, claude_project = approval_state()
-assert key not in codex_user and key not in codex_project
+assert tool_modes(codex_user) == {'js': None, 'js_reset': None} and tool_modes(codex_project) == tool_modes(codex_user)
 assert claude_user == user_before and claude_project == project_before, (claude_user, claude_project)
 assert 'keep-me' in codex.read_text() and 'my-model' in codex.read_text()
 assert json.loads(claude_settings.read_text())['model'] == 'keep-me'

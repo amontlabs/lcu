@@ -503,7 +503,8 @@ def configure(names, home, command, tools_root, release_root, *, scope='user', p
             commands = (('old skill cleanup', cleanup_command),
                         ('MCP', [str(node), '--input-type=module', '-e', MCP_REGISTER, str(mcp),
                                  client.mcp_agent, scope, json.dumps(mcp_command),
-                                 json.dumps({**host_policy(release_root), **(codex_plan['policy'] if codex_plan else {})})]))
+                                 json.dumps(approvals.merge_codex_policy(
+                                     host_policy(release_root), codex_plan['policy'] if codex_plan else {}))]))
         for phase, argv in commands:
             try:
                 if phase == 'old skill cleanup':
@@ -991,8 +992,8 @@ def main(argv=None):
             else:
                 print('Native desktop control selected; Chrome connector and guidance are excluded.')
             if approval_mode == 'auto' and not args.export:
-                entries = {'claude-code': 'Claude Code: allow `mcp__lcu`',
-                           'codex': 'Codex: `default_tools_approval_mode = "approve"` on `[mcp_servers.lcu]`',
+                entries = {'claude-code': 'Claude Code: allow `mcp__lcu__js` and `mcp__lcu__js_reset`',
+                           'codex': 'Codex: `approval_mode = "approve"` for the `js` and `js_reset` tools of `[mcp_servers.lcu]`',
                            'omp': 'Oh My Pi: `tools.approval` `js` and `js_reset` set to `allow`'}
                 chosen = [entries[name] for name in names if name in entries]
                 print('Approval mode auto: add only LCU\'s own entries so its tools run without a per-call harness prompt'
