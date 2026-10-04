@@ -41,13 +41,13 @@ def scenario(pattern=DIALOG, *, mod=True, columns=160, code='approval-native', k
 
 
 SCENARIOS = {
-    'pane-session': scenario(keys='1', answer=SESSION),
-    'pane-always': scenario(keys='2', answer=ALWAYS),
-    'pane-deny': scenario(keys='3', answer={'action': 'decline'}),
+    'pane-session': scenario(keys='a', answer=SESSION),
+    'pane-always': scenario(keys='l', answer=ALWAYS),
+    'pane-deny': scenario(keys='d', answer={'action': 'decline'}),
     'pane-dismiss': scenario(keys=['ESC'], answer={'action': 'cancel'}),
-    'pane-session-only': scenario(code='approval-native-session-only', keys='1', answer=SESSION),
+    'pane-session-only': scenario(code='approval-native-session-only', keys='a', answer=SESSION),
     # The person takes longer than a hook's 10 s: no hook waits, so the answer still arrives.
-    'pane-slow': scenario(keys='1', answer=SESSION, delay=15),
+    'pane-slow': scenario(keys='a', answer=SESSION, delay=15),
     # The terminal cannot seat an unasked pane below 144 columns: the question dialog is used.
     'ask-narrow': scenario(columns=100, keys=['ENTER'], answer=SESSION, surface='ask'),
     # Without the mod the engine's own form shows, unchanged.

@@ -36,7 +36,9 @@ The first time an agent controls an app (Zed, Notes, Safari), the computer-use r
 - **Always allow** to remember the app (offered only when the runtime allows it).
 - **Deny** to refuse.
 
-Only you can answer: the model cannot see, press or fake the pane. High-risk apps show the runtime's own warning, and the app hosting the agent is never approved. Needs the Claude app or Claude Code 2.1.287+. [How it works](docs/ADAPTERS.md#native-app-approvals-in-claude-code-and-the-claude-app), [how to remove it](docs/INSTALLATION.md#uninstall).
+The `/computer-use-apps` command opens an **Approved apps** panel in the same place: one line per always-allowed app with Revoke (macOS asks for Touch ID or your password), apps that are no longer installed grouped below, this conversation's grants, and an Allow field.
+
+Only you can answer: the model cannot see, press or fake the pane. High-risk apps show the runtime's own warning (reworded to say "computer use" and "the agent"), and the app hosting the agent is never approved. Needs the Claude app or Claude Code 2.1.287+. [How it works](docs/ADAPTERS.md#native-app-approvals-in-claude-code-and-the-claude-app), [how to remove it](docs/INSTALLATION.md#uninstall).
 
 In the Claude app, register LCU through Claude Code (`lcu setup --agent claude-code`), not through Settings > Connectors; see [installation](docs/INSTALLATION.md#native-approvals-in-the-claude-app).
 
