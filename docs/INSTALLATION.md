@@ -274,6 +274,29 @@ The mode applies to the harnesses and scope selected in that run. It is remember
 
 This removes only the harness's own prompt about calling LCU. Claude Code's host-only tools stay denied (deny rules win over allow). Native-app permission requests, the original runtime's own approvals and Chrome site approvals come from the original runtime and are unchanged; Chrome stays exact-origin only and nothing here widens `LCU_APPROVED_ORIGINS`. Choose `auto` only for a machine you control, such as a disposable VM. `tests/codex_approval_mode.py` shows the Codex difference with a scripted local provider, and the other harnesses' entries are covered by `tests/test_approval.py`. See the [approval boundary](ADAPTERS.md#approval-boundary).
 
+## Manage approved apps
+
+On macOS, Computer Use asks before it first uses each app and offers **Always allow**. `lcu apps` shows and edits that list from the terminal, so you do not need the Codex app.
+
+~~~sh
+~/.local/share/lcu/current/bin/lcu apps                 # list approved apps
+~/.local/share/lcu/current/bin/lcu apps allow Zed       # always allow an app
+~/.local/share/lcu/current/bin/lcu apps revoke Zed      # remove it again
+~~~
+
+- `<app>` is an app name (`Zed`), a bundle identifier (`dev.zed.Zed`) or the path to an `.app`. A name that matches several installed apps is refused; pass the bundle identifier.
+- `lcu apps` and `lcu apps list` print each app's name and bundle identifier. `--json` prints `{"apps": [{"name", "bundleId", "installed", "risk", "blocked"}], "file": ...}` for scripts.
+- `allow` and `revoke` show the system prompt ("always allow Computer Use to control Zed (dev.zed.Zed)"). Touch ID answers it; the login password is the fallback. Listing never asks.
+- Changes apply to running sessions at once. Both commands are idempotent and skip the prompt when nothing would change.
+- It fails closed: with no graphical login session (an SSH login with nobody at the screen), a cancelled prompt or a missing helper, nothing changes. Run it from a terminal in your desktop session.
+- Apps the original runtime never controls (Terminal, iTerm2, ChatGPT/Codex, Notification Center) are refused, because an entry would have no effect. Browsers, password managers, Passwords, Keychain Access and iPhone Mirroring are high risk: `allow` warns, says so in the prompt and still allows them on your authentication. Allowing one means the agent can act on whatever it shows.
+- The list is `~/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/Library/Application Support/Software/ComputerUseAppApprovals.json`, shared with the Codex app. LCU preserves other keys, replaces the file atomically and retries if the runtime writes at the same moment. A malformed file is reported and left alone.
+- The prompt comes from `bin/lcu-owner-auth`, a small helper LCU builds into the macOS archive and signs ad hoc. If macOS blocks it after a browser download, extract with `tar -xzf` or run `xattr -dr com.apple.quarantine` on the extracted folder after checking the checksum.
+- This is a convenience guard against an agent approving apps for itself through `lcu`, not a sandbox: the list is an ordinary file in your account.
+- On Linux the original runtime has no per-app approval, so `lcu apps` says so; Windows is unsupported.
+
+See the [verification record](verification/apps-command-2026-10-04.md).
+
 ## Tested app versions
 
 App versions are date stamps (`26.928.31416`) and the CUA runtime is `0.0.x`, so neither signals compatibility. Each release ships [tested-versions.json](../tested-versions.json), a record of the exact platform, architecture, app version and CUA runtime pairs that LCU's checked-in verification covers. Each entry names the LCU version that tested it and its evidence; Linux entries also carry the SHA-256 of the official `.deb` the pair was tested from. The installed tree is not hashed, so that digest is informational and is not matched at run time.

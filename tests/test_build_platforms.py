@@ -43,8 +43,11 @@ class BuildPlatformTests(unittest.TestCase):
             with mock.patch.object(build_bundle, 'architecture', return_value='arm64'), \
                     mock.patch('lcu.platforms.resolve_installed_mac_app',
                                return_value=SimpleNamespace(runtime=node.parent.parent)) as resolve, \
+                    mock.patch.object(build_bundle, 'build_owner_auth',
+                                      side_effect=lambda dest: Path(dest).write_text('fixture')) as owner_auth, \
                     mock.patch.object(build_bundle, 'provision_agents', side_effect=fake_provision):
                 archive = build_bundle.build(root / 'dist', target='darwin', app=app)
+            owner_auth.assert_called_once()
             resolve.assert_called_once_with(app, arch='arm64')
             self.assertEqual(archive.name, f'lcu-{VERSION}-darwin-arm64.tar.gz')
             with tarfile.open(archive) as bundle:
@@ -56,6 +59,8 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertIn(prefix + 'lcu/macos_sky_service.mjs', names)
                 self.assertNotIn(prefix + 'lcu/linux_sky_service.mjs', names)
                 self.assertIn(prefix + 'lcu/interpreter.py', names)
+                self.assertIn(prefix + 'lcu/apps.py', names)
+                self.assertIn(prefix + 'bin/lcu-owner-auth', names)
                 self.assertIn(prefix + 'lcu/doctor.py', names)
                 self.assertIn(prefix + 'lcu/app_layout.py', names)
                 self.assertIn(prefix + 'lcu/asar.py', names)
@@ -88,6 +93,8 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertEqual((manifest['platform'], manifest['architecture']), ('linux', 'x64'))
                 names = {member.name for member in bundle}
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/interpreter.py', names)
+                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/apps.py', names)
+                self.assertNotIn(f'lcu-{VERSION}-linux-x64/bin/lcu-owner-auth', names)
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/linux_sky_service.mjs', names)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/lcu/macos_sky_service.mjs', names)
 

@@ -26,6 +26,25 @@ Check my OS, architecture, and prerequisites, then guide me through any required
 - **Chrome, when enabled:** read and control tabs through the official extension, with site approval.
 - **In your harness:** adapters are available for Pi, Codex CLI, and Claude Code, with experimental Oh My Pi and Hermes integrations. See [setup and verification limits](docs/ADAPTERS.md).
 
+## Choose which apps your agent may control (macOS)
+
+Computer use asks before it touches an app, and "Always allow" is remembered. Review and change that list without opening the Codex app, behind Touch ID:
+
+```sh
+lcu apps                 # what is always allowed today
+lcu apps allow Zed       # Touch ID (or your password), then Zed is allowed
+lcu apps revoke Zed      # take it back
+```
+
+<!-- TODO: add a screenshot or GIF of the Touch ID prompt here (docs/assets/lcu-apps-touch-id.gif) -->
+
+- Pass an app name, a bundle identifier or an `.app` path.
+- Listing is free; `allow` and `revoke` need you at the machine, with Touch ID or your login password.
+- Running sessions pick the change up immediately.
+- Browsers, password managers and other high-risk apps come with a warning, and apps Computer Use refuses outright (Terminal, iTerm2) are declined.
+
+Details: [Manage approved apps](docs/INSTALLATION.md#manage-approved-apps).
+
 ## Requirements
 
 Install [the official ChatGPT desktop app](https://chatgpt.com/download/), Python 3.12+, and your harness first. LCU checks the installed app for compatibility and uses its original runtime. For Codex CLI, [update before setup](docs/ADAPTERS.md#codex-cli) to get the required hook support.

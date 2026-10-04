@@ -11,6 +11,7 @@ USAGE = ('Usage: lcu [--chrome] [--audio] [--mcp-discovery-compat]\n'
          '       lcu setup OPTIONS\n'
          '       lcu browser install\n'
          '       lcu browser status\n'
+         '       lcu apps [list|allow APP|revoke APP] [--json]   (macOS)\n'
          '       lcu prune [--keep N] [--yes]\n'
          '       lcu doctor\n'
          '       lcu status [--json]\n'
@@ -370,6 +371,10 @@ def main(root, argv):
     if argv[:1] == ['status']:
         from .status import main as status
         status(root, argv[1:])
+        return
+    if argv[:1] == ['apps']:
+        from .apps import main as apps
+        apps(root, argv[1:])
         return
     if argv[:1] == ['prune']:
         from .maintenance import main as maintenance

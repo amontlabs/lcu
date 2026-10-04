@@ -58,6 +58,24 @@ def linked_verification_records(source):
     return {path for path in linked_docs(source) if path.parent == verification}
 
 
+OWNER_AUTH = 'lcu-owner-auth'
+
+
+def build_owner_auth(destination):
+    """Compile LCU's own owner-authentication helper (used by `lcu apps`) for this Mac.
+
+    The helper is ad-hoc signed (swiftc's linker signs it); it is LCU's code, not an OpenAI binary.
+    """
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(['swiftc', '-O', str(SOURCE / 'scripts/native' / (OWNER_AUTH + '.swift')),
+                    '-o', str(destination)], check=True, timeout=300)
+    subprocess.run(['codesign', '--force', '--sign', '-', '--identifier', 'org.amontlabs.lcu-owner-auth',
+                    str(destination)], check=True, timeout=60,
+                   capture_output=True)
+    os.chmod(destination, 0o755)
+
+
 def build(output, package=None, *, target='linux', app=None):
     if package is not None:
         raise ValueError('Build-time --package is retired. Install the official app separately before LCU setup.')
@@ -92,7 +110,7 @@ def build(output, package=None, *, target='linux', app=None):
         modules = ('__init__.py', 'app_layout.py', 'asar.py', 'runtime.py', 'setup.py',
                          'setup_clients.py', 'codex_hooks.py', 'app_server.py', 'browser.py', 'doctor.py',
                          'maintenance.py', 'native_host.py', 'claude_visibility.py', 'harness_setup.py',
-                         'tested.py', 'status.py', 'approval.py', 'interpreter.py')
+                         'tested.py', 'status.py', 'approval.py', 'interpreter.py', 'apps.py')
         if target != 'windows':
             modules += ('session.py', 'platforms.py')
         for filename in modules:
@@ -100,6 +118,7 @@ def build(output, package=None, *, target='linux', app=None):
         if target == 'linux':
             shutil.copy2(SOURCE / 'lcu/linux_sky_service.mjs', release / 'lcu/linux_sky_service.mjs')
         if target == 'darwin':
+            build_owner_auth(release / 'bin' / OWNER_AUTH)
             shutil.copy2(SOURCE / 'lcu/macos_host.py', release / 'lcu/macos_host.py')
             shutil.copy2(SOURCE / 'lcu/macos_sky_service.mjs', release / 'lcu/macos_sky_service.mjs')
         elif target == 'windows':
@@ -135,7 +154,7 @@ def build(output, package=None, *, target='linux', app=None):
         provision_agents(release, SOURCE / 'scripts/agent-tools', target=target,
                          mac_node=selected_node, adapters_source=SOURCE / 'adapters')
         # The installer selects and validates the matching app before registration.
-        imports = 'import lcu.runtime, lcu.setup, lcu.browser, lcu.doctor, lcu.codex_hooks, lcu.maintenance, lcu.tested, lcu.status, lcu.approval'
+        imports = 'import lcu.runtime, lcu.setup, lcu.browser, lcu.doctor, lcu.codex_hooks, lcu.maintenance, lcu.tested, lcu.status, lcu.approval, lcu.apps'
         if target != 'windows':
             imports += ', lcu.session'
         subprocess.run([sys.executable, '-B', '-c', imports],

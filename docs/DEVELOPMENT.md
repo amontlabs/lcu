@@ -4,7 +4,7 @@ LCU releases are thin platform/architecture-specific Linux and macOS tarballs. A
 
 ## Building from source
 
-Use the [release installation guide](INSTALLATION.md) unless you are changing LCU. Build on the target OS and architecture with Python 3.12+. macOS also requires a compatible official app and `npm`; Linux builds provision their own pinned Node dependency. Dependency downloads need network access during the build. The official app is never downloaded by the builder.
+Use the [release installation guide](INSTALLATION.md) unless you are changing LCU. Build on the target OS and architecture with Python 3.12+. macOS also requires a compatible official app, `npm` and `swiftc` (Xcode Command Line Tools), which compiles and ad-hoc signs LCU's own `bin/lcu-owner-auth` helper for [`lcu apps`](INSTALLATION.md#manage-approved-apps); Linux builds provision their own pinned Node dependency. Dependency downloads need network access during the build. The official app is never downloaded by the builder.
 
 Clone the repository and read its version:
 
