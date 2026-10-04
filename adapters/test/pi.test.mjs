@@ -91,7 +91,8 @@ test('Pi keeps one original CUA turn across model rounds and cleans up after age
   }
 });
 
-test('Pi /lcu stop reaches private host control while the original tool call is pending', async () => {
+test('Pi /lcu stop reaches private host control while the original tool call is pending',
+  { skip: process.platform === 'win32' && 'the macOS host-control endpoint is a Unix socket' }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-pi-stop-'));
   const log = join(directory, 'mcp.jsonl');
   const oldCommand = process.env.LCU_MCP_COMMAND;

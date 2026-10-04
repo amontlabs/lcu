@@ -62,7 +62,8 @@ async function connectCodexRelay(relayPath = relay, { delayProgress = false } = 
     LCU_CODEX_FIXTURE_LOG: logPath,
   };
   if (delayProgress) {
-    const preload = fileURLToPath(new URL('./codex-progress-delay.mjs', import.meta.url));
+    // --import takes a URL; a Windows drive path would read as a 'd:' scheme.
+    const preload = new URL('./codex-progress-delay.mjs', import.meta.url).href;
     env.NODE_OPTIONS = `--import=${preload}`;
   }
   const transport = new StdioClientTransport({
