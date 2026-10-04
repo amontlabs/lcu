@@ -152,10 +152,16 @@ def _approval_choice(message: str, description: str, *, title: str,
         if decision.get("notify_failed") or not decision.get("resolved") or decision.get("cancelled"):
             return "cancel"
         return decision.get("choice")
+    # Single-query (-z, chat -q) and cron runs have no one to answer, and without a CLI callback
+    # prompt_dangerous_approval would read stdin until approvals.timeout. A missing helper raises and cancels.
+    cli_callback = approval_ctx._resolve_cli_approval_callback()
+    if (approval_ctx._is_cron_approval_context() or approval_ctx._is_single_query_approval_context()
+            or cli_callback is None):
+        return "cancel"
     from tools.approval_prompt import prompt_dangerous_approval
     choice = prompt_dangerous_approval(
         message, description, allow_session=allow_session, allow_permanent=allow_permanent,
-        approval_callback=approval_ctx._resolve_cli_approval_callback(), title=title)
+        approval_callback=cli_callback, title=title)
     if choice in {"deny", "decline"}:
         try:
             from tools.interrupt import is_interrupted

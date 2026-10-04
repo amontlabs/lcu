@@ -266,6 +266,47 @@ class HermesHarnessTests(unittest.TestCase):
                 else:
                     os.environ["LCU_FIXTURE_LOG"] = previous_log
 
+    def test_headless_contexts_cancel_approval_without_prompting(self):
+        spec = importlib.util.spec_from_file_location("lcu_hermes_headless", PLUGIN / "__init__.py")
+        plugin = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(plugin)
+        prompts = []
+        approval_module = types.ModuleType("tools.approval_prompt")
+        approval_module.prompt_dangerous_approval = lambda *args, **kwargs: (
+            prompts.append(kwargs) or "once")
+        tools_module = types.ModuleType("tools")
+        tools_module.__path__ = []
+        native_params = {
+            "mode": "form", "message": "Allow fixture?",
+            "requestedSchema": {"type": "object", "properties": {}},
+            "_meta": {"codex_approval_kind": "mcp_tool_call", "connector_id": "computer-use",
+                      "persist": ["session"], "tool_params": {"app": "dev.lcu.fixture"}},
+        }
+        cases = {
+            "single query": dict(single=True, callback=None),
+            "single query with callback": dict(single=True, callback="callback"),
+            "cron": dict(cron=True, callback=None),
+            "no callback": dict(callback=None),
+            "missing helper": dict(callback="callback", omit="_is_single_query_approval_context"),
+        }
+        for name, case in cases.items():
+            with self.subTest(name):
+                approval_context = types.ModuleType("tools.approval_context")
+                approval_context._get_session_platform = lambda: "cli"
+                approval_context._is_cron_approval_context = lambda case=case: case.get("cron", False)
+                approval_context._is_single_query_approval_context = lambda case=case: case.get("single", False)
+                approval_context._is_gateway_approval_context = lambda: False
+                approval_context._resolve_cli_approval_callback = lambda case=case: case["callback"]
+                if "omit" in case:
+                    delattr(approval_context, case["omit"])
+                with patch.dict(sys.modules, {
+                    "tools": tools_module, "tools.approval_prompt": approval_module,
+                    "tools.approval_context": approval_context,
+                }):
+                    self.assertEqual(plugin._present_elicitation(native_params), {"action": "cancel"})
+        self.assertEqual(prompts, [])
+
     def test_missing_exact_turn_identity_fails_closed(self):
         with tempfile.TemporaryDirectory(prefix="lcu-hermes-test-") as temporary:
             home = Path(temporary)
