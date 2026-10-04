@@ -126,6 +126,37 @@ Claude Code uses the official Node runtime, `adapters/claude.mjs`, and the selec
 
 The corrected installed relay passed guarded registration and original Chrome Stop cleanup. A current guarded run also cleaned up child A/B turns on their matching stop events and the parent on Stop. A synthetic HTTP 400 fired `StopFailure` with matching session/prompt context, but no original MCP `Interrupt` reached the fixture; Claude reported the failure as `unknown`. See [lifecycle finish evidence](verification/claude-lifecycle-finish-2026-09-26.md). Earlier direct-registration Claude saves predate the relay and do not prove current relay behavior. See also [Claude relay evidence](verification/claude-relay-2026-09-25.md) and the [Claude hook reference](https://code.claude.com/docs/en/hooks).
 
+### Native-app approvals in Claude Code and the Claude app
+
+On macOS and Windows the original runtime asks per app (`Allow Computer Use to use "Zed"?`) with an MCP form elicitation. The relay forwards it to Claude Code as a form with the choices Allow once, Allow for this session, Always allow (only when the runtime's `_meta.persist` offers it) and Decline.
+
+- **Terminal, without the mod:** Claude Code draws that form and the relay maps the answer. This is unchanged.
+- **Claude app Code tab and the VS Code extension, without the mod:** the host has no elicitation callback and declines at once, so the runtime reports "Computer Use was not approved". This is a host limitation, tracked upstream in anthropics/claude-code #96043 and #89858.
+- **With the `lcu-approve` mod** (installed by `lcu setup --agent claude-code`, see [below](#the-lcu-approve-mod)): the terminal and the app show one native approval with the choices of the Codex card: Allow this conversation (the runtime's `session` scope), Always allow (`always`, only when offered) and Deny. A runtime `riskLevel` of `high` adds an "Elevated risk" line and the runtime's own warning text (`warningSubtitle`, or `subtitle`). Anything else the runtime asks (Chrome sites, for example) is left to the host.
+
+#### The `lcu-approve` mod
+
+A mod can hook the elicitation (`classic.Elicitation`) but cannot answer it: Claude Code lets it only `block` the event, after which the host answers `decline`. So the person's choice reaches the runtime through LCU:
+
+1. The relay receives the runtime's elicitation, keeps a pending record (id, bundle id, label, offered scopes, risk, warning, message) and forwards the form to the host exactly as before.
+2. The mod's hook fires first. It calls the relay's host-only tool `approval_request` with the elicitation message, receives the record, and opens a pane titled "Computer use approval" with the question, the app and its bundle id, the warning, and Buttons for the choices. It then holds one `approval_wait` call. Time spent in a `$` call does not count against a hook's 10 s budget, a plain awaited promise does; the first prototype of this mod lost the approval to that limit.
+3. A button press calls `approval_choice({id, choice})`; closing the pane records `cancel`. The hook returns `{ block }`, so the host's own form is not shown and the host answers `decline`.
+4. When the host's answer arrives the relay finds the choice for that pending id and answers the runtime: `session` or `always` become `accept` with `_meta.persist`, Deny becomes `decline`, a dismissal `cancel`. Without a choice it uses the host's answer as before. The record is deleted afterwards.
+
+The pane only seats where the surface places it. An unasked pane needs 144 terminal columns; below that `$.ui.open` returns `isPlaced: false`, and the mod asks the same question with the engine's own question dialog (`$.ui.ask`: Allow this conversation, Always allow only if offered, Deny, with the warning in the question text). It never leaves the terminal without a prompt. In a headless run (`claude -p`, no attached surface) the hook leaves the event to the host, which answers `cancel` at once as before. If the relay or the mod cannot be reached, the hook falls back to the host's form as well.
+
+The approval cannot be made by the model:
+
+- `approval_choice`, `approval_wait` and `approval_request` act only for calls whose `_meta["claudecode/toolUseId"]` starts with `toolu_plugin_`, which Claude Code gives to calls a mod makes (the model's ids come from the API). Any other call is refused.
+- A choice is bound to its pending id, accepted once, and only for a request the mod has described. It is valid for 30 s after it is recorded. `always` is refused unless the runtime offered it.
+- The mod's own `tool.call` hook denies the model's calls to these tools and a `tool.check` hook lets only the mod's calls through without a permission card. (Without the mod Claude Code asks for permission, and the relay refuses the call anyway.)
+- These tools cannot be hidden with the deny rules that hide `set_turn_context`: a denied MCP tool is removed from Claude Code's tool list, and the mod's `$.mcp.call` fails with "no tool". They are listed, with descriptions that mark them internal. Deny rules in managed settings do not override a mod; for the same reason do not add these two tools to `permissions.deny`.
+- A `$.ui.ask` dialog is a real `AskUserQuestion` call that another hook could answer. The mod treats an answer faster than 400 ms or an unknown label as Deny. The pane has no such programmatic answer path.
+
+The mod is the trusted code of the person's own machine: it can approve anything the person could. It sits in a skills folder (`~/.claude/skills/lcu-approve`, or `<project>/.claude/skills/lcu-approve` for project scope), which Claude Code loads without the hot-reload question (an organization allowlist that does not include `skills-dir` plugins disables it). Mods are on by default in Claude Code 2.1.287 and later; the 2.1.286 build bundled with the Claude app already contains them.
+
+Verification: `adapters/test/claude.test.mjs` and `adapters/test/approval-broker.test.mjs` cover the relay and the choice rules; `claude plugin test adapters/claude-mod/lcu-approve` runs the mod against the engine's test kit; `python3 tests/claude_approval_mod.py --claude PATH` drives a real interactive Claude Code (with a scripted local Messages API and the relay in front of the original-runtime fixture, a temporary HOME, no model and no computer use) through the pane, the narrow-terminal dialog, dismissal, a slow answer and the model's refused calls. It needs a Claude Code with mods; the `claude` of 2.1.204 has none. The Claude app itself has not been driven by this record.
+
 ## Harnesses installed after setup
 
 Registration stays with each harness's own tool: `pi install`, `omp plugin link`, `hermes plugins enable`, and the pinned add-mcp for Codex and Claude Code. LCU adds no configuration writer for them. Pi, OMP and Hermes cannot be registered without their executable, so `lcu setup --allow-missing` records an absent one as pending in `setup.json`, and `lcu setup --reconcile` later runs the same registration step once the executable exists, with the saved Chrome, audio and approval mode. Codex and Claude Code write plain user configuration and register immediately. The user-facing behavior is in [Harnesses installed later](INSTALLATION.md#harnesses-installed-later). Reconcile only calls the existing registration code; a pre-written Pi extension, OMP link or Hermes plugin entry is deliberately not used because those registries belong to the harness.
