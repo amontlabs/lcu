@@ -221,6 +221,10 @@ def apply(root, info, *, yes):
             print(f'lcu update: the installer failed (exit {status}); the previous release stays current.',
                   file=sys.stderr)
             return status
+        # The new release refreshes what setup copied out of the old one (the Claude mod).
+        if subprocess.run([str(lcu), 'update', '--post-install'], check=False).returncode:
+            print(f'lcu update: could not refresh harness integrations; rerun `{lcu} setup` for your agents.',
+                  file=sys.stderr)
         print(f'LCU {info["version"]} installed. Restart agents that use LCU so they load the new release.\n'
               f'To reclaim space from superseded releases, run: {shlex.quote(str(lcu))} prune')
         return 0

@@ -254,12 +254,42 @@ def notice_cached(root):
             'message': message(root, {**info, 'severity': severity}, current)}
 
 
+def codex_needs_setup(home=None, env=None):
+    """True when Codex has LCU registered but not the update-notice hook (added by `lcu setup --agent codex`)."""
+    import tomllib
+    from .codex_hooks import is_notice_group
+    env = os.environ if env is None else env
+    config = Path(env.get('CODEX_HOME') or Path(home or Path.home()) / '.codex') / 'config.toml'
+    try:
+        data = tomllib.loads(config.read_text())
+    except (OSError, ValueError):
+        return False
+    if 'lcu' not in (data.get('mcp_servers') or {}):
+        return False
+    groups = (data.get('hooks') or {}).get('SessionStart') or []
+    return not any(is_notice_group(group) for group in groups if isinstance(group, dict))
+
+
+def post_install(root, home=None):
+    """Refresh what setup copied out of an earlier release; `lcu update` runs it from the new release."""
+    from . import claude_mod
+    home = Path(home or Path.home())
+    target = claude_mod.destination(home)
+    if target.is_dir() and claude_mod._owned(target):
+        claude_mod.install(home, root)
+        print(f'Refreshed the Claude Code lcu-approve mod at {target}.')
+    if codex_needs_setup(home):
+        print(f'Codex: run `{stable_command(root)} setup --agent codex` to add the LCU update-notice hook.')
+    return 0
+
+
 def main(root, argv=None):
     parser = argparse.ArgumentParser(prog='lcu update', description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--check', action='store_true', help='Check now without installing')
     mode.add_argument('--notice', action='store_true', help='Print the cached update notice for an agent (never uses the network)')
     mode.add_argument('--refresh', action='store_true', help=argparse.SUPPRESS)
+    mode.add_argument('--post-install', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--json', action='store_true', help='Print JSON (with --check or --notice)')
     parser.add_argument('--hook-json', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--yes', action='store_true', help='Do not ask before installing')
@@ -279,6 +309,8 @@ def main(root, argv=None):
         except Exception:
             pass
         return 0
+    if args.post_install:
+        return post_install(root)
     if args.refresh:
         try:
             if enabled(root):

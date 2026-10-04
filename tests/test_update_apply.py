@@ -164,7 +164,7 @@ class ApplyTests(Installed):
         release = self.install('linux', 'x64', app)
         result, run = self.run_apply(release, tar_bytes())
         self.assertEqual(result, 0)
-        command = run.call_args.args[0]
+        command = run.call_args_list[0].args[0]
         self.assertEqual(command[:2], ['/usr/bin/python3', '-B'])
         self.assertTrue(command[2].endswith('scripts/install.py'))
         self.assertEqual(command[3:], ['--prefix', str(self.prefix), '--runtime-only',
@@ -177,22 +177,27 @@ class ApplyTests(Installed):
         archive = tar_bytes(name='lcu-0.9.2-darwin-arm64')
         result, run = self.run_apply(release, archive)
         self.assertEqual(result, 0)
-        command = run.call_args.args[0]
+        command = run.call_args_list[0].args[0]
         self.assertTrue(command[2].endswith('scripts/install_macos.py'))
         self.assertEqual(command[3:], ['--prefix', str(self.prefix), '--runtime-only', '--existing-app', str(app)])
+        # Then the new release refreshes what setup copied out of the old one.
+        self.assertEqual(run.call_args_list[1].args[0],
+                         [str(self.prefix / 'current/bin/lcu'), 'update', '--post-install'])
 
     def test_windows_command(self):
         release = self.install('windows', 'x64')
         result, run = self.run_apply(release, zip_bytes())
         self.assertEqual(result, 0)
-        command = run.call_args.args[0]
+        command = run.call_args_list[0].args[0]
         self.assertTrue(command[2].endswith('scripts/install_windows.py'))
         self.assertEqual(command[3:], ['--prefix', str(self.prefix), '--runtime-only'])
+        self.assertEqual(run.call_args_list[1].args[0], [str(self.prefix / 'lcu.cmd'), 'update', '--post-install'])
 
     def test_installer_failure_status(self):
         release = self.install()
-        result, _ = self.run_apply(release, tar_bytes(), status=7)
+        result, run = self.run_apply(release, tar_bytes(), status=7)
         self.assertEqual(result, 7)
+        self.assertEqual(run.call_count, 1)  # no post-install after a failed install
 
     def test_unwritable_linux_prefix_prints_sudo(self):
         release = self.install()

@@ -30,7 +30,7 @@ class UpdateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.home = Path(self.tmp.name) / 'home'
+        self.home = Path(self.tmp.name).resolve() / 'home'  # /var is a symlink on macOS
         self.home.mkdir()
         env = {'HOME': str(self.home), 'XDG_CACHE_HOME': str(self.home / 'xdg'),
                'LOCALAPPDATA': str(self.home / 'local')}
@@ -195,6 +195,60 @@ class UpdateTest(unittest.TestCase):
         with mock.patch('sys.stdout', out), mock.patch('sys.stderr', io.StringIO()):
             status = update.main(self.root, list(argv))
         return status, out.getvalue()
+
+    def test_post_install_refreshes_whole_claude_mod(self):
+        from lcu import claude_mod
+        source = self.root / claude_mod.SOURCE
+        files = {'.claude-plugin/plugin.json': '{"name": "lcu-approve", "version": "0.3.0"}',
+                 'hooks/hooks.json': '{}', 'hooks/register.tsx': 'new', 'types/index.d.ts': 'types',
+                 'tests/register.test.tsx': 'test'}
+        for name, text in files.items():
+            (source / name).parent.mkdir(parents=True, exist_ok=True)
+            (source / name).write_text(text)
+        # What 0.9.0 left behind: an older mod without types/index.d.ts and a file since dropped.
+        target = claude_mod.destination(self.home)
+        (target / '.claude-plugin').mkdir(parents=True)
+        (target / '.claude-plugin/plugin.json').write_text('{"name": "lcu-approve", "version": "0.2.0"}')
+        (target / 'hooks').mkdir()
+        (target / 'hooks/register.tsx').write_text('old')
+        (target / 'hooks/stale.ts').write_text('stale')
+        with mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+            self.assertEqual(update.main(self.root, ['--post-install']), 0)
+        self.assertIn('Refreshed the Claude Code lcu-approve mod', out.getvalue())
+        self.assertEqual((target / 'types/index.d.ts').read_text(), 'types')
+        self.assertEqual((target / 'hooks/register.tsx').read_text(), 'new')
+        self.assertIn('0.3.0', (target / '.claude-plugin/plugin.json').read_text())
+        self.assertFalse((target / 'hooks/stale.ts').exists())
+        self.assertFalse((target / 'tests').exists())
+        config = json.loads((target / claude_mod.CONFIG).read_text())
+        self.assertEqual(config['lcu'], str(self.root.parent.parent / 'current/bin/lcu'))
+
+    def test_post_install_leaves_absent_or_foreign_mod_alone(self):
+        from lcu import claude_mod
+        with mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+            self.assertEqual(update.post_install(self.root, self.home), 0)
+        self.assertFalse(claude_mod.destination(self.home).exists())
+        target = claude_mod.destination(self.home)
+        (target / '.claude-plugin').mkdir(parents=True)
+        (target / '.claude-plugin/plugin.json').write_text('{"name": "someone-else"}')
+        with mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+            update.post_install(self.root, self.home)
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual((target / '.claude-plugin/plugin.json').read_text(), '{"name": "someone-else"}')
+
+    def test_codex_hint_only_when_registered_without_notice_hook(self):
+        codex = self.home / '.codex'
+        codex.mkdir()
+        env = {'CODEX_HOME': str(codex)}
+        self.assertFalse(update.codex_needs_setup(self.home, env))
+        (codex / 'config.toml').write_text('[mcp_servers.lcu]\ncommand = "/p/current/bin/lcu"\n')
+        self.assertTrue(update.codex_needs_setup(self.home, env))
+        (codex / 'config.toml').write_text(
+            '[mcp_servers.lcu]\ncommand = "/p/current/bin/lcu"\n'
+            '[[hooks.SessionStart]]\nmatcher = "startup|resume"\n'
+            '[[hooks.SessionStart.hooks]]\ntype = "command"\n'
+            'command = "/p/current/bin/lcu update --notice --hook-json"\n')
+        self.assertFalse(update.codex_needs_setup(self.home, env))
 
     def test_stable_command_per_platform(self):
         prefix = self.root.parent.parent
