@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import piExtension from '../pi/index.ts';
 
-const fixture = new URL('./omp-mcp-fixture.mjs', import.meta.url).pathname;
+const fixture = fileURLToPath(new URL('./omp-mcp-fixture.mjs', import.meta.url));
 
 test('OMP host surface preserves prompt sections and runs dynamically registered LCU tools', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-omp-'));

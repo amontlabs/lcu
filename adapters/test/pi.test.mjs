@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import piExtension from '../pi/index.ts';
 
-const fixture = new URL('./mcp-fixture.mjs', import.meta.url).pathname;
+const fixture = fileURLToPath(new URL('./mcp-fixture.mjs', import.meta.url));
 
 async function waitForFileMatch(path, predicate, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
@@ -90,7 +91,8 @@ test('Pi keeps one original CUA turn across model rounds and cleans up after age
   }
 });
 
-test('Pi /lcu stop reaches private host control while the original tool call is pending', async () => {
+test('Pi /lcu stop reaches private host control while the original tool call is pending',
+  { skip: process.platform === 'win32' && 'the macOS host-control endpoint is a Unix socket' }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-pi-stop-'));
   const log = join(directory, 'mcp.jsonl');
   const oldCommand = process.env.LCU_MCP_COMMAND;

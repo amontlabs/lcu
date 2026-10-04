@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -8,9 +9,9 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { isolatedEnv } from './isolated-env.mjs';
 
-const fixture = new URL('./result-fixture.mjs', import.meta.url).pathname;
-const extension = new URL('../pi/index.ts', import.meta.url).pathname;
-const adapterPackage = new URL('../', import.meta.url).pathname;
+const fixture = fileURLToPath(new URL('./result-fixture.mjs', import.meta.url));
+const extension = fileURLToPath(new URL('../pi/index.ts', import.meta.url));
+const adapterPackage = fileURLToPath(new URL('../', import.meta.url));
 const node = process.execPath;
 const CASES = ['text', 'image', 'audio', 'error'];
 

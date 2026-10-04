@@ -72,10 +72,17 @@ async function waitUntilAborted(signal) {
   });
 }
 
+// turn_ended for a 'hold-*' session waits until a 'release-held-cleanup' js call.
+let releaseHeldCleanup;
+
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args = {}, _meta } = request.params;
   if (name === 'turn_ended') {
     log({ type: 'turn-ended', args });
+    if (typeof args.session_id === 'string' && args.session_id.startsWith('hold-') && !releaseHeldCleanup) {
+      await new Promise(resolve => { releaseHeldCleanup = resolve; });
+      log({ type: 'turn-ended-released', args });
+    }
     return { content: [{ type: 'text', text: 'Original cleanup completed.' }] };
   }
 
@@ -114,6 +121,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     await waitUntilAborted(extra.signal);
     log({ type: 'active-call-aborted', code: args.code, meta: _meta });
     return { content: [{ type: 'text', text: 'fixture observed close cancellation' }] };
+  }
+  if (name === 'js' && args.code === 'release-held-cleanup') {
+    releaseHeldCleanup?.();
+    // Let the held turn_ended reply reach the relay before this result does.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    return { content: [{ type: 'text', text: releaseHeldCleanup ? 'released' : 'nothing held' }] };
   }
   if (name === 'js' && args.code === 'parallel-slow') {
     await new Promise(resolve => setTimeout(resolve, 40));

@@ -13,6 +13,9 @@ from threading import Thread
 import unittest
 from unittest.mock import patch
 
+if sys.platform == 'win32':
+    raise unittest.SkipTest('macOS launcher and its Unix-socket lifecycle host')
+
 from lcu.runtime import environment, main, paths
 
 

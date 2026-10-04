@@ -1,4 +1,5 @@
 """The optional CLI probe must fail before installing unreadable hook config."""
+import os
 import subprocess
 from pathlib import Path
 import sys
@@ -60,9 +61,16 @@ class CodexCliCapabilityTests(unittest.TestCase):
                            'import sys\n'
                            'sys.stdout.buffer.write(b"codex-cli \\xe2\\x80\\x8f fixture\\n")\n')
             cli.chmod(0o755)
+            env = {'PATH': str(Path(sys.executable).parent)}
+            if sys.platform == 'win32':
+                # Windows runs no shebang scripts; a batch shim starts the same fixture.
+                script, cli = cli, cli.with_suffix('.cmd')
+                cli.write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+                env.update({key: os.environ[key] for key in ('SYSTEMROOT', 'COMSPEC', 'PATHEXT')
+                            if key in os.environ})
             with patch('lcu.codex_hooks.shutil.which', return_value=str(cli)), \
                  patch('subprocess._text_encoding', return_value='cp1252'):
-                require_cli_hook_support({'PATH': str(Path(sys.executable).parent)})
+                require_cli_hook_support(env)
 
 
 if __name__ == '__main__':

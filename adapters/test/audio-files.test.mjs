@@ -51,8 +51,11 @@ test('persists mixed audio blocks byte-for-byte in private files and retains res
     const filePath = match[1];
     assert.equal(isAbsolute(filePath), true);
     assert.deepEqual(readFileSync(filePath), item.bytes);
-    assert.equal(statSync(filePath).mode & 0o777, 0o600);
-    assert.equal(statSync(dirname(filePath)).mode & 0o777, 0o700);
+    // Windows has no POSIX permission bits to check.
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(filePath).mode & 0o777, 0o600);
+      assert.equal(statSync(dirname(filePath)).mode & 0o777, 0o700);
+    }
   }
 });
 

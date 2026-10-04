@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -7,8 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isolatedEnv } from './isolated-env.mjs';
 
-const fixture = new URL('./mcp-fixture.mjs', import.meta.url).pathname;
-const extension = new URL('../pi/index.ts', import.meta.url).pathname;
+const fixture = fileURLToPath(new URL('./mcp-fixture.mjs', import.meta.url));
+const extension = fileURLToPath(new URL('../pi/index.ts', import.meta.url));
 
 function scriptedChunk(model, delta, finishReason = null) {
   return { id: 'local-script', object: 'chat.completion.chunk', created: 1, model,

@@ -5,10 +5,10 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isolatedEnv } from './isolated-env.mjs';
 
-const extension = new URL('../pi/index.ts', import.meta.url).pathname;
+const extension = fileURLToPath(new URL('../pi/index.ts', import.meta.url));
 
 function chunk(model, delta, finishReason = null) {
   return { id: 'original-local-script', object: 'chat.completion.chunk', created: 1, model,

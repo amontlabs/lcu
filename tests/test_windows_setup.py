@@ -114,6 +114,7 @@ class WindowsSetupTests(unittest.TestCase):
                         ['lcu'], base / 'tools', release), [])
                     self.assertEqual(hooks.call_args.args[0], codex_bin / expected)
 
+    @unittest.skipIf(sys.platform == 'win32', 'Linux discover sessions need a POSIX account')
     def test_linux_discover_setup_keeps_version_probe_on_direct_runtime(self):
         with tempfile.TemporaryDirectory() as temporary:
             prefix = Path(temporary).resolve() / 'lcu'

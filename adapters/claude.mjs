@@ -151,6 +151,10 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
     }
     const key = turnKey(sessionId, turnId);
     if (cleanedTurns.has(key)) return { content: [{ type: 'text', text: 'Turn already ended.' }] };
+    // Each bind stores a fresh activeTurns entry; a changed entry at resolution
+    // means the turn was re-bound while this cleanup was in flight.
+    const generation = activeTurns.get(key);
+    let rebound = false;
     let cleanup = cleanupInFlight.get(key);
     if (!cleanup) {
       cleanup = upstream.callTool({ name: TURN_END_TOOL, arguments: {
@@ -161,19 +165,22 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
       cleanupInFlight.set(key, cleanup);
     }
     try {
-      const result = await cleanup;
+      const result = await cleanup.finally(() => { rebound = activeTurns.get(key) !== generation; });
       if (result.isError) {
         const detail = (result.content ?? []).filter(item => item.type === 'text')
           .map(item => item.text).join('\n');
         throw new Error(`Original CUA turn cleanup failed: ${detail || 'unknown error'}`);
       }
-      cleanedTurns.add(key);
-      if (cleanedTurns.size > 256) cleanedTurns.delete(cleanedTurns.values().next().value);
-      activeTurns.delete(key);
+      if (!rebound) {
+        cleanedTurns.add(key);
+        if (cleanedTurns.size > 256) cleanedTurns.delete(cleanedTurns.values().next().value);
+        activeTurns.delete(key);
+      }
       return result;
     } finally {
       if (cleanupInFlight.get(key) === cleanup) cleanupInFlight.delete(key);
-      clearTurnContexts(sessionId, turnId);
+      // A re-bound turn keeps its new identities for the later Stop cleanup.
+      if (!rebound) clearTurnContexts(sessionId, turnId);
     }
   }
 
@@ -241,6 +248,9 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
         // The turn is live again: a later Stop must reach upstream turn_ended
         // even if an earlier aborted call already ran Interrupt cleanup for it.
         cleanedTurns.delete(key);
+        // A cleanup still in flight ended the earlier life of this turn; the
+        // next Stop must start its own upstream turn_ended instead of joining it.
+        cleanupInFlight.delete(key);
         activeTurns.set(key, {
           sessionId: context.sessionId,
           turnId: context.turnId,

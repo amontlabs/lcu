@@ -118,8 +118,9 @@ def setup_lock(home):
     try:
         if sys.platform == 'win32':
             import msvcrt
-            os.write(fd, b'0')
-            os.lseek(fd, 0, os.SEEK_SET)
+            # Lock byte 0 without writing it: a write into a range another handle
+            # holds fails with a lock violation instead of waiting. Windows allows
+            # locking past the end of the file.
             msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
         else:
             fcntl.flock(fd, fcntl.LOCK_EX)

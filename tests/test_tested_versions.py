@@ -183,6 +183,7 @@ class TestedVersionTests(unittest.TestCase):
             doctor.main(self.root, ['--non-interactive'], resolved=resolved, env={})
         self.assertIn('differs from the one recorded', out.getvalue())
 
+    @unittest.skipIf(sys.platform == 'win32', 'Drives the Linux setup path with a POSIX account')
     def test_setup_reports_an_untested_pair_and_still_registers(self):
         prefix = self.root / 'prefix'
         current = prefix / 'current'

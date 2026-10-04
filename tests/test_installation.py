@@ -13,6 +13,9 @@ import unittest
 import struct
 from unittest.mock import patch
 
+if sys.platform == 'win32':
+    raise unittest.SkipTest('Linux installer, sessions and app layout use POSIX accounts, locks and modes')
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'scripts')]
 from lcu.runtime import environment

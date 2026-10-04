@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+        python: ['3.12']
+        include:
+          - os: ubuntu-24.04
+            python: '3.14'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
+      - run: python -m unittest discover -b -s tests -p 'test_*.py'
+      - run: npm test --prefix adapters
+
+  windows:
+    # Modules and tests for POSIX-only targets (Linux/macOS installers and
+    # layouts, fcntl, mode bits, Unix sockets) skip themselves on Windows.
+    name: Windows build and tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
+      - run: python -m unittest discover -b -s tests -p 'test_*.py'
+      - run: npm test --prefix adapters
+      - run: python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"
+      - run: python scripts/check_archive.py (Get-ChildItem "$env:RUNNER_TEMP\dist\*.zip").FullName
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      # Bug-class rules only (syntax errors, undefined names); style is not gated.
+      - run: pipx run ruff check --isolated --select E9,F63,F7,F82 .
+      - run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=error
+      - name: JSON files parse
+        run: git ls-files '*.json' ':!:**/package-lock.json' | xargs -n1 python3 -m json.tool --no-ensure-ascii > /dev/null
+
+  archives:
+    name: Build archives and check for app payloads
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: python scripts/build_bundle.py --platform linux --output "$RUNNER_TEMP/dist"
+      - run: python scripts/build_bundle.py --platform windows --output "$RUNNER_TEMP/dist"
+      - run: python scripts/check_archive.py "$RUNNER_TEMP"/dist/*.tar.gz "$RUNNER_TEMP"/dist/*.zip

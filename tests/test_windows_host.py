@@ -12,8 +12,17 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import uuid
 
 from lcu import windows_host
+
+
+def minimal_env():
+    """PATH only, plus SystemRoot on Windows: Node aborts at startup without it."""
+    env = {'PATH': os.environ.get('PATH', '')}
+    if 'SYSTEMROOT' in os.environ:
+        env['SYSTEMROOT'] = os.environ['SYSTEMROOT']
+    return env
 
 
 def _asar(path: Path, members: dict[str, bytes]):
@@ -132,10 +141,11 @@ class WindowsHostTests(unittest.TestCase):
             windows_host.start_original_host(
                 node=Path(sys.executable), entry=entry, helper=helper, transport=transport, env={})
 
-    @unittest.skipUnless(shutil.which('node') and sys.platform != 'win32',
-                         'Unix socket test needs Node on a non-Windows test host')
+    @unittest.skipUnless(shutil.which('node'), 'Node is needed for the lifetime transport test')
     def test_private_lifetime_transport_forwards_ids_and_survives_disconnect(self):
-        address = self.base / 'lifetime.sock'
+        # Windows uses the production transport, a private named pipe.
+        address = (rf'\\.\pipe\lcu-lifetime-test-{uuid.uuid4()}' if sys.platform == 'win32'
+                   else str(self.base / 'lifetime.sock'))
         module = Path(windows_host.__file__).with_name('windows_lifetime_host.cjs')
         script = ("const {startLifetimeSignal}=require(process.argv[1]); "
                   "let active='new'; "
@@ -145,9 +155,9 @@ class WindowsHostTests(unittest.TestCase):
                   "if(matched)active=null; return matched; }, process.argv[2]) "
                   ".then(signal=>{console.log('ready'); process.stdin.resume(); "
                   "process.stdin.once('end',()=>signal.dispose().then(()=>process.exit(0)));});")
-        child = subprocess.Popen([shutil.which('node'), '-e', script, str(module), str(address)],
+        child = subprocess.Popen([shutil.which('node'), '-e', script, str(module), address],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 env={'PATH': os.environ.get('PATH', '')})
+                                 env=minimal_env())
         def cleanup():
             if child.poll() is None:
                 child.terminate()
@@ -164,24 +174,30 @@ class WindowsHostTests(unittest.TestCase):
             self.fail(f'Private lifetime host did not start: {error.decode(errors="replace")[:300]}')
         self.assertEqual(ready, b'ready\n')
 
-        def call(turn):
+        def send(turn, *, drop=False):
+            request = json.dumps({'session_id': 'session', 'turn_id': turn}).encode() + b'\n'
+            if sys.platform == 'win32':
+                with open(address, 'r+b', buffering=0) as pipe:
+                    pipe.write(request)
+                    return None if drop else json.loads(pipe.readline())
             with socket.socket(socket.AF_UNIX) as client:
-                client.connect(str(address))
-                client.sendall(json.dumps({'session_id': 'session', 'turn_id': turn}).encode() + b'\n')
+                client.connect(address)
+                if drop:
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                client.sendall(request)
+                if drop:
+                    return None
                 with client.makefile('rb') as stream:
                     return json.loads(stream.readline())
 
-        self.assertEqual(call('old'), {'closed': False})
-        with socket.socket(socket.AF_UNIX) as dropped:
-            dropped.connect(str(address))
-            dropped.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
-            dropped.sendall(b'{"session_id":"session","turn_id":"disconnect"}\n')
+        self.assertEqual(send('old'), {'closed': False})
+        send('disconnect', drop=True)
         # A peer reset during the asynchronous host response must not crash it.
         import time
         time.sleep(0.1)
         self.assertIsNone(child.poll())
-        self.assertEqual(call('new'), {'closed': True})
-        self.assertEqual(call('new'), {'closed': False})
+        self.assertEqual(send('new'), {'closed': True})
+        self.assertEqual(send('new'), {'closed': False})
         child.stdin.close()
         self.assertEqual(child.wait(timeout=5), 0)
         child.stdout.close()
@@ -214,7 +230,7 @@ await callback({session_id:'session', turn_id:'turn'});
 console.log(JSON.stringify({first, second, handlers, ended, written}));'''
         result = subprocess.run([shutil.which('node'), '--input-type=module', '-e', script,
                                  str(wrapper), str(original)], check=True, capture_output=True,
-                                env={'PATH': os.environ.get('PATH', '')})
+                                env=minimal_env())
         self.assertEqual(json.loads(result.stdout),
                          {'first': 'setup', 'second': 'execute', 'handlers': 1,
                           'ended': True, 'written': '{"session_id":"session","turn_id":"turn"}\n'})
