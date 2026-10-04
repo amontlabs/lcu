@@ -59,7 +59,7 @@ def problems(archive, digests):
 def main(paths):
     if not paths:
         sys.exit('usage: check_archive.py ARCHIVE...')
-    digests = official_digests(json.loads((SOURCE / 'runtime.lock.json').read_text()))
+    digests = official_digests(json.loads((SOURCE / 'runtime.lock.json').read_text(encoding='utf-8')))
     failed = False
     for path in map(Path, paths):
         found = list(problems(path, digests))
