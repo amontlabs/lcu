@@ -1,0 +1,38 @@
+name: Linux container gate
+
+# tests/run.sh: offline install and read-only app suites in disposable containers,
+# natively on each architecture so the original sandbox is required.
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: tests/run.sh ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      # Ubuntu 24.04 runners block unprivileged user namespaces, which bubblewrap
+      # needs inside the container. This runner VM is discarded after the job.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: tests/run.sh ${{ matrix.platform }}
+      # Never upload .verification/: it holds the downloaded official package and app files.
