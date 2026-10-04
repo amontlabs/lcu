@@ -121,7 +121,8 @@ class BrowserSetupTests(unittest.TestCase):
             self.assertEqual(json.loads(chrome_manifest.read_text())['allowed_origins'],
                              ['chrome-extension://fixture/'])
             self.assertEqual((destination / '.lcu-browser-host').read_text(), str((root / 'app').resolve()) + '\n')
-            self.assertEqual(expected_relay.stat().st_mode & 0o777, 0o700)
+            if os.name != 'nt':  # Windows has no POSIX mode bits.
+                self.assertEqual(expected_relay.stat().st_mode & 0o777, 0o700)
             self.assertEqual(run.call_count, 1)
             self.assertEqual(run.call_args.args[0][0], '/fake/node')
             self.assertTrue((destination / 'chrome/scripts/installManifest.mjs').is_file())

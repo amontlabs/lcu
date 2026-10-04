@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lcu import setup, status
+import setup_host
 
 ALL = ('pi', 'codex', 'claude-code', 'omp', 'hermes')
 
@@ -27,15 +28,11 @@ class Fixture(unittest.TestCase):
         self.prefix = self.root / 'prefix'
         self.home = self.root / 'home'
         self.home.mkdir()
-        for name in ('bin/lcu', 'bin/lcu-session'):
-            path = self.prefix / 'current' / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('fixture')
-            path.chmod(0o755)
+        setup_host.make_runtime(self.prefix)
         self.installed = set()
         self.registered = []
         self.failing = set()
-        self.account = SimpleNamespace(pw_name='fixture', pw_uid=os.getuid(), pw_dir=str(self.home))
+        self.account = setup_host.account(self.home)
 
     def configure(self, names, home, command, *args, **kwargs):
         self.registered.append({'names': list(names), 'command': command, **kwargs})
@@ -53,7 +50,7 @@ class Fixture(unittest.TestCase):
     def run_main(self, *argv, agents=ALL, reconcile=False):
         out, err = io.StringIO(), io.StringIO()
         code = 0
-        patches = [patch.object(setup.sys, 'platform', 'linux'),
+        patches = [patch.object(setup.sys, 'platform', setup_host.PLATFORM),
                    patch.object(setup, 'installer_environment'), patch.object(setup, 'installer_paths'),
                    patch.object(setup, 'configure', side_effect=self.configure),
                    patch.object(setup.shutil, 'which', side_effect=self.which),
@@ -61,6 +58,10 @@ class Fixture(unittest.TestCase):
                                 return_value=SimpleNamespace(returncode=0, stdout='', stderr=''))]
         if not reconcile:
             patches.append(patch.object(setup, 'validate', return_value=(self.account, list(agents))))
+        elif setup_host.WINDOWS:
+            # Windows setup selects the signed-in account and its profile.
+            patches += [patch.object(setup.getpass, 'getuser', return_value=self.account.pw_name),
+                        patch.dict(os.environ, {'USERPROFILE': self.account.pw_dir})]
         else:
             patches += [patch.object(setup.pwd, 'getpwuid', return_value=self.account),
                         patch.object(setup.pwd, 'getpwnam', return_value=self.account)]
@@ -72,7 +73,7 @@ class Fixture(unittest.TestCase):
             try:
                 setup.main(['--prefix', str(self.prefix), '--session', 'direct', '--yes', '--no-chrome',
                             *argv] if not reconcile else ['--prefix', str(self.prefix), '--reconcile',
-                                *(['--user', 'fixture'] if os.getuid() == 0 else []), *argv])
+                                *(['--user', 'fixture'] if setup_host.is_root() else []), *argv])
             except SystemExit as exc:
                 code = exc.code or 0
         return code, out.getvalue(), err.getvalue()
@@ -159,6 +160,7 @@ class AllowMissingTests(Fixture):
         state = self.state()
         self.assertEqual((state['approval'], state['pending']), ('auto', ['pi', 'omp', 'hermes']))
 
+    @unittest.skipIf(setup_host.WINDOWS, 'Windows setup refuses --export before checking --allow-missing')
     def test_export_and_allow_missing_conflict(self):
         args = setup.parser().parse_args(['--export', '/tmp/x', '--allow-missing'])
         with self.assertRaisesRegex(ValueError, 'cannot be combined with --export'):
@@ -192,7 +194,7 @@ class ReconcileTests(Fixture):
         self.assertEqual(len(self.registered), 1)
         call = self.registered[0]
         self.assertEqual(call['names'], ['omp'])
-        self.assertEqual(call['command'], [str(self.prefix / 'current/bin/lcu'), '--audio'])
+        self.assertEqual(call['command'], [*setup_host.direct_command(self.prefix), '--audio'])
         self.assertEqual((call['approval'], call['scope']), ('auto', 'user'))
         self.assertIn('Registered: omp', out)
         state = self.state()
@@ -209,6 +211,7 @@ class ReconcileTests(Fixture):
         self.run_main(reconcile=True)
         self.assertIsNone(self.registered[0]['approval'])
 
+    @unittest.skipIf(setup_host.WINDOWS, 'Windows has only direct sessions')
     def test_saved_project_scope_and_session_are_used(self):
         project = self.root / 'project'
         project.mkdir()
@@ -239,7 +242,7 @@ class ReconcileTests(Fixture):
     def test_binary_in_a_user_directory_outside_path_is_found(self):
         self.pend(names=('pi',))
         (self.home / '.bun/bin').mkdir(parents=True)
-        tool = self.home / '.bun/bin/pi'
+        tool = self.home / ('.bun/bin/pi.cmd' if setup_host.WINDOWS else '.bun/bin/pi')
         tool.write_text('#!/bin/sh\n')
         tool.chmod(0o755)
         self.assertTrue(setup.harness_installed('pi', self.home, '/nonexistent'))
@@ -250,7 +253,7 @@ class ReconcileTests(Fixture):
                      ['--scope', 'project']):
             with self.subTest(flag=flag):
                 argv = ['--reconcile', *flag]
-                if os.getuid() == 0:
+                if setup_host.is_root():
                     argv += ['--user', 'root']
                 with self.assertRaisesRegex(ValueError, 'cannot be combined'):
                     setup.validate(setup.parser().parse_args(argv))
@@ -266,11 +269,12 @@ class ReconcileTests(Fixture):
             finished.set()
 
         # Hold the lock from a separate process, as a concurrent setup would.
-        (self.home / '.local/state/lcu').mkdir(parents=True, exist_ok=True)
         holder = subprocess.Popen([sys.executable, '-c', (
-            'import fcntl,os,sys\n'
-            f'fd=os.open({str(self.home / ".local/state/lcu/setup.lock")!r},os.O_CREAT|os.O_RDWR)\n'
-            'fcntl.flock(fd,fcntl.LOCK_EX)\nprint("held",flush=True)\nsys.stdin.read()')],
+            'import sys\n'
+            f'sys.path.insert(0,{str(Path(setup.__file__).parents[1])!r})\n'
+            'from pathlib import Path\nfrom lcu import setup\n'
+            f'with setup.setup_lock(Path({str(self.home)!r})):\n'
+            ' print("held",flush=True)\n sys.stdin.read()')],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.addCleanup(holder.kill)
         self.assertEqual(holder.stdout.readline().strip(), 'held')

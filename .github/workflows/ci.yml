@@ -19,8 +19,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The suite's fixtures assume a POSIX host; Windows code paths are
-        # exercised here cross-platform and natively in the windows job.
         os: [ubuntu-24.04, macos-latest]
         python: ['3.12']
         include:
@@ -41,6 +39,8 @@ jobs:
       - run: npm test --prefix adapters
 
   windows:
+    # Modules and tests for POSIX-only targets (Linux/macOS installers and
+    # layouts, fcntl, mode bits, Unix sockets) skip themselves on Windows.
     name: Windows build and tests
     runs-on: windows-latest
     timeout-minutes: 20
@@ -52,8 +52,9 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-      - run: python -m unittest -b test_build_windows test_windows_package test_windows_runtime test_app_server_windows
-        working-directory: tests
+      - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
+      - run: python -m unittest discover -b -s tests -p 'test_*.py'
+      - run: npm test --prefix adapters
       - run: python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"
       - run: python scripts/check_archive.py (Get-ChildItem "$env:RUNNER_TEMP\dist\*.zip").FullName
 

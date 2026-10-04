@@ -16,6 +16,14 @@ from unittest.mock import patch
 from lcu import windows_host
 
 
+def minimal_env():
+    """PATH only, plus SystemRoot on Windows: Node aborts at startup without it."""
+    env = {'PATH': os.environ.get('PATH', '')}
+    if 'SYSTEMROOT' in os.environ:
+        env['SYSTEMROOT'] = os.environ['SYSTEMROOT']
+    return env
+
+
 def _asar(path: Path, members: dict[str, bytes]):
     files = {}
     payload = bytearray()
@@ -214,7 +222,7 @@ await callback({session_id:'session', turn_id:'turn'});
 console.log(JSON.stringify({first, second, handlers, ended, written}));'''
         result = subprocess.run([shutil.which('node'), '--input-type=module', '-e', script,
                                  str(wrapper), str(original)], check=True, capture_output=True,
-                                env={'PATH': os.environ.get('PATH', '')})
+                                env=minimal_env())
         self.assertEqual(json.loads(result.stdout),
                          {'first': 'setup', 'second': 'execute', 'handlers': 1,
                           'ended': True, 'written': '{"session_id":"session","turn_id":"turn"}\n'})

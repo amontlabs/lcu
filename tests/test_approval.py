@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lcu import approval, claude_visibility, setup
+import setup_host
 
 
 class ClaudeApprovalTests(unittest.TestCase):
@@ -360,9 +361,10 @@ class ConfigureApprovalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             approval.apply('yolo', 'pi', Path('/h'), scope='user', project=None, env={})
 
+    @unittest.skipIf(setup_host.WINDOWS, 'Windows setup refuses --export before checking --approval')
     def test_export_cannot_carry_an_approval_mode(self):
         argv = ['--export', '/tmp/new-export', '--approval', 'auto']
-        if os.getuid() == 0:
+        if setup_host.is_root():
             argv += ['--user', 'root']
         args = setup.parser().parse_args(argv)
         with self.assertRaisesRegex(ValueError, 'cannot be combined with --export'):
@@ -377,22 +379,18 @@ class SetupApprovalPersistenceTests(unittest.TestCase):
         self.prefix = self.root / 'prefix'
         self.home = self.root / 'home'
         self.home.mkdir()
-        for name in ('bin/lcu', 'bin/lcu-session'):
-            path = self.prefix / 'current' / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('fixture')
-            path.chmod(0o755)
+        setup_host.make_runtime(self.prefix)
         self.configured = []
 
     def drive(self, *argv, agents=('codex',), failures=()):
-        account = SimpleNamespace(pw_name='fixture', pw_uid=os.getuid(), pw_dir=str(self.home))
+        account = setup_host.account(self.home)
 
         def configure(names, home, command, *args, **kwargs):
             self.configured.append(kwargs.get('approval', 'missing'))
             return list(failures)
 
         out = io.StringIO()
-        with patch.object(setup.sys, 'platform', 'linux'), \
+        with patch.object(setup.sys, 'platform', setup_host.PLATFORM), \
              patch.object(setup, 'validate', return_value=(account, list(agents))), \
              patch.object(setup, 'installer_environment'), patch.object(setup, 'installer_paths'), \
              patch.object(setup, 'configure', side_effect=configure), \
