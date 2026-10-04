@@ -12,20 +12,15 @@ import { execFileSync } from 'node:child_process';
 export const ALLOW_ENV = 'LCU_ALLOW_AGENT_HOST_APPROVAL';
 
 /**
- * Apps whose purpose is to host an agent session or a shell running one. Editors that
- * are mostly ordinary targets (Zed, Xcode, JetBrains IDEs, Sublime Text) are left to
- * the parent-chain detection, which names them only when they really host this agent.
- * VS Code is listed because the Claude and Codex extensions run in it; the
- * escape hatch above and the parent chain cover the opposite trade-off.
+ * Dedicated agent hosts and terminals only. Editors and IDEs (VS Code, Cursor,
+ * Windsurf, Antigravity, Zed, ...) are common computer-use targets, so they are left
+ * to the parent-chain detection, which refuses them when an agent extension hosts
+ * this session.
  */
 export const KNOWN_AGENT_HOSTS = new Map([
   ['com.anthropic.claudefordesktop', 'Claude'],
+  ['com.anthropic.claude-code', 'Claude Code'],
   ['com.openai.codex', 'Codex'],
-  ['com.microsoft.VSCode', 'Visual Studio Code'],
-  ['com.microsoft.VSCodeInsiders', 'Visual Studio Code Insiders'],
-  ['com.todesktop.230313mzl4w4u92', 'Cursor'],
-  ['com.exafunction.windsurf', 'Windsurf'],
-  ['com.google.antigravity', 'Antigravity'],
   ['ai.opencode.desktop', 'OpenCode'],
   ['com.electron.factory', 'Factory'],
   ['com.nousresearch.hermes', 'Hermes'],

@@ -62,13 +62,18 @@ test('findHostApps returns nothing for missing processes, cycles, absent bundle 
 });
 
 test('known agent hosts and the detected host are refused, other apps are not', () => {
-  for (const id of ['com.anthropic.claudefordesktop', 'com.microsoft.VSCode', 'com.microsoft.VSCodeInsiders',
-    'com.todesktop.230313mzl4w4u92', 'com.exafunction.windsurf', 'com.apple.Terminal', 'com.googlecode.iterm2',
+  for (const id of ['com.anthropic.claudefordesktop', 'com.anthropic.claude-code', 'com.openai.codex', 'com.apple.Terminal', 'com.googlecode.iterm2',
     'com.mitchellh.ghostty', 'dev.warp.Warp-Stable', 'com.github.wez.wezterm', 'org.alacritty',
     'net.kovidgoyal.kitty', 'co.zeit.hyper']) {
     assert.ok(agentHostReason(id, { hosts: [], env: {} }), id);
   }
-  assert.ok(agentHostReason('COM.MICROSOFT.VSCODE', { hosts: [], env: {} }));
+  assert.ok(agentHostReason('COM.APPLE.TERMINAL', { hosts: [], env: {} }));
+  for (const editor of ['com.microsoft.VSCode', 'com.microsoft.VSCodeInsiders', 'com.todesktop.230313mzl4w4u92',
+    'com.exafunction.windsurf', 'com.google.antigravity', 'dev.zed.Zed']) {
+    assert.equal(KNOWN_AGENT_HOSTS.has(editor), false, editor);
+    assert.equal(agentHostReason(editor, { hosts: [], env: {} }), undefined, editor);
+    assert.equal(agentHostReason(editor, { hosts: [{ bundleId: editor, name: 'Editor' }], env: {} }), 'Editor');
+  }
   assert.equal(KNOWN_AGENT_HOSTS.has('dev.zed.Zed'), false);
   assert.equal(agentHostReason('dev.zed.Zed', { hosts: [], env: {} }), undefined);
   assert.equal(agentHostReason('dev.zed.Zed', { hosts: [{ bundleId: 'dev.zed.Zed', name: 'Zed' }], env: {} }), 'Zed');
