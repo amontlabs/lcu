@@ -168,10 +168,13 @@ def environment(root, resolved=None, *, chrome=False, audio=False, platform=None
         identity = 'lcu-' + str(uuid.uuid4())
         env['NODE_REPL_REQUEST_META'] = json.dumps({'x-codex-turn-metadata': {
             'session_id': identity, 'turn_id': identity + '-connection'}})
-    if target == 'linux' and env.get('LCU_NODE_REPL_SANDBOX') != 'host':
-        _default_linux_sandbox_state(env)
     if target == 'linux':
         _configure_linux_input(root, runtime, env, metadata)
+        mode = env.get('LCU_NODE_REPL_SANDBOX', '').strip().lower()
+        if mode == 'off':
+            _default_linux_sandbox_state(env)
+        elif mode != 'host':
+            _configure_linux_sandbox_shim(root, runtime, env)
     return env
 
 
@@ -227,25 +230,48 @@ def _configure_linux_input(root, runtime, env, metadata):
     env['LCU_LINUX_INPUT_TOOLKITS'] = ','.join(toolkits)
 
 
+def _configure_linux_sandbox_shim(root, runtime, env):
+    """Keep the model's JavaScript kernel sandboxed while Sky, the trusted worker, can reach X11.
+
+    With no `codex/sandbox-state-meta` the original node_repl runs its kernel and trusted Sky
+    worker under `codex sandbox` with network disabled whenever the machine supports bubblewrap.
+    That seccomp filter refuses connect(2), so Sky cannot reach the X11 socket. node_repl starts
+    both through CODEX_CLI_PATH, so LCU points it at a launcher shim (`sandbox_shim`) that leaves
+    the kernel sandboxed as asked and starts only the identified Sky worker outside it. A host
+    that sends its own `codex/sandbox-state-meta` (a `disabled` profile included) keeps full
+    precedence: node_repl then asks for the sandbox it was told to. Without the shim file the
+    original behavior stays, which fails closed. LCU_NODE_REPL_SANDBOX=host leaves everything
+    untouched and `off` runs the kernel unsandboxed (see `_default_linux_sandbox_state`).
+    """
+    from . import sandbox_shim
+    shim = root / 'bin/lcu-codex-sandbox'
+    if not shim.is_file() or not env.get('CODEX_CLI_PATH'):
+        return
+    wrapper = root / 'lcu/linux_sky_service.mjs'
+    try:
+        sky = json.loads(env['NODE_REPL_TRUSTED_SERVICES']).get('sky')
+    except (KeyError, ValueError, AttributeError):
+        # The original launcher defaults to the original Sky service when no map is supplied.
+        sky = sandbox_shim.SKY_SERVICE
+    env[sandbox_shim.CONFIG_ENV] = sandbox_shim.configuration(
+        runtime, env['CODEX_CLI_PATH'], wrapper if sky == str(wrapper) else None)
+    # node_repl starts the kernel with only the variables on this list; the shim needs its
+    # configuration there too, because it must find the real Codex to sandbox the kernel with. The
+    # test-only fault hook travels the same way and can only make the shim refuse.
+    shared = [sandbox_shim.CONFIG_ENV] + ([sandbox_shim.FAULT_ENV] if sandbox_shim.FAULT_ENV in env else [])
+    env['NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'] = ','.join(filter(None, (
+        env.get('NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'), *shared)))
+    env['CODEX_CLI_PATH'] = str(shim)
+
+
 SANDBOX_STATE_META = 'codex/sandbox-state-meta'
 
 
 def _default_linux_sandbox_state(env):
-    """Give the original node_repl the sandbox state its Linux host would send.
-
-    With no `codex/sandbox-state-meta` the original node_repl runs its kernel and
-    trusted Sky worker under `codex sandbox` with network disabled whenever the
-    machine supports bubblewrap. That seccomp filter refuses connect(2), so Sky
-    cannot reach the X11 socket and every `js` call fails with "Could not connect
-    to X11 ... Operation not permitted". Hosts that do not send the metadata
-    (every LCU adapter and generic MCP clients) would never work on such a
-    machine. The default sandbox state disables that wrapper, as official Codex
-    does under danger-full-access. The original Linux runtime has no per-app
-    approval prompt, so the host's own tool approval is the only gate. A host
-    that sends its own `codex/sandbox-state-meta` per call, or one in
-    NODE_REPL_REQUEST_META, keeps full precedence over this default, so a
-    stricter profile is honored. Set LCU_NODE_REPL_SANDBOX=host to
-    leave the original behavior untouched.
+    """Give the original node_repl the `disabled` sandbox state official Codex sends under
+    danger-full-access, so it starts neither its JavaScript kernel nor its Sky worker in
+    `codex sandbox` (`LCU_NODE_REPL_SANDBOX=off`; no longer the default). A host that sends its
+    own `codex/sandbox-state-meta` per call, or one in NODE_REPL_REQUEST_META, keeps precedence.
     """
     try:
         request = json.loads(env['NODE_REPL_REQUEST_META'])
@@ -261,6 +287,20 @@ def _default_linux_sandbox_state(env):
         'permissionProfile': {'type': 'disabled'}, 'sandboxCwd': cwd.as_uri()}
     env['NODE_REPL_REQUEST_META'] = json.dumps(request)
     return env
+
+
+def _leave_unusable_working_directory():
+    """Start from `/` when the launch directory cannot be entered.
+
+    Without a sandbox state of its own, `node_repl` starts its kernel in the process's working
+    directory and fails with "Permission denied" when the account cannot enter it.
+    """
+    try:
+        usable = os.access('.', os.R_OK | os.X_OK)
+    except OSError:
+        usable = False
+    if not usable:
+        os.chdir('/')
 
 
 def reply_to_server_discover(source, destination):
@@ -466,4 +506,6 @@ def main(root, argv):
             finally:
                 stop_original_host(host, temporary)
             raise SystemExit(status)
+    if platform == 'linux':
+        _leave_unusable_working_directory()
     os.execve(runtime / 'bin/node', command, env)

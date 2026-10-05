@@ -132,6 +132,51 @@ class DoctorTests(unittest.TestCase):
         self.assertIn('Screenshot capture: could not verify.', output.getvalue())
         self.assertNotIn('Computer use is ready', output.getvalue())
 
+    def sandbox_status(self, env, works):
+        output = io.StringIO()
+        with patch('sys.stdout', output):
+            doctor.print_linux_sandbox_status(env, works=works)
+        return output.getvalue()
+
+    def test_linux_sandbox_status_says_when_the_kernel_is_confined(self):
+        text = self.sandbox_status({'LCU_SANDBOX_SHIM': '{}'}, lambda env: (True, ''))
+        self.assertIn('JavaScript sandbox: active', text)
+        self.assertIn('no network', text)
+
+    def test_linux_sandbox_status_says_when_there_is_no_sandbox_here(self):
+        text = self.sandbox_status({'LCU_SANDBOX_SHIM': '{}'}, lambda env: (False, 'exit 1: bwrap denied'))
+        self.assertIn('NOT AVAILABLE', text)
+        self.assertIn('bwrap denied', text)
+        self.assertIn('not sandboxed', text)
+
+    def test_linux_sandbox_status_reports_a_missing_shim_and_the_modes(self):
+        self.assertIn("launcher shim is missing", self.sandbox_status({}, lambda env: (True, '')))
+        off = self.sandbox_status({'LCU_NODE_REPL_SANDBOX': 'off'}, lambda env: self.fail('probe not needed'))
+        self.assertIn('OFF', off)
+        host = self.sandbox_status({'LCU_NODE_REPL_SANDBOX': 'host'}, lambda env: self.fail('probe not needed'))
+        self.assertIn('LCU_NODE_REPL_SANDBOX=host', host)
+
+    def test_linux_sandbox_probe_uses_the_real_codex_and_the_original_probe_shape(self):
+        env = {'CODEX_CLI_PATH': '/shim', 'LCU_SANDBOX_SHIM': json.dumps(
+            {'codex': '/real/codex', 'runtime': '/r', 'wrapper': None})}
+        for returncode, expected in ((12, True), (1, False)):
+            with patch('lcu.doctor.subprocess.run', return_value=Mock(returncode=returncode, stderr='')) as run:
+                self.assertEqual(doctor.linux_sandbox_works(env)[0], expected)
+            command = run.call_args.args[0]
+            self.assertTrue(Path(run.call_args.kwargs['cwd']).name.startswith('lcu-sandbox-probe-'))
+            self.assertEqual(command[:2], ['/real/codex', 'sandbox'])
+            self.assertEqual(command[command.index('--') + 1], '/bin/sh')
+
+    def test_linux_doctor_prints_the_sandbox_status_once(self):
+        self._linux()
+        output = io.StringIO()
+        with patch('lcu.doctor.linux_sandbox_works', return_value=(False, '')), \
+             patch('lcu.doctor._probe', return_value={'target': 'linux', 'windows': {'ok': True, 'count': 1},
+                                                      'screenshot': {'ok': True}}), \
+             patch('lcu.doctor.sys.stdin', io.StringIO()), patch('sys.stdout', output):
+            doctor.main(self.root, ['--non-interactive'], resolved=self.resolved, env=self.env)
+        self.assertEqual(output.getvalue().count('JavaScript sandbox:'), 1)
+
     def test_linux_interactive_retry_can_complete_readiness(self):
         self._linux()
         failed = {'target': 'linux', 'windows': {'ok': True, 'count': 1},

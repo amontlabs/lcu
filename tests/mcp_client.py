@@ -7,8 +7,8 @@ import time
 
 class Client:
     def __init__(self, command, env=None, request_handler=None,
-                 protocol_version='2024-11-05', capabilities=None):
-        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+                 protocol_version='2024-11-05', capabilities=None, stderr=None):
+        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, env=env)
         self.buffer = b''
         self.sequence = 0
         self.request_handler = request_handler

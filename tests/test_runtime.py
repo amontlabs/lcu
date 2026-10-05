@@ -81,10 +81,7 @@ class UpstreamRuntimeTests(unittest.TestCase):
             env = environment(self.root)
         for key, value in settings.items():
             if key == 'NODE_REPL_REQUEST_META':
-                # Host metadata is kept; only the missing sandbox default is added.
-                request = json.loads(value)
-                actual = json.loads(env[key])
-                self.assertEqual({k: v for k, v in actual.items() if k != 'codex/sandbox-state-meta'}, request)
+                self.assertEqual(json.loads(env[key]), json.loads(value))
                 continue
             self.assertEqual(env[key], value, key)
 
@@ -93,45 +90,123 @@ class UpstreamRuntimeTests(unittest.TestCase):
             first = environment(self.root)
             second = environment(self.root)
         metadata = json.loads(first['NODE_REPL_REQUEST_META'])
-        self.assertEqual(set(metadata), {'x-codex-turn-metadata', 'codex/sandbox-state-meta'})
+        self.assertEqual(set(metadata), {'x-codex-turn-metadata'})
         turn = metadata['x-codex-turn-metadata']
         self.assertEqual(set(turn), {'session_id', 'turn_id'})
         self.assertNotEqual(first['NODE_REPL_REQUEST_META'], second['NODE_REPL_REQUEST_META'])
 
-    def test_linux_default_disables_the_original_sandbox_wrapper(self):
-        # Without this, a machine with bubblewrap runs Sky under `codex sandbox` with
-        # network disabled and X11 connect(2) fails for every harness that sends no meta.
+    def test_an_unusable_launch_directory_is_left_for_the_filesystem_root(self):
+        from lcu.runtime import _leave_unusable_working_directory
+        blocked = Path(self.temporary.name) / 'blocked'
+        blocked.mkdir()
+        previous = os.getcwd()
+        try:
+            os.chdir(blocked)
+            with patch('os.access', return_value=False):
+                _leave_unusable_working_directory()
+            self.assertEqual(os.getcwd(), os.path.realpath('/'))
+            os.chdir(blocked)
+            _leave_unusable_working_directory()
+            self.assertEqual(os.getcwd(), os.path.realpath(blocked))
+        finally:
+            os.chdir(previous)
+
+    def install_sandbox_shim(self):
+        (self.root / 'bin').mkdir(exist_ok=True)
+        shim = self.root / 'bin/lcu-codex-sandbox'
+        shim.write_text('#!/bin/sh\n')
+        shim.chmod(0o755)
+        return shim
+
+    def test_linux_default_points_node_repl_at_the_sandbox_shim(self):
+        shim = self.install_sandbox_shim()
         with patch.dict(os.environ, {}, clear=True):
-            metadata = json.loads(environment(self.root)['NODE_REPL_REQUEST_META'])
-        state = metadata['codex/sandbox-state-meta']
+            env = environment(self.root)
+        config = json.loads(env['LCU_SANDBOX_SHIM'])
+        self.assertEqual(env['CODEX_CLI_PATH'], str(shim))
+        self.assertNotEqual(config['codex'], str(shim))
+        self.assertEqual(config['runtime'], env['NODE_REPL_NODE_PATH'].removesuffix('/bin/node'))
+        self.assertIsNone(config['wrapper'])
+        self.assertIn('LCU_SANDBOX_SHIM', env['NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'].split(','))
+        # No host sandbox state is invented: the kernel stays under the sandbox node_repl chooses.
+        self.assertEqual(set(json.loads(env['NODE_REPL_REQUEST_META'])), {'x-codex-turn-metadata'})
+
+    def test_shim_configuration_keeps_a_caller_allowlist_and_codex_path(self):
+        shim = self.install_sandbox_shim()
+        with patch.dict(os.environ, {'CODEX_CLI_PATH': '/host/codex',
+                                     'NODE_REPL_UNTRUSTED_ENV_ALLOWLIST': 'FIRST,SECOND'}, clear=True):
+            env = environment(self.root)
+        self.assertEqual(json.loads(env['LCU_SANDBOX_SHIM'])['codex'], '/host/codex')
+        self.assertEqual(env['CODEX_CLI_PATH'], str(shim))
+        self.assertEqual(env['NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'], 'FIRST,SECOND,LCU_SANDBOX_SHIM')
+
+    def test_the_test_only_fault_hook_reaches_the_kernels_launcher_only_when_set(self):
+        self.install_sandbox_shim()
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertNotIn('FAULT', environment(self.root)['NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'])
+        with patch.dict(os.environ, {'LCU_TEST_SANDBOX_SHIM_FAULT': 'unrecognized-kernel'}, clear=True):
+            allowed = environment(self.root)['NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'].split(',')
+        self.assertEqual(allowed, ['LCU_SANDBOX_SHIM', 'LCU_TEST_SANDBOX_SHIM_FAULT'])
+
+    def test_shim_is_told_about_lcus_own_sky_wrapper(self):
+        self.install_sandbox_shim()
+        self.install_linux_input_wrapper()
+        with patch.dict(os.environ, {}, clear=True):
+            env = environment(self.root)
+        wrapper = str(self.root / 'lcu/linux_sky_service.mjs')
+        self.assertEqual(json.loads(env['NODE_REPL_TRUSTED_SERVICES'])['sky'], wrapper)
+        self.assertEqual(json.loads(env['LCU_SANDBOX_SHIM'])['wrapper'], wrapper)
+
+    def test_missing_shim_keeps_the_original_behavior_which_fails_closed(self):
+        with patch.dict(os.environ, {}, clear=True):
+            env = environment(self.root)
+        self.assertNotIn('LCU_SANDBOX_SHIM', env)
+        self.assertNotIn('LCU_SANDBOX_SHIM', env.get('NODE_REPL_UNTRUSTED_ENV_ALLOWLIST', ''))
+        self.assertNotEqual(Path(env['CODEX_CLI_PATH']).name, 'lcu-codex-sandbox')
+        self.assertEqual(set(json.loads(env['NODE_REPL_REQUEST_META'])), {'x-codex-turn-metadata'})
+
+    def test_off_gives_the_original_node_repl_a_disabled_sandbox_state(self):
+        shim = self.install_sandbox_shim()
+        with patch.dict(os.environ, {'LCU_NODE_REPL_SANDBOX': 'off'}, clear=True):
+            env = environment(self.root)
+        state = json.loads(env['NODE_REPL_REQUEST_META'])['codex/sandbox-state-meta']
         self.assertEqual(state['permissionProfile'], {'type': 'disabled'})
         self.assertEqual(state['sandboxCwd'], Path.cwd().as_uri())
-        self.assertTrue(state['sandboxCwd'].startswith('file:///'))
+        self.assertNotIn('LCU_SANDBOX_SHIM', env)
+        self.assertNotEqual(env['CODEX_CLI_PATH'], str(shim))
 
-    def test_host_supplied_sandbox_state_is_never_replaced(self):
-        strict = {'permissionProfile': {'type': 'managed', 'file_system': {'type': 'unrestricted'},
-                                        'network': 'restricted'}, 'sandboxCwd': 'file:///work'}
-        supplied = json.dumps({'codex/sandbox-state-meta': strict, 'x-codex-turn-metadata': {'session_id': 's'}})
-        with patch.dict(os.environ, {'NODE_REPL_REQUEST_META': supplied}, clear=True):
-            env = environment(self.root)
-        self.assertEqual(env['NODE_REPL_REQUEST_META'], supplied)
-
-    def test_host_request_metadata_gains_only_the_missing_sandbox_default(self):
+    def test_off_adds_only_the_missing_state_to_host_metadata(self):
         supplied = {'x-codex-turn-metadata': {'session_id': 'host-session', 'turn_id': 'host-turn'}}
-        with patch.dict(os.environ, {'NODE_REPL_REQUEST_META': json.dumps(supplied)}, clear=True):
+        with patch.dict(os.environ, {'LCU_NODE_REPL_SANDBOX': 'off',
+                                     'NODE_REPL_REQUEST_META': json.dumps(supplied)}, clear=True):
             actual = json.loads(environment(self.root)['NODE_REPL_REQUEST_META'])
         self.assertEqual(actual.pop('codex/sandbox-state-meta')['permissionProfile'], {'type': 'disabled'})
         self.assertEqual(actual, supplied)
 
-    def test_unparseable_or_non_object_host_metadata_is_left_alone(self):
-        for supplied in ('not json', '[1]', '', '"text"'):
-            with self.subTest(supplied=supplied), patch.dict(os.environ, {'NODE_REPL_REQUEST_META': supplied}, clear=True):
+    def test_host_supplied_sandbox_state_is_never_replaced(self):
+        self.install_sandbox_shim()
+        strict = {'permissionProfile': {'type': 'managed', 'file_system': {'type': 'unrestricted'},
+                                        'network': 'restricted'}, 'sandboxCwd': 'file:///work'}
+        supplied = json.dumps({'codex/sandbox-state-meta': strict, 'x-codex-turn-metadata': {'session_id': 's'}})
+        for mode in ('', 'off', 'host'):
+            with self.subTest(mode=mode), patch.dict(
+                    os.environ, {'NODE_REPL_REQUEST_META': supplied, 'LCU_NODE_REPL_SANDBOX': mode}, clear=True):
                 self.assertEqual(environment(self.root)['NODE_REPL_REQUEST_META'], supplied)
 
-    def test_sandbox_default_can_be_declined(self):
+    def test_unparseable_or_non_object_host_metadata_is_left_alone(self):
+        for mode in ('', 'off'):
+            for supplied in ('not json', '[1]', '', '"text"'):
+                with self.subTest(mode=mode, supplied=supplied), patch.dict(
+                        os.environ, {'NODE_REPL_REQUEST_META': supplied, 'LCU_NODE_REPL_SANDBOX': mode}, clear=True):
+                    self.assertEqual(environment(self.root)['NODE_REPL_REQUEST_META'], supplied)
+
+    def test_host_mode_leaves_the_original_behavior_untouched(self):
+        shim = self.install_sandbox_shim()
         with patch.dict(os.environ, {'LCU_NODE_REPL_SANDBOX': 'host'}, clear=True):
-            metadata = json.loads(environment(self.root)['NODE_REPL_REQUEST_META'])
-        self.assertEqual(set(metadata), {'x-codex-turn-metadata'})
+            env = environment(self.root)
+        self.assertEqual(set(json.loads(env['NODE_REPL_REQUEST_META'])), {'x-codex-turn-metadata'})
+        self.assertNotIn('LCU_SANDBOX_SHIM', env)
+        self.assertNotEqual(env['CODEX_CLI_PATH'], str(shim))
 
     def test_other_platforms_keep_their_original_sandbox_state(self):
         with patch.dict(os.environ, {}, clear=True):

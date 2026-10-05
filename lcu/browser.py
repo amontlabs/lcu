@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 from . import capture
+from .sandbox_shim import unshimmed_env
 
 
 _MACOS_NATIVE_HOST_DIRS = (
@@ -177,7 +178,8 @@ def _install_locked(root, system, destination, selected_app):
         if not marker.is_file() or marker.is_symlink() or marker.read_text() != expected:
             raise ValueError('The browser host directory belongs to another installation; select an empty directory.')
     selected = paths(root)
-    env = environment(root, selected)
+    # The persisted Codex path is the real executable, not the sandbox shim.
+    env = unshimmed_env(environment(root, selected))
     # Runtime selection returns the original resource tree. Linux stores it
     # under app/resources; macOS stores it under app/Contents/Resources.
     source = selected[1] / 'plugins/openai-bundled/plugins/chrome'

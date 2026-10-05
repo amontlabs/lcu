@@ -63,6 +63,8 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertIn(prefix + 'lcu/macos_host.py', names)
                 self.assertIn(prefix + 'lcu/macos_sky_service.mjs', names)
                 self.assertNotIn(prefix + 'lcu/linux_sky_service.mjs', names)
+                self.assertNotIn(prefix + 'bin/lcu-codex-sandbox', names)
+                self.assertIn(prefix + 'lcu/sandbox_shim.py', names)
                 self.assertIn(prefix + 'lcu/interpreter.py', names)
                 self.assertIn(prefix + 'lcu/apps.py', names)
                 self.assertIn(prefix + 'bin/lcu-owner-auth', names)
@@ -105,6 +107,9 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/bin/lcu-owner-auth', names)
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/claude_mod.py', names)
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/linux_sky_service.mjs', names)
+                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/sandbox_shim.py', names)
+                shim = bundle.getmember(f'lcu-{VERSION}-linux-x64/bin/lcu-codex-sandbox')
+                self.assertTrue(shim.mode & 0o111)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/lcu/macos_sky_service.mjs', names)
 
     @posix_archive

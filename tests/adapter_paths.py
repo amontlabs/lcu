@@ -5,7 +5,8 @@ bridge) and a bare MCP client talk to the installed `lcu` exactly as a registrat
 None of them is given `codex/sandbox-state-meta`. On a machine where the original node_repl
 can sandbox, that used to make every call fail with "Could not connect to X11", so with
 LCU_REQUIRE_SANDBOX=1 this also proves that the sandbox is available here, that the failure
-reproduces when LCU's default is declined, and that a host's stricter profile is honored.
+reproduces with LCU_NODE_REPL_SANDBOX=host, that by default the kernel stays confined while computer
+use works, that a host's stricter profile is honored, and that `off` runs the kernel unsandboxed.
 """
 import json
 import os
@@ -222,8 +223,12 @@ def sandbox_available():
         probe.close()
 
 
+WRITE_PROBE = ('const fs = await import("node:fs"); try { fs.writeFileSync(%s, "x"); nodeRepl.write("ALLOWED"); } '
+               'catch (e) { nodeRepl.write("REFUSED " + (e.code || e.message)); }')
+
+
 def sandbox_controls():
-    # Negative control: declining LCU's default restores the original failure on a sandbox-capable machine.
+    # Negative control: LCU_NODE_REPL_SANDBOX=host keeps the original failure on a sandbox-capable machine.
     declined = Mcp(command, env={**os.environ, 'LCU_NODE_REPL_SANDBOX': 'host'})
     try:
         declined.js('await cua.getState();')
@@ -231,18 +236,31 @@ def sandbox_controls():
         assert result.get('isError') and 'Could not connect to X11' in text(result), text(result)[-400:]
     finally:
         declined.close()
-    # A host that deliberately sends a stricter profile keeps it, even though LCU supplies a default.
-    strict = Mcp(command)
+    # The default: the model's kernel stays sandboxed while computer use works, with no host sandbox metadata.
+    marker = output / 'kernel-write-probe'
+    marker.unlink(missing_ok=True)
+    boxed = Mcp(command)
     try:
-        strict.js('await cua.getState();')
-        result = strict.call_tool('js', {'code': 'nodeRepl.write(JSON.stringify(await cua.listWindows({emit:false})));'},
-                                  meta={'codex/sandbox-state-meta': STRICT})
-        assert result.get('isError') and 'Could not connect to X11' in text(result), text(result)[-400:]
-        # The default applies again once the host stops sending its own state.
-        assert not strict.js('await cua.listWindows({emit:false});').get('isError')
+        boxed.js('await cua.getState();')
+        assert not boxed.js('await cua.listWindows({emit:false});').get('isError')
+        refused = text(boxed.js(WRITE_PROBE % json.dumps(str(marker))))
+        assert 'REFUSED' in refused and not marker.exists(), refused
+        # A host that deliberately sends a stricter profile keeps it, and computer use still works.
+        result = boxed.call_tool('js', {'code': 'nodeRepl.write(JSON.stringify(await cua.listWindows({emit:false})));'},
+                                 meta={'codex/sandbox-state-meta': STRICT})
+        assert not result.get('isError'), text(result)[-400:]
     finally:
-        strict.close()
-    print('PASS: sandbox negative control and stricter host profile', flush=True)
+        boxed.close()
+    # `off` is the explicit opt-out: the kernel runs without a sandbox.
+    unboxed = Mcp(command, env={**os.environ, 'LCU_NODE_REPL_SANDBOX': 'off'})
+    try:
+        assert not unboxed.js('await cua.listWindows({emit:false});').get('isError')
+        allowed = text(unboxed.js(WRITE_PROBE % json.dumps(str(marker))))
+        assert 'ALLOWED' in allowed and marker.exists(), allowed
+        marker.unlink()
+    finally:
+        unboxed.close()
+    print('PASS: sandbox negative control, confined kernel with computer use, stricter host profile, off', flush=True)
 
 
 if os.environ.get('LCU_REQUIRE_SANDBOX') == '1':
