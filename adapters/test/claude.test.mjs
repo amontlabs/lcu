@@ -712,17 +712,23 @@ test('Claude relay keeps a mod-claimed elicitation open past the host decline un
   const bridge = await connectRelay();
   try {
     let described;
+    const hostDeclined = Promise.withResolvers();
     bridge.respondToNextElicitation(async () => {
       described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
         { message: NATIVE_MESSAGE })).content[0].text);
+      hostDeclined.resolve();
       // The mod's hook returned a block at once: the host declines before any press.
       return { action: 'decline' };
     });
     let settled = false;
     const call = callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'wait' })
       .then(result => { settled = true; return result; });
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // A failed assertion below must not leave the call's rejection at close() unhandled.
+    call.catch(() => {});
+    await hostDeclined.promise;
     assert.ok(described, 'the mod claimed the record');
+    // Give the relay time to act on the host decline: it must keep waiting for the mod.
+    await new Promise(resolve => setTimeout(resolve, 300));
     assert.equal(settled, false, 'still waiting for the person');
     const recorded = await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'always' });
     assert.notEqual(recorded.isError, true);
@@ -737,12 +743,17 @@ test('Claude relay answers the runtime with a decline recorded after the host de
   const bridge = await connectRelay();
   try {
     let described;
+    const hostCancelled = Promise.withResolvers();
     bridge.respondToNextElicitation(async () => {
       described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
         { message: NATIVE_MESSAGE })).content[0].text);
+      hostCancelled.resolve();
       return { action: 'cancel' };
     });
     const call = callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'wait-deny' });
+    call.catch(() => {});
+    await hostCancelled.promise;
+    // Record the choice only after the relay has had the host's cancel in hand.
     await new Promise(resolve => setTimeout(resolve, 200));
     await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'deny' });
     assert.deepEqual(JSON.parse((await call).content[0].text), { action: 'decline' });
@@ -755,15 +766,19 @@ test('Claude relay stops waiting for a mod choice when the call is aborted and r
   const bridge = await connectRelay();
   try {
     let described;
+    const hostDeclined = Promise.withResolvers();
     bridge.respondToNextElicitation(async () => {
       described = JSON.parse((await approvalCall(bridge.client, 'approval_request',
         { message: NATIVE_MESSAGE })).content[0].text);
+      hostDeclined.resolve();
       return { action: 'decline' };
     });
     const controller = new AbortController();
     const aborted = callWithContext(bridge.client, 'js', { code: 'approval-native' }, {
       toolUseId: 'wait-abort', signal: controller.signal,
     }).then(() => undefined, error => error);
+    await hostDeclined.promise;
+    // Abort only once the relay is holding the elicitation open past the host decline.
     await new Promise(resolve => setTimeout(resolve, 200));
     assert.ok(described);
     controller.abort();
