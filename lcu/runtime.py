@@ -289,6 +289,20 @@ def _default_linux_sandbox_state(env):
     return env
 
 
+def _leave_unusable_working_directory():
+    """Start from `/` when the launch directory cannot be entered.
+
+    Without a sandbox state of its own, `node_repl` starts its kernel in the process's working
+    directory and fails with "Permission denied" when the account cannot enter it.
+    """
+    try:
+        usable = os.access('.', os.R_OK | os.X_OK)
+    except OSError:
+        usable = False
+    if not usable:
+        os.chdir('/')
+
+
 def reply_to_server_discover(source, destination):
     """Return a legacy-version probe error without reading beyond its line."""
     raw = bytearray()
@@ -492,4 +506,6 @@ def main(root, argv):
             finally:
                 stop_original_host(host, temporary)
             raise SystemExit(status)
+    if platform == 'linux':
+        _leave_unusable_working_directory()
     os.execve(runtime / 'bin/node', command, env)

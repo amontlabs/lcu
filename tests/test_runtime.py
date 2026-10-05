@@ -95,6 +95,22 @@ class UpstreamRuntimeTests(unittest.TestCase):
         self.assertEqual(set(turn), {'session_id', 'turn_id'})
         self.assertNotEqual(first['NODE_REPL_REQUEST_META'], second['NODE_REPL_REQUEST_META'])
 
+    def test_an_unusable_launch_directory_is_left_for_the_filesystem_root(self):
+        from lcu.runtime import _leave_unusable_working_directory
+        blocked = Path(self.temporary.name) / 'blocked'
+        blocked.mkdir()
+        previous = os.getcwd()
+        try:
+            os.chdir(blocked)
+            with patch('os.access', return_value=False):
+                _leave_unusable_working_directory()
+            self.assertEqual(os.getcwd(), os.path.realpath('/'))
+            os.chdir(blocked)
+            _leave_unusable_working_directory()
+            self.assertEqual(os.getcwd(), os.path.realpath(blocked))
+        finally:
+            os.chdir(previous)
+
     def install_sandbox_shim(self):
         (self.root / 'bin').mkdir(exist_ok=True)
         shim = self.root / 'bin/lcu-codex-sandbox'
