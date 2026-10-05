@@ -114,6 +114,39 @@ class StateSchemaTests(Fixture):
             self.state()
 
 
+class FailedRegistrationTests(Fixture):
+    def test_failure_still_saves_choices(self):
+        self.installed = {'pi'}
+        self.failing = {'pi', 'codex'}
+        code, _, err = self.run_main('--allow-missing', '--approval', 'auto', '--audio')
+        self.assertEqual(code, 1)
+        self.assertIn('2 registration step(s) failed (pi: plugin, codex: plugin). Choices were saved;', err)
+        state = self.state()
+        self.assertEqual((state['audio'], state['approval']), (True, 'auto'))
+        # Failed harnesses are retried with the printed command, not by reconcile.
+        self.assertEqual(state['pending'], ['omp', 'hermes'])
+        self.assertEqual(state['pending_context'], {'scope': 'user', 'project': None, 'session': 'direct'})
+        self.assertIn('--approval auto', err)
+        self.assertIn('--audio', err)
+
+    def test_a_pending_harness_that_fails_stays_pending(self):
+        self.run_main('--allow-missing')
+        self.installed = {'omp'}
+        self.failing = {'omp'}
+        code, _, _ = self.run_main(agents=('omp',))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.state()['pending'], ['pi', 'omp', 'hermes'])
+
+    def test_retry_omits_a_defaulted_approval_and_repeats_an_explicit_one(self):
+        self.failing = {'codex'}
+        _, _, err = self.run_main('--agent', 'codex')
+        self.assertIn('retry:', err)
+        self.assertNotIn('--approval', err)
+        self.assertEqual(self.state()['pending'], [])
+        _, _, err = self.run_main('--approval', 'ask')
+        self.assertIn('--approval ask', err)
+
+
 class AllowMissingTests(Fixture):
     def test_missing_harnesses_are_skipped_and_recorded_and_exit_is_zero(self):
         self.installed = {'pi'}

@@ -4,6 +4,7 @@ import io
 import os
 from pathlib import Path
 import sys
+import shutil
 import tempfile
 import unittest
 import subprocess
@@ -106,6 +107,7 @@ class BrowserSetupTests(unittest.TestCase):
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(json.dumps({'name': 'com.openai.codexextension',
                                                 'path': selected, 'allowed_origins': ['chrome-extension://fixture/']}))
+                return subprocess.CompletedProcess(args, 0)
 
             with mock.patch('lcu.browser.platform.system', return_value='Darwin'), \
                     mock.patch.dict(os.environ, {'HOME': str(home)}), \
@@ -153,6 +155,7 @@ class BrowserSetupTests(unittest.TestCase):
                 manifest.parent.mkdir(parents=True, exist_ok=True)
                 manifest.write_text(json.dumps({
                     'path': str(private / 'extension-host/macos/arm64/ChatGPT for Chrome')}))
+                return subprocess.CompletedProcess(args, 0)
 
             with mock.patch('lcu.browser.platform.system', return_value='Darwin'), \
                     mock.patch.dict(os.environ, {'HOME': str(home)}), \
@@ -192,8 +195,33 @@ class BrowserSetupTests(unittest.TestCase):
                     mock.patch.dict(os.environ, {'HOME': str(home)}), \
                     mock.patch('lcu.runtime.paths', return_value=(root / 'app', resources, None, {})), \
                     mock.patch('lcu.runtime.environment', return_value=env), \
-                    mock.patch('lcu.browser.subprocess.run'):
+                    mock.patch('lcu.browser.capture.run',
+                               return_value=subprocess.CompletedProcess([], 0, '', '')):
                 with self.assertRaisesRegex(ValueError, 'produced no manifest'):
+                    install(root)
+
+    def test_original_installer_failure_surfaces_stderr(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / 'release'
+            resources = root / 'app/Contents/Resources'
+            source = resources / 'plugins/openai-bundled/plugins/chrome/scripts'
+            source.mkdir(parents=True)
+            (source / 'installManifest.mjs').write_text('fixture')
+            relay_source = root / 'lcu/native_host.py'
+            relay_source.parent.mkdir(parents=True)
+            relay_source.write_text('fixture')
+            home = base / 'home'
+            home.mkdir()
+            env = {'HOME': str(home), 'NODE_REPL_NODE_PATH': '/fake/node',
+                   'CODEX_CLI_PATH': '/fake/codex', 'CUA_REPL_NODE_REPL_PATH': '/fake/repl'}
+            failed = subprocess.CompletedProcess([], 1, '', 'installer exploded')
+            with mock.patch('lcu.browser.platform.system', return_value='Darwin'), \
+                    mock.patch.dict(os.environ, {'HOME': str(home)}), \
+                    mock.patch('lcu.runtime.paths', return_value=(root / 'app', resources, None, {})), \
+                    mock.patch('lcu.runtime.environment', return_value=env), \
+                    mock.patch('lcu.browser.capture.run', return_value=failed):
+                with self.assertRaisesRegex(ValueError, 'installer exploded'):
                     install(root)
 
 
@@ -386,10 +414,43 @@ class BrowserStatusTests(unittest.TestCase):
             self.addCleanup(patch.stop)
 
     def run_status(self):
-        results = [mock.Mock(stdout=json.dumps(self.extension)),
-                   mock.Mock(stdout=json.dumps({'correct': True, 'manifestPath': str(self.manifest)}))]
-        with mock.patch('lcu.browser.subprocess.run', side_effect=results):
+        results = [subprocess.CompletedProcess([], 0, json.dumps(self.extension), ''),
+                   subprocess.CompletedProcess([], 0, json.dumps(
+                       {'correct': True, 'manifestPath': str(self.manifest)}), '')]
+        return self.run_status_with(results)
+
+    def run_status_with(self, results):
+        with mock.patch('lcu.browser.capture.run', side_effect=results):
             return status(self.root)
+
+    def good_manifest(self):
+        return subprocess.CompletedProcess([], 0, json.dumps(
+            {'correct': True, 'manifestPath': str(self.manifest)}), '')
+
+    def test_large_diagnostic_output_survives_node_exit(self):
+        node = shutil.which('node') or str(Path.home() / '.local/share/lcu/current/agent-tools/node/bin/node')
+        if not Path(node).is_file():
+            self.skipTest('node is not available')
+        script = self.root / 'big.js'
+        script.write_text("console.log(JSON.stringify({installed:true,enabled:true,pad:'x'.repeat(200000)}));"
+                          'process.exit(0);')
+        from lcu import capture
+        result = capture.run([node, str(script)], timeout=20)
+        self.assertGreater(len(result.stdout), 65536)
+        self.assertTrue(json.loads(result.stdout)['enabled'])
+
+    def test_unparseable_diagnostic_output_is_reported_honestly(self):
+        self.run_status_with([subprocess.CompletedProcess([], 0, 'not json', ''), self.good_manifest()])
+        self.assertIn('could not be parsed (8 bytes)', self.output.getvalue())
+        self.assertNotIn('returned no result', self.output.getvalue())
+
+    def test_non_object_diagnostic_output_is_a_problem(self):
+        self.run_status_with([subprocess.CompletedProcess([], 0, '[1]', ''), self.good_manifest()])
+        self.assertIn('could not be parsed', self.output.getvalue())
+
+    def test_diagnostic_stderr_is_shown_when_unparseable(self):
+        self.run_status_with([subprocess.CompletedProcess([], 1, '', 'boom happened'), self.good_manifest()])
+        self.assertIn('boom happened', self.output.getvalue())
 
     def test_valid_setup_does_not_claim_live_connection_or_write_files(self):
         before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}

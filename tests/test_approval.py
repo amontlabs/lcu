@@ -534,11 +534,11 @@ class SetupApprovalPersistenceTests(unittest.TestCase):
         self.drive()
         self.assertEqual(self.configured[-1], None)
 
-    def test_failed_registration_does_not_remember_the_mode_and_retry_keeps_it(self):
+    def test_failed_registration_remembers_the_mode_and_retry_keeps_it(self):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             self.drive('--approval', 'auto', failures=[('codex', 'approval', 'boom')])
-        self.assertFalse(setup.setup_state_path(self.home).exists())
+        self.assertEqual(self.saved(), 'auto')
         self.assertIn('--approval auto', stderr.getvalue())
 
     def test_parser_accepts_only_known_modes(self):

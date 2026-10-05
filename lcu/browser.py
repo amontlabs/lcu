@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 
+from . import capture
+
 
 _MACOS_NATIVE_HOST_DIRS = (
     'Google/Chrome', 'Chromium', 'Google/ChromeForTesting',
@@ -218,9 +220,13 @@ def _install_locked(root, system, destination, selected_app):
     script = ('const {install} = await import(process.argv[1]); '
               'await install({appServerRuntimePaths:{codexCliPath:process.env.CODEX_CLI_PATH,'
               'nodePath:process.env.NODE_REPL_NODE_PATH,nodeReplPath:process.env.CUA_REPL_NODE_REPL_PATH}});')
-    subprocess.run([env['NODE_REPL_NODE_PATH'], '--input-type=module', '-e', script,
-                    (destination / 'chrome/scripts/installManifest.mjs').as_uri()],
-                   env=env, check=True, capture_output=True)
+    installed = capture.run([env['NODE_REPL_NODE_PATH'], '--input-type=module', '-e', script,
+                             (destination / 'chrome/scripts/installManifest.mjs').as_uri()],
+                            env=env, timeout=120)
+    if installed.returncode:
+        detail = installed.stderr.strip()[-2000:] or installed.stdout.strip()[-2000:]
+        raise ValueError(f'The original Chrome installer failed (exit {installed.returncode}).'
+                         + (f' {detail}' if detail else ''))
     # The pinned original installer returns no manifest list. Locate only its
     # native-host manifest name at the documented config depths, then require
     # each candidate to point at this selected private copy before changing it.
@@ -273,14 +279,20 @@ def status(root, family='chrome'):
                    if item['browserFamily'] == family)
 
     def check(script):
-        result = subprocess.run(
+        result = capture.run(
             [env['NODE_REPL_NODE_PATH'], str(plugin / 'scripts' / script),
-             '--browser', family, '--json'],
-            env=env, capture_output=True, text=True, timeout=20)
+             '--browser', family, '--json'], env=env, timeout=20)
         try:
-            return json.loads(result.stdout)
+            parsed = json.loads(result.stdout)
+            if isinstance(parsed, dict):
+                return parsed
         except ValueError:
-            return {'problem': result.stderr.strip() or 'The original diagnostic returned no result.'}
+            pass
+        if result.stderr.strip():
+            return {'problem': result.stderr.strip()}
+        size = len(result.stdout.encode())
+        return {'problem': 'The original diagnostic output could not be parsed '
+                           f'({size} bytes).' if size else 'The original diagnostic returned no result.'}
 
     extension = check('check-extension-installed.js')
     manifest = check('check-native-host-manifest.js')

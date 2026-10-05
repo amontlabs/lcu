@@ -106,11 +106,31 @@ class InstalledInstructionTests(unittest.TestCase):
                 calls.clear()
                 if text:
                     (installed / 'SKILL.md').write_text(f'---\nname: lcu\n{text}\n---\n')
-                with patch('lcu.setup.subprocess.run', side_effect=run):
+                with patch('lcu.setup.capture.run', side_effect=run):
                     self.assertEqual(remove_old_skill('node', 'skills', self.root, {}, ['--global']), expected)
                 self.assertEqual(calls[0], ['list', '--json', '--global'])
                 # Removal is for every agent, so the shared .agents/skills copy goes too.
                 self.assertEqual(calls[1:], [['remove', 'lcu', '--yes', '--global']] if expected == 'removed' else [])
+
+    def test_old_skill_listing_survives_a_node_exit_after_large_output(self):
+        node = shutil.which('node') or str(Path.home() / '.local/share/lcu/current/agent-tools/node/bin/node')
+        if not Path(node).is_file():
+            self.skipTest('no node available')
+        skills = self.root / 'skills.mjs'
+        skills.write_text("console.log(JSON.stringify(Array.from({length: 2000}, (_, i) => "
+                          "({name: 'other-' + i, path: '/x/' + 'p'.repeat(60)}))));\nprocess.exit(0);\n")
+        self.assertEqual(remove_old_skill(node, skills, self.root, os.environ, ['--global']), 'none')
+
+    def test_old_skill_listing_errors_say_what_came_back(self):
+        def fake(stdout, stderr=''):
+            return patch('lcu.setup.capture.run', return_value=SimpleNamespace(returncode=0, stdout=stdout, stderr=stderr))
+        for stdout in ('null', '{"name": "lcu"}'):
+            with self.subTest(stdout=stdout), fake(stdout), self.assertRaises(ValueError):
+                remove_old_skill('node', 'skills', self.root, {}, [])
+        with fake('{"truncated', 'boom: stderr detail'), self.assertRaises(ValueError) as caught:
+            remove_old_skill('node', 'skills', self.root, {}, [])
+        self.assertIn('invalid JSON (11 bytes)', str(caught.exception))
+        self.assertIn('boom: stderr detail', str(caught.exception))
 
     def test_export_carries_no_skill_and_no_upstream_payload(self):
         destination = self.root / 'export'
@@ -231,7 +251,8 @@ class InstalledInstructionTests(unittest.TestCase):
             calls.clear()
             selected_scope['value'] = scope
             with patch('lcu.setup.installer_paths', return_value=(node, skill_cli, mcp_cli)), \
-                    patch('lcu.setup.preflight_mcp'), patch('lcu.setup.subprocess.run', side_effect=run):
+                    patch('lcu.setup.preflight_mcp'), patch('lcu.setup.subprocess.run', side_effect=run), \
+                    patch('lcu.setup.capture.run', side_effect=run):
                 failures = configure(['claude-code'], self.home,
                                      command, tool_root, self.release, scope=scope,
                                      project=project if scope == 'project' else None,
@@ -318,6 +339,7 @@ class InstalledInstructionTests(unittest.TestCase):
                 patch('lcu.setup.host_policy', return_value=policy), \
                 patch('lcu.setup.preflight_mcp'), \
                 patch('lcu.setup.subprocess.run', side_effect=run), \
+                patch('lcu.setup.capture.run', side_effect=run), \
                 patch('lcu.codex_hooks.require_cli_hook_support'), \
                 patch('lcu.codex_hooks.install_hooks') as install_hooks:
             failures = configure(['codex'], self.home, original,
@@ -353,7 +375,8 @@ class InstalledInstructionTests(unittest.TestCase):
 
         with patch('lcu.setup.installer_paths', return_value=(node, skill_cli, mcp_cli)), \
                 patch('lcu.setup.shutil.which', return_value='/bin/pi'), \
-                patch('lcu.setup.subprocess.run', side_effect=run):
+                patch('lcu.setup.subprocess.run', side_effect=run), \
+                patch('lcu.setup.capture.run', side_effect=run):
             failures = configure(['pi'], self.home,
                                  ['/usr/bin/lcu', '--audio'], tool_root, self.release,
                                  environ={'HOME': str(self.home)})

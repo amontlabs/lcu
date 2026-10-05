@@ -196,7 +196,7 @@ def main(argv=None):
         runtime = prefix / 'current/bin/lcu'
         result = subprocess.run([str(runtime), 'setup', *forwarded], check=False)
         if result.returncode:
-            print(f'LCU runtime installed at {runtime}, but agent registration failed. '
+            print(f'LCU runtime installed at {runtime}, but setup failed; see the errors above. '
                   f'After resolving the errors, retry: {runtime} setup {" ".join(forwarded)}',
                   file=sys.stderr)
             raise SystemExit(result.returncode)

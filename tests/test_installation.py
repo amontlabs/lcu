@@ -197,7 +197,7 @@ class InstallationTests(unittest.TestCase):
                     install_main(['--prefix', str(base / 'lcu'), '--existing-app', str(existing_app),
                                   '--agent', 'pi', '--yes', '--skip-system'])
             self.assertEqual(raised.exception.code, 5)
-            self.assertIn('agent registration failed', stderr.getvalue())
+            self.assertIn('setup failed; see the errors above', stderr.getvalue())
             self.assertIn(str(base / 'lcu' / 'current/bin/lcu'), stderr.getvalue())
 
     def test_existing_app_is_selected_in_place_with_its_actual_versions(self):

@@ -24,6 +24,7 @@ import tempfile
 import uuid
 from types import SimpleNamespace
 
+from . import capture
 from .setup_clients import CLIENTS, ALIASES
 
 
@@ -391,17 +392,20 @@ def remove_old_skill(node, skills, cwd, env, global_args):
     confirming the installed skill is LCU's own.
     """
     def installer(*args):
-        result = subprocess.run([str(node), str(skills), *args, *global_args], cwd=cwd, env=env,
-                                stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                                encoding='utf-8', errors='replace', timeout=120)
+        result = capture.run([str(node), str(skills), *args, *global_args], cwd=cwd, env=env, timeout=120)
         if result.returncode:
             detail = (result.stderr or result.stdout).strip()
             raise ValueError(f'skill installer exited {result.returncode}' + (f': {detail}' if detail else ''))
-        return result.stdout
+        return result
+    result = installer('list', '--json')
     try:
-        installed = json.loads(installer('list', '--json') or '[]')
-    except json.JSONDecodeError as exc:
-        raise ValueError('skill installer returned invalid JSON') from exc
+        installed = json.loads(result.stdout or '[]')
+        if not isinstance(installed, list):
+            raise ValueError('not a list')
+    except ValueError as exc:
+        tail = result.stderr.strip()[-500:]
+        raise ValueError(f'skill installer returned invalid JSON ({len(result.stdout.encode())} bytes)'
+                         + (f': {tail}' if tail else '')) from exc
     entry = next((item for item in installed if isinstance(item, dict) and item.get('name') == 'lcu'), None)
     if entry is None:
         return 'none'
@@ -435,15 +439,19 @@ def configure(names, home, command, tools_root, release_root, *, scope='user', p
     global_args = ['--global'] if scope == 'user' else []
     failures = []
 
+    def describe(exc):
+        # Expected failures carry their own message; anything else names its type.
+        return str(exc) if isinstance(exc, (ValueError, OSError, subprocess.SubprocessError)) else f'{type(exc).__name__}: {exc}'
+
     def apply_approval(name, client, plan=None):
         if approval is None:
             return
         try:
             outcome = approvals.apply(approval, name, home, scope=scope, project=project, env=env, plan=plan)
             print(f'{client.label}: approval {approval}: {outcome}.')
-        except (ValueError, OSError, subprocess.SubprocessError) as exc:
-            failures.append((name, 'approval', str(exc)))
-            print(f'{client.label}: approval failed: {exc}', file=sys.stderr)
+        except Exception as exc:
+            failures.append((name, 'approval', describe(exc)))
+            print(f'{client.label}: approval failed: {describe(exc)}', file=sys.stderr)
 
     for name in names:
         client = CLIENTS[name]
@@ -457,9 +465,9 @@ def configure(names, home, command, tools_root, release_root, *, scope='user', p
                     configure_hermes(home, command, node, release_root,
                                      scope=scope, project=project, env=env)
                 print(f'{client.label}: plugin registered.')
-            except (ValueError, OSError, subprocess.SubprocessError) as exc:
-                failures.append((name, 'plugin', str(exc)))
-                print(f'{client.label}: plugin failed: {exc}', file=sys.stderr)
+            except Exception as exc:
+                failures.append((name, 'plugin', describe(exc)))
+                print(f'{client.label}: plugin failed: {describe(exc)}', file=sys.stderr)
                 continue
             apply_approval(name, client)
             continue
@@ -486,9 +494,9 @@ def configure(names, home, command, tools_root, release_root, *, scope='user', p
                 require_cli_hook_support(env)
                 # Registration replaces `[mcp_servers.lcu]`; read the previous approval value first.
                 codex_plan = approvals.codex_plan(approval, home, scope=scope, project=project, env=env)
-            except ValueError as exc:
-                failures.append((name, 'host', str(exc)))
-                print(f'{client.label}: host failed: {exc}', file=sys.stderr)
+            except Exception as exc:
+                failures.append((name, 'host', describe(exc)))
+                print(f'{client.label}: host failed: {describe(exc)}', file=sys.stderr)
                 continue
         # Earlier LCU versions registered an `lcu` skill; official Codex computer
         # use has none, so remove it.
@@ -507,14 +515,19 @@ def configure(names, home, command, tools_root, release_root, *, scope='user', p
                                  json.dumps(approvals.merge_codex_policy(
                                      host_policy(release_root), codex_plan['policy'] if codex_plan else {}))]))
         for phase, argv in commands:
-            try:
-                if phase == 'old skill cleanup':
+            if phase == 'old skill cleanup':
+                # Best-effort legacy cleanup: a failure here must not fail setup.
+                try:
                     outcome = remove_old_skill(node, skills, cwd, env, global_args)
-                    if outcome == 'removed':
-                        print(f'{client.label}: old LCU skill removed.')
-                    elif outcome == 'kept':
-                        print(f'{client.label}: kept an `lcu` skill that LCU did not create.')
+                except Exception as exc:
+                    print(f'{client.label}: skipped old LCU skill cleanup: {describe(exc)}', file=sys.stderr)
                     continue
+                if outcome == 'removed':
+                    print(f'{client.label}: old LCU skill removed.')
+                elif outcome == 'kept':
+                    print(f'{client.label}: kept an `lcu` skill that LCU did not create.')
+                continue
+            try:
                 if phase == 'MCP':
                     if mcp_setup_error:
                         raise ValueError(mcp_setup_error)
@@ -554,6 +567,9 @@ def configure(names, home, command, tools_root, release_root, *, scope='user', p
                     from .codex_hooks import install_hooks
                     from .app_layout import locate_codex_tools
                     registered = json.loads(result.stdout)
+                    if not isinstance(registered, dict) or not isinstance(registered.get('path'), str):
+                        detail = (result.stdout or result.stderr).strip()
+                        raise ValueError('Codex registration returned unexpected output' + (f': {detail}' if detail else ''))
                     cli = locate_codex_tools(resources, windows=sys.platform == 'win32').cli
                     install_hooks(cli, Path(registered['path']), cwd, env, original_plugins, setup_command)
                 elif name == 'claude-code' and phase == 'MCP':
@@ -565,9 +581,9 @@ def configure(names, home, command, tools_root, release_root, *, scope='user', p
                 print(f'{client.label}: {phase} registered.')
                 if phase == name_final_phase(name):
                     apply_approval(name, client, codex_plan)
-            except (ValueError, OSError, subprocess.SubprocessError) as exc:
-                failures.append((name, phase, str(exc)))
-                print(f'{client.label}: {phase} failed: {exc}', file=sys.stderr)
+            except Exception as exc:
+                failures.append((name, phase, describe(exc)))
+                print(f'{client.label}: {phase} failed: {describe(exc)}', file=sys.stderr)
     return failures
 
 
@@ -1023,6 +1039,7 @@ def main(argv=None):
                 from .browser import install as install_browser_host
                 install_browser_host(release_root)
             remove_generated_skill(home)
+            failures = []
             if args.export:
                 export_bundle(args.export, command, release_root, chrome=chrome, audio=audio)
             else:
@@ -1030,29 +1047,35 @@ def main(argv=None):
                                      scope=args.scope, project=args.project,
                                      setup_command=setup_command, approval=approval_action,
                                      environ=setup_environment) if names else []
-                if failures:
-                    retry = [*direct_runtime, 'setup', '--prefix', str(args.prefix), '--user', account.pw_name,
-                             '--scope', args.scope, '--session', args.session, '--yes']
-                    if args.project:
-                        retry += ['--project', str(args.project)]
-                    retry += ['--chrome'] if chrome else ['--no-chrome']
-                    retry += ['--audio'] if audio else ['--no-audio']
-                    retry += ['--approval', approval_mode]
-                    if args.allow_missing:
-                        retry += ['--allow-missing']
-                    for name in dict.fromkeys(item[0] for item in failures):
-                        retry += ['--agent', name]
-                    raise ValueError(f'{len(failures)} registration step(s) failed. Completed steps remain installed. '
-                                     + 'After resolving the errors, retry: ' + shlex.join(retry))
-            # Remember opt-ins only after successful registration or export.
+            # Remember opt-ins even when registration failed, so a retry or `--reconcile` keeps them.
             # Harnesses registered now leave the pending set; a later reconcile applies the saved
-            # chrome, audio and approval mode to the rest.
+            # chrome, audio and approval mode to the rest. A pending harness whose registration failed
+            # stays pending.
+            failed = list(dict.fromkeys(item[0] for item in failures))
             pending = [] if args.export else [name for name in dict.fromkeys([*state['pending'], *missing])
-                                              if name not in names]
+                                              if name not in names or name in failed]
             save_setup_state(home, chrome=chrome, audio=audio, approval=approval_mode, pending=pending,
                              pending_context=({'scope': args.scope, 'session': args.session,
                                                'project': str(args.project) if args.project else None}
                                               if missing else state['pending_context']) if pending else None)
+            if failures:
+                retry = [*direct_runtime, 'setup', '--prefix', str(args.prefix), '--user', account.pw_name,
+                         '--scope', args.scope, '--session', args.session, '--yes']
+                if args.project:
+                    retry += ['--project', str(args.project)]
+                retry += ['--chrome'] if chrome else ['--no-chrome']
+                retry += ['--audio'] if audio else ['--no-audio']
+                # A defaulted `ask` must not be passed: it would remove approval entries.
+                if args.approval or approval_mode == 'auto':
+                    retry += ['--approval', approval_mode]
+                if args.allow_missing:
+                    retry += ['--allow-missing']
+                for name in failed:
+                    retry += ['--agent', name]
+                steps = ', '.join(f'{item[0]}: {item[1]}' for item in failures)
+                raise ValueError(f'{len(failures)} registration step(s) failed ({steps}). Choices were saved; '
+                                 'completed steps remain installed. After resolving the errors, retry: '
+                                 + shlex.join(retry))
             if not args.export and (missing or pending):
                 print('Registered now: ' + (', '.join(names) or 'none') + '.')
                 print('Pending (not installed): ' + (', '.join(pending) or 'none')
