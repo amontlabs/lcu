@@ -124,6 +124,14 @@ class UpstreamRuntimeTests(unittest.TestCase):
         self.assertEqual(env['CODEX_CLI_PATH'], str(shim))
         self.assertEqual(env['NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'], 'FIRST,SECOND,LCU_SANDBOX_SHIM')
 
+    def test_the_test_only_fault_hook_reaches_the_kernels_launcher_only_when_set(self):
+        self.install_sandbox_shim()
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertNotIn('FAULT', environment(self.root)['NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'])
+        with patch.dict(os.environ, {'LCU_TEST_SANDBOX_SHIM_FAULT': 'unrecognized-kernel'}, clear=True):
+            allowed = environment(self.root)['NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'].split(',')
+        self.assertEqual(allowed, ['LCU_SANDBOX_SHIM', 'LCU_TEST_SANDBOX_SHIM_FAULT'])
+
     def test_shim_is_told_about_lcus_own_sky_wrapper(self):
         self.install_sandbox_shim()
         self.install_linux_input_wrapper()

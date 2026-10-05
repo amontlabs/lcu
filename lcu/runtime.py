@@ -256,9 +256,11 @@ def _configure_linux_sandbox_shim(root, runtime, env):
     env[sandbox_shim.CONFIG_ENV] = sandbox_shim.configuration(
         runtime, env['CODEX_CLI_PATH'], wrapper if sky == str(wrapper) else None)
     # node_repl starts the kernel with only the variables on this list; the shim needs its
-    # configuration there too, because it must find the real Codex to sandbox the kernel with.
+    # configuration there too, because it must find the real Codex to sandbox the kernel with. The
+    # test-only fault hook travels the same way and can only make the shim refuse.
+    shared = [sandbox_shim.CONFIG_ENV] + ([sandbox_shim.FAULT_ENV] if sandbox_shim.FAULT_ENV in env else [])
     env['NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'] = ','.join(filter(None, (
-        env.get('NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'), sandbox_shim.CONFIG_ENV)))
+        env.get('NODE_REPL_UNTRUSTED_ENV_ALLOWLIST'), *shared)))
     env['CODEX_CLI_PATH'] = str(shim)
 
 
