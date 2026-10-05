@@ -140,7 +140,7 @@ class UpdateTest(unittest.TestCase):
         with mock.patch.object(update.subprocess, 'Popen') as popen:
             found = update.notice(self.root)
             popen.assert_not_called()  # fresh cache
-        command = str(self.root.parent.parent / 'current/bin/lcu')
+        command = str(self.root.parent.parent / ('lcu.cmd' if sys.platform == 'win32' else 'current/bin/lcu'))
         self.assertEqual(set(found), {'current', 'latest', 'severity', 'release_url', 'command', 'message'})
         self.assertEqual((found['current'], found['latest'], found['severity'], found['command']),
                          ('0.9.1', '0.9.2', 'normal', command))
@@ -167,7 +167,10 @@ class UpdateTest(unittest.TestCase):
         args, kwargs = popen.call_args
         self.assertEqual(args[0][1:], [str(self.root / 'bin/lcu'), 'update', '--refresh'])
         self.assertIs(kwargs['stdout'], update.subprocess.DEVNULL)
-        self.assertTrue(kwargs['start_new_session'])
+        if sys.platform == 'win32':
+            self.assertTrue(kwargs['creationflags'] & update.subprocess.DETACHED_PROCESS)
+        else:
+            self.assertTrue(kwargs['start_new_session'])
         self.cache(age=90000)
         update.cache_path().with_name('refresh.stamp').unlink()
         with mock.patch.object(update.subprocess, 'Popen') as popen:

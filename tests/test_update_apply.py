@@ -90,7 +90,7 @@ class Installed(unittest.TestCase):
         with mock.patch.object(update_apply, 'urlopen', fake_urlopen(archive, checksum=checksum)), \
                 mock.patch.object(update_apply.subprocess, 'run',
                                   return_value=mock.Mock(returncode=status)) as run, \
-                mock.patch('os.getuid', return_value=1000), \
+                mock.patch('os.getuid', return_value=1000, create=True), \
                 mock.patch.object(update_apply, 'sys') as fake_sys:
             fake_sys.executable = '/usr/bin/python3'
             fake_sys.stdin.isatty.return_value = False
@@ -166,7 +166,7 @@ class ApplyTests(Installed):
         self.assertEqual(result, 0)
         command = run.call_args_list[0].args[0]
         self.assertEqual(command[:2], ['/usr/bin/python3', '-B'])
-        self.assertTrue(command[2].endswith('scripts/install.py'))
+        self.assertTrue(Path(command[2]).as_posix().endswith('scripts/install.py'))
         self.assertEqual(command[3:], ['--prefix', str(self.prefix), '--runtime-only',
                                        '--existing-app', str(app), '--skip-system'])
 
@@ -178,7 +178,7 @@ class ApplyTests(Installed):
         result, run = self.run_apply(release, archive)
         self.assertEqual(result, 0)
         command = run.call_args_list[0].args[0]
-        self.assertTrue(command[2].endswith('scripts/install_macos.py'))
+        self.assertTrue(Path(command[2]).as_posix().endswith('scripts/install_macos.py'))
         self.assertEqual(command[3:], ['--prefix', str(self.prefix), '--runtime-only', '--existing-app', str(app)])
         # Then the new release refreshes what setup copied out of the old one.
         self.assertEqual(run.call_args_list[1].args[0],
@@ -189,7 +189,7 @@ class ApplyTests(Installed):
         result, run = self.run_apply(release, zip_bytes())
         self.assertEqual(result, 0)
         command = run.call_args_list[0].args[0]
-        self.assertTrue(command[2].endswith('scripts/install_windows.py'))
+        self.assertTrue(Path(command[2]).as_posix().endswith('scripts/install_windows.py'))
         self.assertEqual(command[3:], ['--prefix', str(self.prefix), '--runtime-only'])
         self.assertEqual(run.call_args_list[1].args[0], [str(self.prefix / 'lcu.cmd'), 'update', '--post-install'])
 

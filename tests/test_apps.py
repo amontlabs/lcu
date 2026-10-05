@@ -238,6 +238,7 @@ class AppsTests(unittest.TestCase):
         with self.assertRaisesRegex(apps.AppsError, 'kept changing'):
             apps.modify(self.store, lambda ids: ids + ['x'], attempts=3, sleep=always_changing)
 
+    @unittest.skipIf(sys.platform == 'win32', 'lcu apps is macOS-only; POSIX replace and mode semantics')
     def test_parallel_updates_all_land(self):
         self.write_store({apps.KEY: []})
         errors = []
@@ -254,6 +255,7 @@ class AppsTests(unittest.TestCase):
         self.assertFalse(errors)
         self.assertEqual(sorted(self.ids()), [f'id.{i}' for i in range(5)])
 
+    @unittest.skipIf(sys.platform == 'win32', 'lcu apps is macOS-only; POSIX replace and mode semantics')
     def test_new_store_directory_is_created_and_mode_is_kept(self):
         apps.modify(self.store, lambda ids: ids + ['dev.zed.Zed'])
         self.assertEqual(self.ids(), ['dev.zed.Zed'])
@@ -278,6 +280,7 @@ class AppsTests(unittest.TestCase):
         handler.assert_called_once_with(ROOT, ['allow', 'Zed'])
 
 
+@unittest.skipIf(sys.platform == 'win32', 'the Touch ID helper is macOS-only; the stand-in is a shell script')
 class AuthenticationTests(unittest.TestCase):
     """The real authenticate() driven by a stand-in helper script; no prompt ever appears."""
 
