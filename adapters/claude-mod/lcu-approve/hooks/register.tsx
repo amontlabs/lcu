@@ -43,8 +43,9 @@ const paneId = (approval: Approval) => `lcu-approval-${approval.id}`
 export const register: Register = on => {
   on('classic.Elicitation', async ($, e, next) => {
     if (e.mcp_server_name !== SERVER) return next(e)
-    // Nobody to ask in a headless run: the engine answers for itself.
-    if ((await $.session.surfaces()).length === 0) return next(e)
+    // Nobody to ask in a headless run: the engine answers for itself. The desktop app can report no
+    // surfaces while it still places panes, so an empty list alone does not mean headless.
+    if ((await $.session.surfaces()).length === 0 && !(await placesPanes($))) return next(e)
 
     let approval: Approval
     try {
@@ -446,6 +447,18 @@ async function finish($: any, approval: Approval, choice: Choice): Promise<void>
     if (approval.riskLevel === 'high') await $.store.set(`risk:${approval.app}`, 'high').catch(() => {})
   }
   $.ui.toast(CONFIRMATION[choice](approval.label))
+}
+
+// Whether a pane would be drawn, asked before LCU's request is claimed so a headless run stays the engine's.
+async function placesPanes($: any): Promise<boolean> {
+  const id = 'lcu-approval-probe'
+  try {
+    return (await $.ui.open({ id })).isPlaced === true
+  } catch {
+    return false
+  } finally {
+    await $.ui.close({ id }).catch(() => {})
+  }
 }
 
 // Open the pane; false when it waits undrawn (a narrow terminal) and the person needs another prompt.

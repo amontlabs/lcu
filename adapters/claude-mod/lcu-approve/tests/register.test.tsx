@@ -107,8 +107,17 @@ test('an elicitation LCU does not recognize is left to the engine', async ($, on
   expect(result.block).toBeUndefined()
 })
 
-test('another server, and a headless run, are left to the engine', async ($, on) => {
+test('a session that reports no surfaces but places panes still gets the pane', async ($, on) => {
+  const clock = mock.clock(on)
   const calls = lcu(on, { surfaces: [] })
+  const result: any = await $.classic.Elicitation(ELICITATION as any)
+  await until(clock, () => calls.some(call => call.tool === 'request'))
+  expect(result.block).toBeDefined()
+  expect(calls.map(call => call.tool)).toEqual(['request'])
+})
+
+test('another server, and a headless run, are left to the engine', async ($, on) => {
+  const calls = lcu(on, { surfaces: [], placed: false })
   const headless: any = await $.classic.Elicitation(ELICITATION as any)
   expect(headless.block).toBeUndefined()
   const other: any = await $.classic.Elicitation({ mcp_server_name: 'other', message: 'Hi?' } as any)
