@@ -224,7 +224,7 @@ def linux_sandbox_works(env: dict) -> tuple[bool, str]:
                    'node-repl-sandbox-probe', os.path.join(scratch, 'write-must-fail')]
         try:
             result = subprocess.run(command, env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                                    text=True, encoding='utf-8', errors='replace', timeout=30)
+                                    cwd=scratch, text=True, encoding='utf-8', errors='replace', timeout=30)
         except (OSError, subprocess.SubprocessError) as exc:
             return False, str(exc)[:200]
     if result.returncode == 12:

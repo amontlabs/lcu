@@ -163,6 +163,7 @@ class DoctorTests(unittest.TestCase):
             with patch('lcu.doctor.subprocess.run', return_value=Mock(returncode=returncode, stderr='')) as run:
                 self.assertEqual(doctor.linux_sandbox_works(env)[0], expected)
             command = run.call_args.args[0]
+            self.assertTrue(Path(run.call_args.kwargs['cwd']).name.startswith('lcu-sandbox-probe-'))
             self.assertEqual(command[:2], ['/real/codex', 'sandbox'])
             self.assertEqual(command[command.index('--') + 1], '/bin/sh')
 
