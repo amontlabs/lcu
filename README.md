@@ -20,6 +20,13 @@ Follow https://raw.githubusercontent.com/amontlabs/lcu/main/docs/INSTALLATION.md
 Check my OS, architecture, and prerequisites, then guide me through any required permissions.
 ```
 
+In Claude Code on an Apple Silicon Mac, two commands do the same through its plugin manager; see [Claude Code plugin](docs/INSTALLATION.md#claude-code-plugin):
+
+```sh
+claude plugin marketplace add amontlabs/lcu
+claude plugin install lcu@lcu
+```
+
 ## Features
 
 - **Desktop apps:** read windows, click, type, and take screenshots.

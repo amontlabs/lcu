@@ -177,6 +177,23 @@ For the Claude desktop app, register LCU through Claude Code (`lcu setup --agent
 
 Claude Code's terminal asks the runtime's per-app approval ("Allow Computer Use to use ...?") itself. The Claude app's Code tab and the VS Code extension cannot render that form and decline it, so on macOS and Windows controlling an app fails there with "Computer Use was not approved". `lcu setup --agent claude-code` therefore also installs the `lcu-approve` mod: a plugin folder at `~/.claude/skills/lcu-approve` (user scope) or `<project>/.claude/skills/lcu-approve` (`--scope project`). Claude Code loads it without a hot-reload question and shows the approval as a native pane, or a question dialog on a terminal narrower than 144 columns, with Allow this conversation, Always allow (when the runtime offers it) and Deny. Rerunning setup updates the folder. It needs a Claude Code with mods: 2.1.287 or later, or the 2.1.286 build inside the Claude app. An older terminal `claude` keeps its own form, which works. Details, limits and the safeguards that keep the model from answering are in [Claude native-app approvals](ADAPTERS.md#native-app-approvals-in-claude-code-and-the-claude-app). If your organization restricts plugins or mods, the mod does not load and the host's behavior is unchanged.
 
+### Claude Code plugin
+
+On Apple Silicon macOS, Claude Code's plugin manager can do the installation and registration:
+
+~~~sh
+claude plugin marketplace add amontlabs/lcu
+claude plugin install lcu@lcu
+~~~
+
+The plugin is one `SessionStart` hook, `adapters/claude-plugin/scripts/ensure-lcu.sh`. When a session starts and LCU is not installed, the hook downloads the latest release archive and its `.sha256` file, installs the archive only when its SHA-256 matches, and then runs `lcu setup --agent claude-code --yes`. When LCU is already installed it only runs that setup. It then asks you to restart Claude Code; run `~/.local/share/lcu/current/bin/lcu doctor` from a desktop terminal afterwards, as after any unattended setup. Once an installation is registered, later sessions do nothing.
+
+The plugin has no MCP entry of its own. Claude Code names a plugin's server `plugin:lcu:lcu` and its tools `mcp__plugin_lcu_lcu__js`, while LCU's lifecycle hooks, deny rules, approval entries and `lcu-approve` mod refer to the `lcu` server. Running `lcu setup` keeps one registration: the same MCP command, hooks, rules and mod as the manual path, with saved Chrome, audio and approval choices kept.
+
+The [prerequisites](#prerequisites) are unchanged. The hook checks for the ChatGPT app and Python 3.12+ before it downloads anything and says what is missing; LCU still never installs the app. Set `LCU_PREFIX` for another prefix or `LCU_APP` for an app outside `/Applications`, in the environment Claude Code starts in. As with `lcu setup`, a redirected `CLAUDE_CONFIG_DIR` is not supported. On Linux and Intel Macs the hook says once that it does not apply and changes nothing; use the sections above. The installer and setup output of the last run is kept as `setup.log` in the plugin's data folder (`~/.claude/plugins/data/lcu-lcu/`).
+
+`claude plugin uninstall lcu@lcu` removes only the plugin. LCU and its registration stay until you [uninstall](#uninstall) them, and updates still come from `lcu update`. The [verification record](verification/claude-plugin-2026-10-06.md) lists what was checked and what was not.
+
 ### Harnesses installed later
 
 A harness that is not installed when setup runs is not registered, and one installed afterwards is never picked up. Two options cover this without any new configuration writer: each harness's own CLI (or the already pinned add-mcp for Codex and Claude Code) still writes its registry.
@@ -379,7 +396,7 @@ There is no uninstall command; remove the registrations LCU created, then delete
 1. If you ever used `--approval auto`, run `lcu setup --approval ask` for each harness, scope (and project) and OMP profile you used it with, before unregistering. It removes only what LCU recorded adding: the exact `mcp__lcu__js`/`mcp__lcu__js_reset` rules (or the server-wide `mcp__lcu` rule of 0.8.9 and earlier) in Claude Code's `permissions.allow`, the OMP `js`/`js_reset` `allow` entries in the selected profile's `tools.approval` (set `OMP_PROFILE` or `PI_CODING_AGENT_DIR` as for setup), and it removes Codex's per-tool `approval_mode` entries (restoring or dropping the server-wide `default_tools_approval_mode` of 0.8.9 and earlier). A rule you wrote yourself stays. Any LCU-written entry that remains (for example from 0.8.0) can be removed by hand.
 2. Remove each harness registration you added:
    - **Codex CLI:** remove the `lcu` MCP server (`codex mcp remove lcu`) and delete the LCU hook entries from `~/.codex/config.toml`.
-   - **Claude Code:** delete the approval mod folder (`rm -r ~/.claude/skills/lcu-approve`; project scope: `<project>/.claude/skills/lcu-approve`). Remove the `lcu` MCP server (`claude mcp remove lcu`) and delete the LCU hooks and any `mcp__lcu__*` permissions from `~/.claude/settings.json` (project scope: `.claude/settings.local.json`). The exact `mcp__lcu__js` and `mcp__lcu__js_reset` rules belong to approval mode, so reverse that first (below).
+   - **Claude Code:** if you added the [plugin](#claude-code-plugin), remove it first so it does not register LCU again (`claude plugin uninstall lcu@lcu`, then `claude plugin marketplace remove lcu`). Delete the approval mod folder (`rm -r ~/.claude/skills/lcu-approve`; project scope: `<project>/.claude/skills/lcu-approve`). Remove the `lcu` MCP server (`claude mcp remove lcu`) and delete the LCU hooks and any `mcp__lcu__*` permissions from `~/.claude/settings.json` (project scope: `.claude/settings.local.json`). The exact `mcp__lcu__js` and `mcp__lcu__js_reset` rules belong to approval mode, so reverse that first (below).
    - **Pi:** `pi remove "$HOME/.local/share/lcu/pi/extension.mjs"` (add `-l` in the project for project scope), then delete `~/.local/share/lcu/pi`.
    - **Oh My Pi:** `omp plugin uninstall lcu-computer-use` (the linked package is staged under `~/.local/share/lcu/omp`).
    - **Hermes:** `hermes plugins remove lcu-cua`; if `${HERMES_HOME:-~/.hermes}/plugins/lcu-cua` remains, delete it.
