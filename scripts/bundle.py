@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import platform
 
-VERSION = '0.9.2'
+VERSION = '0.9.3'
 
 
 def architecture(target='linux'):
