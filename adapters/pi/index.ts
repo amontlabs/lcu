@@ -469,8 +469,21 @@ export default function (pi: ExtensionAPI, options: {
   pi.on('before_agent_start', async (event, ctx) => {
     approvalContext = ctx;
     const client = await connected();
+    // Returning systemPrompt makes Pi force that prompt, collapsing its
+    // structured prompt and tool-addition deltas into one head (breaking prompt
+    // caching after tool_search). Pi hands us its mutable systemPromptOptions,
+    // so append LCU's instructions there instead and return nothing.
+    const opts = event.systemPromptOptions;
+    if (opts) {
+      const current = typeof opts.appendSystemPrompt === 'string' ? opts.appendSystemPrompt : '';
+      if (!current.includes(client.instructions)) {
+        opts.appendSystemPrompt = current ? `${current}\n\n${client.instructions}` : client.instructions;
+      }
+      return undefined;
+    }
     // OMP keeps system-prompt sections as an array. Preserve those boundaries
-    // and append LCU's instructions as one additional section. Pi uses a string.
+    // and append LCU's instructions as one additional section. Without Pi's
+    // options, fall back to a string.
     return { systemPrompt: Array.isArray(event.systemPrompt)
       ? [...event.systemPrompt, client.instructions]
       : `${event.systemPrompt}\n\n${client.instructions}` };

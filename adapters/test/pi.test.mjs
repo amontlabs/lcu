@@ -41,8 +41,20 @@ test('Pi keeps one original CUA turn across model rounds and cleans up after age
     model: { id: 'pi-model' }, hasUI: false };
   try {
     piExtension(pi);
-    const prompt = await handlers.get('before_agent_start')({ systemPrompt: 'Pi base prompt' }, ctx);
-    assert.match(prompt.systemPrompt, /Original CUA initialization guide/);
+    const emptyOptions = { appendSystemPrompt: '' };
+    const prompt = await handlers.get('before_agent_start')(
+      { systemPrompt: 'Pi base prompt', systemPromptOptions: emptyOptions }, ctx);
+    assert.equal(prompt, undefined);
+    assert.match(emptyOptions.appendSystemPrompt, /Original CUA initialization guide/);
+    const withText = { appendSystemPrompt: 'Existing append' };
+    const before = handlers.get('before_agent_start');
+    await before({ systemPrompt: 'Pi base prompt', systemPromptOptions: withText }, ctx);
+    assert.match(withText.appendSystemPrompt, /^Existing append\n\nOriginal CUA initialization guide/s);
+    const once = withText.appendSystemPrompt;
+    assert.equal(await before({ systemPrompt: 'Pi base prompt', systemPromptOptions: withText }, ctx), undefined);
+    assert.equal(withText.appendSystemPrompt, once);
+    const legacy = await before({ systemPrompt: 'Pi base prompt' }, ctx);
+    assert.match(legacy.systemPrompt, /^Pi base prompt\n\nOriginal CUA initialization guide/);
     assert.deepEqual([...tools.keys()], ['js', 'js_reset']);
     assert.equal(tools.get('js').description, 'Original JS description.');
     assert.deepEqual(tools.get('js').parameters.required, ['code']);
