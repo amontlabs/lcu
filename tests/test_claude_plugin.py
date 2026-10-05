@@ -60,6 +60,17 @@ if [ -n "${FAKE_SETUP_FAILS:-}" ]; then
   echo 'Claude Code: MCP failed: refused' >&2
   exit 1
 fi
+printf '{"mcpServers": {"lcu": {"type": "stdio"}}}' > "$HOME/.claude.json"
+'''
+# macOS `plutil -extract KEYPATH json -o /dev/null FILE`, for JSON files on any platform.
+PLUTIL = '''#!/usr/bin/env python3
+import json, sys
+try:
+    value = json.load(open(sys.argv[-1]))
+    for key in sys.argv[2].split('.'):
+        value = value[key]
+except Exception:
+    sys.exit(1)
 '''
 
 
@@ -87,6 +98,7 @@ class ClaudePluginHookTests(unittest.TestCase):
         self.lcu = self.prefix / 'current/bin/lcu'
         executable(self.shims / 'curl', CURL)
         executable(self.shims / 'uname', UNAME)
+        executable(self.shims / 'plutil', PLUTIL)
         (self.shims / 'python3').symlink_to(sys.executable)
         executable(self.record / 'lcu', LCU)
         release = root / 'release' / ARCHIVE.removesuffix('.tar.gz')
@@ -148,6 +160,21 @@ class ClaudePluginHookTests(unittest.TestCase):
         self.assertIsNone(self.run_hook())
         self.assertEqual(len(self.recorded('curl.calls')), 3)
         self.assertEqual(len(self.recorded('lcu.calls')), 1)
+
+    def test_a_registration_removed_from_claude_code_is_restored(self):
+        self.run_hook()
+        (self.home / '.claude.json').write_text('{"mcpServers": {}}')
+        self.assertIn('LCU is registered for Claude Code', self.run_hook())
+        self.assertEqual(len(self.recorded('curl.calls')), 3)
+        self.assertEqual(len(self.recorded('lcu.calls')), 2)
+        self.assertIsNone(self.run_hook())
+
+    def test_a_tilde_app_path_is_expanded(self):
+        app = self.home / 'Applications/ChatGPT.app'
+        app.mkdir(parents=True)
+        self.assertIn('was installed and registered', self.run_hook(LCU_APP='~/Applications/ChatGPT.app'))
+        self.assertEqual(self.recorded('install.args'),
+                         [f'--prefix {self.prefix} --existing-app {app} --runtime-only'])
 
     def test_an_existing_installation_is_registered_without_a_download(self):
         shutil.copytree(self.record, self.lcu.parent, ignore=shutil.ignore_patterns('*.calls'))

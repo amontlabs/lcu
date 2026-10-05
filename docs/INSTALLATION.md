@@ -186,7 +186,7 @@ claude plugin marketplace add amontlabs/lcu
 claude plugin install lcu@lcu
 ~~~
 
-The plugin is one `SessionStart` hook, `adapters/claude-plugin/scripts/ensure-lcu.sh`. When a session starts and LCU is not installed, the hook downloads the latest release archive and its `.sha256` file, installs the archive only when its SHA-256 matches, and then runs `lcu setup --agent claude-code --yes`. When LCU is already installed it only runs that setup. It then asks you to restart Claude Code; run `~/.local/share/lcu/current/bin/lcu doctor` from a desktop terminal afterwards, as after any unattended setup. Once an installation is registered, later sessions do nothing.
+The plugin is one `SessionStart` hook, `adapters/claude-plugin/scripts/ensure-lcu.sh`. When a session starts and LCU is not installed, the hook downloads the latest release archive and its `.sha256` file, installs the archive only when its SHA-256 matches, and then runs `lcu setup --agent claude-code --yes`. When LCU is already installed it only runs that setup. It then asks you to restart Claude Code; run `~/.local/share/lcu/current/bin/lcu doctor` from a desktop terminal afterwards, as after any unattended setup. Once an installation is registered, later sessions do nothing unless the `lcu` server is gone from `~/.claude.json`, which they register again.
 
 The plugin has no MCP entry of its own. Claude Code names a plugin's server `plugin:lcu:lcu` and its tools `mcp__plugin_lcu_lcu__js`, while LCU's lifecycle hooks, deny rules, approval entries and `lcu-approve` mod refer to the `lcu` server. Running `lcu setup` keeps one registration: the same MCP command, hooks, rules and mod as the manual path, with saved Chrome, audio and approval choices kept.
 

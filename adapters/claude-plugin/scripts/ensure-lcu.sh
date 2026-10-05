@@ -8,19 +8,32 @@
 # the ones a manual setup writes. A plugin-scoped MCP entry would be named `plugin:lcu:lcu`
 # and its tools `mcp__plugin_lcu_lcu__*`, which none of those match.
 #
-# Once an installation is registered, later sessions leave after one file comparison.
+# Once an installation is registered, later sessions leave after one file comparison and a
+# check that Claude Code's configuration still has the `lcu` server.
 set -eu
 
 REPO=https://github.com/amontlabs/lcu
 GUIDE=$REPO/blob/main/docs/INSTALLATION.md
 
+# A path given as `~` or `~/...` (quoted, so the shell did not expand it), as the installer accepts.
+# shellcheck disable=SC2088 # the literal tilde is what is matched
+expand() {
+  case "$1" in
+    "~") printf '%s' "$HOME" ;;
+    "~/"*) printf '%s/%s' "$HOME" "${1#"~/"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 state=${CLAUDE_PLUGIN_DATA:-$HOME/.local/state/lcu/claude-plugin}
-prefix=${LCU_PREFIX:-$HOME/.local/share/lcu}
-app=${LCU_APP:-/Applications/ChatGPT.app}
+prefix=$(expand "${LCU_PREFIX:-$HOME/.local/share/lcu}")
+app=$(expand "${LCU_APP:-/Applications/ChatGPT.app}")
 lcu=$prefix/current/bin/lcu
 registered=$state/registered
 
-if [ -x "$lcu" ] && [ "$(cat "$registered" 2>/dev/null || true)" = "$lcu" ]; then
+# The marker alone would outlive a registration removed from Claude Code's configuration.
+if [ -x "$lcu" ] && [ "$(cat "$registered" 2>/dev/null || true)" = "$lcu" ] &&
+    plutil -extract mcpServers.lcu json -o /dev/null "$HOME/.claude.json" >/dev/null 2>&1; then
   exit 0
 fi
 
