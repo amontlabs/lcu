@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import sys
 
-from . import tested, update
+from . import diagnostic_log, tested, update
 
 
 def saved_setup():
@@ -44,6 +44,7 @@ def collect(root):
         'setup': saved,
         'pending': saved['pending'] if saved else [],
         'update': update.cached_notice(root),
+        'diagnostic_log': diagnostic_log.status(),
     }
 
 
@@ -77,3 +78,4 @@ def main(root, argv=None):
                   + ', '.join(saved['pending']) + '.')
     if status.get('update'):
         print(update.status_line(root))
+    print(diagnostic_log.summary())

@@ -401,6 +401,7 @@ export default function (pi: ExtensionAPI, options: {
         const candidate = createCuaClient({
           command: commandFromEnvironment(options.command),
           cwd: process.cwd(),
+          adapter: options.ompEssentialTools ? 'omp' : 'pi',
           allowedOrigins: originsFromEnvironment(),
           onElicitation: async (params, { signal }) => {
             const ctx = approvalContext;

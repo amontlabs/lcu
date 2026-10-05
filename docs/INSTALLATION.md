@@ -208,6 +208,10 @@ On macOS, `doctor` safely checks original runtime metadata and names the selecte
 
 On Linux, `doctor` calls the original runtime's `list_windows` and `get_screenshot` methods. It reports only status and counts; LCU discards the returned image data locally. The original API may create its normal temporary capture files. A successful result verifies these two original runtime calls in the current desktop session, then asks you to verify an agent call.
 
+### Diagnostic log
+
+The adapters keep a local, metadata-only diagnostic log of tool calls and approvals, kept 7 days and at most 20 MB, to help explain a call that hangs. `lcu status` and `lcu doctor` print its directory; set `LCU_DIAGNOSTIC_LOG=0` to turn it off. See [Diagnostic log](ADAPTERS.md#diagnostic-log) for what is and is never recorded.
+
 ### Linux sandbox and input notes
 
 **Sandbox: what LCU does by default.** On a machine where bubblewrap works, the original `node_repl` runs the model's JavaScript (its kernel) and the Sky desktop service (its trusted worker) under `codex sandbox`: a read-only filesystem, no network, and a seccomp filter that also refuses `connect(2)` to the X11 Unix socket. Sky could therefore not reach the desktop, and every `js` call failed with `Could not connect to X11 ... Operation not permitted` even though `lcu doctor` passed. macOS is not affected because its native helper is a signed process reached over an allowed pipe. From 0.8.2 to 0.9.2 `lcu` avoided the failure by sending Codex's `disabled` sandbox state, which left the model's JavaScript unsandboxed. From 0.9.3 `lcu` keeps the kernel in the sandbox and runs only the Sky worker outside it, through a small launcher (`bin/lcu-codex-sandbox`) that starts the worker unsandboxed only when it recognises it as the selected runtime's own and refuses to start anything it cannot classify.

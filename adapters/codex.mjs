@@ -15,9 +15,13 @@ import {
   callTimeout,
   callWithDeadline,
   createApprovalGate,
+  createApprovalLogger,
+  createCallTracker,
   isMainModule,
+  nativeAppApprovalOptions,
   relayElicitation,
 } from './client.mjs';
+import { openDiagnosticLog } from './diagnostics.mjs';
 import { declineAgentHostApp } from './host-guard.mjs';
 
 const HOST_ONLY_TOOLS = new Set(['js_add_node_module_dir', 'turn_ended']);
@@ -27,7 +31,7 @@ function report(label, error) {
 }
 
 /** Relay the original Codex CUA MCP server and replace only returned audio blocks. */
-export async function runCodexBridge({ command, args = [], cwd, env } = {}) {
+export async function runCodexBridge({ command, args = [], cwd, env, log = openDiagnosticLog({ adapter: 'codex' }) } = {}) {
   if (typeof command !== 'string' || !command || !Array.isArray(args) ||
       args.some(argument => typeof argument !== 'string')) {
     throw new TypeError('Codex bridge requires the original MCP command and string arguments');
@@ -48,21 +52,36 @@ export async function runCodexBridge({ command, args = [], cwd, env } = {}) {
   let shutdown;
   let nextProgressToken = 0;
   const approvals = createApprovalGate();
+  const calls = createCallTracker(log);
+  const approvalLog = createApprovalLogger(log, calls);
   const progressHandlers = new Map();
 
   upstream.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
     const refused = declineAgentHostApp(request.params);
-    if (refused) return refused;
-    try {
-      return await relayElicitation(server, approvals, request.params, extra.signal);
-    } catch {
-      return { action: 'cancel' };
+    const entry = approvalLog.open(refused ? 'agent_host_refused'
+      : nativeAppApprovalOptions(request.params) ? 'native_app' : 'other', request.params);
+    let response = refused;
+    if (!response) {
+      try {
+        response = await relayElicitation(server, approvals, request.params, extra.signal);
+      } catch {
+        response = { action: 'cancel' };
+      }
     }
+    entry.end(response);
+    return response;
   });
 
   try {
-    await upstream.connect(upstreamTransport);
+    const connectStarted = Date.now();
+    try {
+      await upstream.connect(upstreamTransport);
+    } catch (error) {
+      log.event('upstream_connect', { ms: Date.now() - connectStarted, ok: false });
+      throw error;
+    }
     connected = true;
+    log.event('upstream_connect', { ms: Date.now() - connectStarted, ok: true });
     // SDK 1.x removes a request's progress callback as soon as its response is
     // parsed, while notification handlers run in a later microtask. A progress
     // frame adjacent to its result can therefore be rejected as an unknown
@@ -115,11 +134,13 @@ export async function runCodexBridge({ command, args = [], cwd, env } = {}) {
         });
       }
       try {
-        const result = await callWithDeadline(approvals, callTimeout(params.name, params.arguments),
+        const callUpstream = () => callWithDeadline(approvals, callTimeout(params.name, params.arguments),
           extra.signal, signal => upstream.callTool(upstreamParams, undefined, {
             signal,
             timeout: APPROVAL_TIMEOUT_MS,
           }));
+        const result = HOST_ONLY_TOOLS.has(params.name) ? await callUpstream()
+          : await calls.track(params.name, { timeout_ms: params.arguments?.timeout_ms, signal: extra.signal }, callUpstream);
         return persistAudioContent(result);
       } finally {
         if (upstreamProgressToken !== undefined) progressHandlers.delete(upstreamProgressToken);
@@ -145,6 +166,7 @@ export async function runCodexBridge({ command, args = [], cwd, env } = {}) {
           } catch (error) {
             report('Codex MCP upstream close failed', error);
           }
+          log.event('upstream_close');
         }
       })();
       return shutdown;

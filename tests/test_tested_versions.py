@@ -183,6 +183,25 @@ class TestedVersionTests(unittest.TestCase):
             doctor.main(self.root, ['--non-interactive'], resolved=resolved, env={})
         self.assertIn('differs from the one recorded', out.getvalue())
 
+    def test_status_and_doctor_name_the_diagnostic_log_and_its_policy(self):
+        self.make_release()
+        self.record(entry())
+        log_dir = str(self.root / 'diagnostics')
+        with patch.dict('os.environ', {'LCU_LOG_DIR': log_dir}):
+            self.assertEqual(json.loads(self.run_status('--json'))['diagnostic_log'], {
+                'dir': log_dir, 'enabled': True, 'retention_days': 7, 'max_total_mb': 20, 'max_file_mb': 2})
+            self.assertIn(f'Diagnostic log: {log_dir}', self.run_status())
+            out = io.StringIO()
+            resolved = (self.root / 'app', self.root / 'app/resources', self.root / 'app/resources/cua_node',
+                        {'version': PAIR['app_version'], 'runtime': PAIR['runtime']})
+            with contextlib.redirect_stdout(out):
+                doctor.main(self.root, ['--non-interactive'], resolved=resolved, env={})
+        self.assertIn(f'Diagnostic log: {log_dir} (metadata only; kept 7 days, at most 20 MB in total '
+                      'and 2 MB per file', out.getvalue())
+        with patch.dict('os.environ', {'LCU_DIAGNOSTIC_LOG': '0'}):
+            self.assertFalse(json.loads(self.run_status('--json'))['diagnostic_log']['enabled'])
+            self.assertIn('Diagnostic log: off', self.run_status())
+
     @unittest.skipIf(sys.platform == 'win32', 'Drives the Linux setup path with a POSIX account')
     def test_setup_reports_an_untested_pair_and_still_registers(self):
         prefix = self.root / 'prefix'

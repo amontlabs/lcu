@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,7 @@ function installedCurrentEntryPoint(directory) {
   copyFileSync(relay, join(releaseAdapters, 'claude.mjs'));
   copyFileSync(clientModule, join(releaseAdapters, 'client.mjs'));
   copyFileSync(fileURLToPath(new URL('../host-guard.mjs', import.meta.url)), join(releaseAdapters, 'host-guard.mjs'));
+  copyFileSync(fileURLToPath(new URL('../diagnostics.mjs', import.meta.url)), join(releaseAdapters, 'diagnostics.mjs'));
   symlinkSync(join(dirname(relay), 'node_modules'), join(releaseAdapters, 'node_modules'), 'dir');
   symlinkSync(join(directory, 'releases', '0.3.0-test'), join(directory, 'current'), 'dir');
   return join(directory, 'current', 'adapters', 'claude.mjs');
@@ -49,6 +50,7 @@ async function connectRelay({ throughCurrentSymlink = false } = {}) {
     HOME: directory,
     TMPDIR: directory,
     LCU_FIXTURE_LOG: logPath,
+    LCU_LOG_DIR: join(directory, 'diagnostics'),
   };
   const scriptPath = throughCurrentSymlink ? installedCurrentEntryPoint(directory) : relay;
   const transport = new StdioClientTransport({
@@ -78,6 +80,12 @@ async function connectRelay({ throughCurrentSymlink = false } = {}) {
   }
 
   const logs = () => readRecords(logPath);
+  const diagnosticText = () => {
+    const directory = join(env.LCU_LOG_DIR);
+    return existsSync(directory)
+      ? readdirSync(directory).map(name => readFileSync(join(directory, name), 'utf8')).join('') : '';
+  };
+  const diagnostics = () => diagnosticText().split('\n').filter(Boolean).map(line => JSON.parse(line));
   async function close() {
     await client.close().catch(() => {});
     const started = logs().find(entry => entry.type === 'fixture-start');
@@ -92,6 +100,8 @@ async function connectRelay({ throughCurrentSymlink = false } = {}) {
   return {
     client,
     logs,
+    diagnostics,
+    diagnosticText,
     elicitationRequests,
     respondToNextElicitation(response) { elicitationResponses.push(response); },
     close,
@@ -787,6 +797,77 @@ test('Claude relay lists the host-only approval tools for the mod and answers no
       const refused = await approvalCall(bridge.client, name, args, { 'claudecode/toolUseId': 'toolu_01model' });
       assert.equal(refused.isError, true, name);
     }
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay logs each call and approval as metadata only', async () => {
+  const bridge = await connectRelay();
+  try {
+    const codeMarker = 'diag-code-marker-7731';
+    const ok = await callWithContext(bridge.client, 'js', { code: codeMarker, timeout_ms: 1234 }, { toolUseId: 'diag-ok' });
+    assert.equal(ok.content[0].text, codeMarker);
+    const failed = await callWithContext(bridge.client, 'js', { code: 'tool-error' }, { toolUseId: 'diag-error' });
+    assert.equal(failed.isError, true);
+
+    bridge.respondToNextElicitation(async () => {
+      const request = await approvalCall(bridge.client, 'approval_request', { message: NATIVE_MESSAGE });
+      const described = JSON.parse(request.content[0].text);
+      await approvalCall(bridge.client, 'approval_choice', { id: described.id, choice: 'always' });
+      return { action: 'decline' };
+    });
+    await callWithContext(bridge.client, 'js', { code: 'approval-native' }, { toolUseId: 'diag-approval' });
+
+    const controller = new AbortController();
+    const aborted = callWithContext(bridge.client, 'js', { code: 'cancel-active' }, {
+      toolUseId: 'diag-abort', signal: controller.signal,
+    }).then(() => undefined, error => error);
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'active-call-start'));
+    controller.abort();
+    await aborted;
+    await bridge.client.callTool({ name: 'turn_ended', arguments: {
+      hook_event_name: 'Stop', session_id: 'session-test', turn_id: 'prompt-test',
+    } });
+    await waitFor(() => bridge.diagnostics().some(entry => entry.event === 'turn_end' && entry.hook_event === 'Stop'));
+
+    const events = bridge.diagnostics();
+    const ends = events.filter(entry => entry.event === 'call_end');
+    assert.deepEqual(ends.map(entry => [entry.call, entry.tool, entry.outcome]), [
+      [1, 'js', 'ok'], [2, 'js', 'tool_error'], [3, 'js', 'ok'], [4, 'js', 'aborted'],
+    ]);
+    assert.deepEqual(events.find(entry => entry.event === 'call_start'),
+      { ...events.find(entry => entry.event === 'call_start'), call: 1, tool: 'js', timeout_ms: 1234 });
+    assert.equal(events[0].event, 'log_open');
+    assert.ok(events.some(entry => entry.event === 'upstream_connect' && entry.ok === true));
+
+    const open = events.find(entry => entry.event === 'approval_open');
+    assert.deepEqual([open.approval, open.call, open.kind, open.app, open.scopes],
+      [1, 3, 'native_app', 'dev.lcu.NativeFixture.generated', ['session', 'always']]);
+    assert.ok(events.some(entry => entry.event === 'approval_claimed' && entry.approval === 1));
+    assert.ok(events.some(entry => entry.event === 'approval_choice' && entry.approval === 1 && entry.choice === 'always'));
+    const end = events.find(entry => entry.event === 'approval_end');
+    assert.deepEqual([end.approval, end.action, end.persist], [1, 'accept', 'always']);
+    assert.equal(typeof end.ms, 'number');
+    assert.ok(events.some(entry => entry.event === 'turn_end' && entry.outcome === 'ok'));
+
+    const text = bridge.diagnosticText();
+    for (const secret of [codeMarker, 'Original tool-level failure', 'LCU Fixture App', NATIVE_MESSAGE,
+      'diag-ok', 'session-test', 'prompt-test']) {
+      assert.equal(text.includes(secret), false, secret);
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay logs a refused agent host approval without its message', async () => {
+  const bridge = await connectRelay();
+  try {
+    await callWithContext(bridge.client, 'js', { code: 'approval-native-host' }, { toolUseId: 'diag-host' });
+    const events = bridge.diagnostics();
+    assert.equal(events.find(entry => entry.event === 'approval_open').kind, 'agent_host_refused');
+    assert.equal(events.find(entry => entry.event === 'approval_end').action, 'decline');
   } finally {
     await bridge.close();
   }

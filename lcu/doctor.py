@@ -335,6 +335,8 @@ def main(root: Path, argv=None, *, resolved=None, env=None) -> int:
     update_line = status_line(root)
     if update_line:
         print(update_line)
+    from .diagnostic_log import summary as diagnostic_log_summary
+    print(diagnostic_log_summary())
     if target == 'linux':
         print_linux_sandbox_status(env)
     if target == 'linux' and (not env.get('DISPLAY') or not env.get('DBUS_SESSION_BUS_ADDRESS')):

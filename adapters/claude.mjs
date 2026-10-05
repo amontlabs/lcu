@@ -13,12 +13,15 @@ import {
   callWithDeadline,
   createApprovalBroker,
   createApprovalGate,
+  createApprovalLogger,
+  createCallTracker,
   isMainModule,
   nativeAppApprovalOptions,
   nativeAppApprovalResponse,
   relayElicitation,
   TURN_END_TIMEOUT_MS,
 } from './client.mjs';
+import { openDiagnosticLog } from './diagnostics.mjs';
 import { declineAgentHostApp } from './host-guard.mjs';
 
 const PUBLIC_TOOLS = new Set(['js', 'js_reset']);
@@ -110,7 +113,7 @@ function nativeForm(params, approval) {
  * The relay leaves public tool descriptors, instructions, and result blocks
  * with the original server and changes only the host-specific identity seams.
  */
-export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
+export async function runClaudeBridge({ command, args = [], cwd, env, log = openDiagnosticLog({ adapter: 'claude' }) } = {}) {
   if (!nonEmptyString(command) || !Array.isArray(args) ||
       args.some(argument => typeof argument !== 'string')) {
     throw new TypeError('Claude bridge requires the original MCP command and string arguments');
@@ -133,6 +136,9 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
   let server;
   const approvals = createApprovalGate();
   const broker = createApprovalBroker();
+  const calls = createCallTracker(log);
+  const approvalLog = createApprovalLogger(log, calls);
+  const loggedApprovals = new Map();
   let liveCalls = 0;
   let connected = false;
   let shutdown;
@@ -156,6 +162,8 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
     const generation = activeTurns.get(key);
     let rebound = false;
     let cleanup = cleanupInFlight.get(key);
+    const started = Date.now();
+    let outcome = 'error';
     if (!cleanup) {
       cleanup = upstream.callTool({ name: TURN_END_TOOL, arguments: {
         hook_event_name: event,
@@ -176,8 +184,10 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
         if (cleanedTurns.size > 256) cleanedTurns.delete(cleanedTurns.values().next().value);
         activeTurns.delete(key);
       }
+      outcome = 'ok';
       return result;
     } finally {
+      log.event('turn_end', { hook_event: event, ms: Date.now() - started, outcome });
       if (cleanupInFlight.get(key) === cleanup) cleanupInFlight.delete(key);
       // A re-bound turn keeps its new identities for the later Stop cleanup.
       if (!rebound) clearTurnContexts(sessionId, turnId);
@@ -185,8 +195,15 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
   }
 
   try {
-    await upstream.connect(upstreamTransport);
+    const connectStarted = Date.now();
+    try {
+      await upstream.connect(upstreamTransport);
+    } catch (error) {
+      log.event('upstream_connect', { ms: Date.now() - connectStarted, ok: false });
+      throw error;
+    }
     connected = true;
+    log.event('upstream_connect', { ms: Date.now() - connectStarted, ok: true });
     const listed = await upstream.listTools();
     const upstreamTools = listed.tools;
     const publicTools = upstreamTools.filter(tool => PUBLIC_TOOLS.has(tool.name));
@@ -263,6 +280,8 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
         const outcome = name === APPROVAL_REQUEST_TOOL ? broker.describe(toolArgs.message, modCall)
           : broker.choose(toolArgs.id, toolArgs.choice, modCall);
         if (!outcome.ok) return { isError: true, content: [{ type: 'text', text: outcome.error }] };
+        if (name === APPROVAL_REQUEST_TOOL) loggedApprovals.get(outcome.approval.id)?.claimed();
+        else loggedApprovals.get(toolArgs.id)?.choice(toolArgs.choice);
         const body = outcome.approval ?? { ok: true };
         return { content: [{ type: 'text', text: JSON.stringify(body) }] };
       }
@@ -298,11 +317,12 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
       metadata[TURN_CONTEXT_META] = turnMetadata;
       liveCalls++;
       try {
-        return await callWithDeadline(approvals, callTimeout(name, toolArgs), extra.signal,
-          signal => upstream.callTool({ name, arguments: toolArgs, _meta: metadata }, undefined, {
-            signal,
-            timeout: APPROVAL_TIMEOUT_MS,
-          }));
+        return await calls.track(name, { timeout_ms: toolArgs.timeout_ms, signal: extra.signal }, () =>
+          callWithDeadline(approvals, callTimeout(name, toolArgs), extra.signal,
+            signal => upstream.callTool({ name, arguments: toolArgs, _meta: metadata }, undefined, {
+              signal,
+              timeout: APPROVAL_TIMEOUT_MS,
+            })));
       } finally {
         liveCalls--;
         // Never let cleanup mask the original tool result or abort error.
@@ -322,9 +342,17 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
     upstream.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
       const params = request.params;
       const refused = declineAgentHostApp(params);
-      if (refused) return refused;
+      const entry = approvalLog.open(refused ? 'agent_host_refused'
+        : nativeAppApprovalOptions(params) ? 'native_app' : 'other', params);
+      const response = refused ?? await answerElicitation(params, extra, entry);
+      entry.end(response);
+      return response;
+    });
+
+    async function answerElicitation(params, extra, entry) {
       const approval = nativeAppApprovalOptions(params);
       const pendingId = approval ? broker.open(params) : undefined;
+      if (pendingId) loggedApprovals.set(pendingId, entry);
       try {
         const response = await relayElicitation(
           server, approvals, approval ? nativeForm(params, approval) : params, extra.signal);
@@ -344,9 +372,12 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
       } catch {
         return { action: 'cancel' };
       } finally {
-        if (pendingId) broker.settle(pendingId);
+        if (pendingId) {
+          broker.settle(pendingId);
+          loggedApprovals.delete(pendingId);
+        }
       }
-    });
+    }
 
     const closeUpstreamAfterTurnCleanup = () => {
       if (shutdown) return shutdown;
@@ -365,6 +396,7 @@ export async function runClaudeBridge({ command, args = [], cwd, env } = {}) {
           } catch (error) {
             console.error('Claude MCP upstream close failed:', asError(error));
           }
+          log.event('upstream_close');
         }
       })();
       return shutdown;
