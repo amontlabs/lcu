@@ -8,13 +8,27 @@ import sys
 import tempfile
 import types
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "adapters" / "hermes"
+
 SOURCE_ADAPTERS = ROOT / "adapters"
 INSTALLED_ADAPTERS = Path("/opt/lcu/current/adapters")
+
+
+# The bridges these tests start would otherwise write to the developer's real diagnostic log.
+_log_env = unittest.mock.patch.dict(os.environ, {"LCU_DIAGNOSTIC_LOG": "0"})
+
+
+def setUpModule():
+    _log_env.start()
+
+
+def tearDownModule():
+    _log_env.stop()
 
 
 class FakeContext:
