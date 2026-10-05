@@ -129,6 +129,18 @@ class PiAgentEndWaitTests(unittest.TestCase):
             try:
                 pi_stop.wait_agent_ends(observer, 1, 5, child, drain)
                 child.wait(timeout=5)
+                # Bytes the child wrote just before exiting can still be in the pty buffer.
+                while True:
+                    ready, _, _ = select.select([master], [], [], 0.1)
+                    if not ready:
+                        break
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    captured.extend(chunk)
                 self.assertGreaterEqual(len(captured), 1_048_576)
                 self.assertEqual(observer.read_text(encoding='utf-8').splitlines(), ['{}'])
             finally:
