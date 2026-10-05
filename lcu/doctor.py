@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import plistlib
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
 MAC_ACCESSIBILITY_SETTINGS = (
@@ -207,6 +209,56 @@ def _print_mac_status(probe: dict) -> bool:
     return bool(provider.get('ok'))
 
 
+def linux_sandbox_works(env: dict) -> tuple[bool, str]:
+    """Run the check the original node_repl makes: can `codex sandbox` start a confined command here?"""
+    from .sandbox_shim import unshimmed_env
+    env = unshimmed_env(env)
+    codex = env.get('CODEX_CLI_PATH')
+    if not codex:
+        return False, 'no Codex executable'
+    with tempfile.TemporaryDirectory(prefix='lcu-sandbox-probe-') as scratch:
+        command = [codex, 'sandbox', '-c', 'shell_environment_policy.inherit="all"',
+                   '-c', 'default_permissions="node_repl"',
+                   '-c', 'permissions.node_repl={filesystem = {":root" = "read"}, network = {enabled = false}}',
+                   '--', '/bin/sh', '-c', 'test -r /etc/os-release || exit 10; touch "$1" && exit 11; exit 12',
+                   'node-repl-sandbox-probe', os.path.join(scratch, 'write-must-fail')]
+        try:
+            result = subprocess.run(command, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                    text=True, encoding='utf-8', errors='replace', timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, str(exc)[:200]
+    if result.returncode == 12:
+        return True, ''
+    detail = ' '.join(result.stderr.split())[:200]
+    return False, f'exit {result.returncode}' + (f': {detail}' if detail else '')
+
+
+def print_linux_sandbox_status(env: dict, *, works=None) -> None:
+    works = works or linux_sandbox_works
+    mode = env.get('LCU_NODE_REPL_SANDBOX', '').strip().lower()
+    if mode == 'host':
+        print('JavaScript sandbox: LCU_NODE_REPL_SANDBOX=host leaves the original runtime behavior. Where '
+              'bubblewrap works it also confines the Sky desktop service, which then cannot reach X11.')
+        return
+    if mode == 'off':
+        print("JavaScript sandbox: OFF (LCU_NODE_REPL_SANDBOX=off). The kernel that runs the model's "
+              'JavaScript is not sandboxed, unless the agent host asks for one.')
+        return
+    working, detail = works(env)
+    if not working:
+        print('JavaScript sandbox: NOT AVAILABLE here (bubblewrap cannot start a sandbox'
+              + (f'; {detail}' if detail else '') + "). The kernel that runs the model's JavaScript is "
+              "not sandboxed on this machine; it has your account's access to files, network and "
+              'processes. Containers and hosts that restrict user namespaces behave this way.')
+    elif 'LCU_SANDBOX_SHIM' not in env:
+        print("JavaScript sandbox: available, but LCU's launcher shim is missing from this release, so "
+              'the original runtime confines the Sky desktop service too and desktop control will fail.')
+    else:
+        print("JavaScript sandbox: active. The kernel that runs the model's JavaScript is confined "
+              '(read-only filesystem, no network, no subprocesses); only the trusted Sky desktop service '
+              'runs outside it. An agent host that sends a disabled sandbox state gets none.')
+
+
 def _print_linux_status(probe: dict) -> bool:
     windows = probe.get('windows') or {}
     screenshot = probe.get('screenshot') or {}
@@ -283,6 +335,8 @@ def main(root: Path, argv=None, *, resolved=None, env=None) -> int:
     update_line = status_line(root)
     if update_line:
         print(update_line)
+    if target == 'linux':
+        print_linux_sandbox_status(env)
     if target == 'linux' and (not env.get('DISPLAY') or not env.get('DBUS_SESSION_BUS_ADDRESS')):
         message = ('A live X11 DISPLAY and DBUS_SESSION_BUS_ADDRESS are required. '
                    'Use lcu-session or run inside the desktop session.')
