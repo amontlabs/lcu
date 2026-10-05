@@ -255,7 +255,7 @@ def print_linux_sandbox_status(env: dict, *, works=None) -> None:
               'the original runtime confines the Sky desktop service too and desktop control will fail.')
     else:
         print("JavaScript sandbox: active. The kernel that runs the model's JavaScript is confined "
-              '(read-only filesystem, no network, no subprocesses); only the trusted Sky desktop service '
+              '(read-only filesystem, no network; subprocesses it starts are confined too); only the trusted Sky desktop service '
               'runs outside it. An agent host that sends a disabled sandbox state gets none.')
 
 
