@@ -22,7 +22,7 @@
     "typebox": { "optional": true }
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test --import ./test/no-diagnostic-log.mjs test/*.test.mjs"
   },
   "pi": {
     "extensions": ["./pi/index.ts"]

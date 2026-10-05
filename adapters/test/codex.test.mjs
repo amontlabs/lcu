@@ -161,6 +161,7 @@ test('Codex relay starts through the installed current symlink', { timeout: 10_0
   copyFileSync(fileURLToPath(new URL('../audio-files.mjs', import.meta.url)), join(adapters, 'audio-files.mjs'));
   copyFileSync(fileURLToPath(new URL('../client.mjs', import.meta.url)), join(adapters, 'client.mjs'));
   copyFileSync(fileURLToPath(new URL('../host-guard.mjs', import.meta.url)), join(adapters, 'host-guard.mjs'));
+  copyFileSync(fileURLToPath(new URL('../diagnostics.mjs', import.meta.url)), join(adapters, 'diagnostics.mjs'));
   symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), join(adapters, 'node_modules'),
     process.platform === 'win32' ? 'junction' : 'dir');
   symlinkSync(release, join(install, 'current'), process.platform === 'win32' ? 'junction' : 'dir');

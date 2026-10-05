@@ -18,6 +18,7 @@ function installedCurrentEntryPoint(directory) {
   copyFileSync(relay, join(releaseAdapters, 'claude.mjs'));
   copyFileSync(clientModule, join(releaseAdapters, 'client.mjs'));
   copyFileSync(fileURLToPath(new URL('../host-guard.mjs', import.meta.url)), join(releaseAdapters, 'host-guard.mjs'));
+  copyFileSync(fileURLToPath(new URL('../diagnostics.mjs', import.meta.url)), join(releaseAdapters, 'diagnostics.mjs'));
   symlinkSync(join(dirname(relay), 'node_modules'), join(releaseAdapters, 'node_modules'), 'dir');
   symlinkSync(join(directory, 'releases', '0.3.0-test'), join(directory, 'current'), 'dir');
   return join(directory, 'current', 'adapters', 'claude.mjs');

@@ -23,7 +23,7 @@ async function handle(request) {
             request.command.some(part => typeof part !== 'string' || !part)) {
           throw new Error('Hermes LCU config must contain the original LCU MCP command argv');
         }
-        cua = createCuaClient({ command: request.command, onElicitation: requestElicitation });
+        cua = createCuaClient({ command: request.command, adapter: 'hermes', onElicitation: requestElicitation });
         try {
           await cua.connect();
         } catch (error) {
