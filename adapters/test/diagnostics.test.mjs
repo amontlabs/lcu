@@ -28,9 +28,10 @@ test('the constants are the documented retention policy', () => {
 });
 
 test('the log directory follows the platform, XDG_STATE_HOME and LCU_LOG_DIR', () => {
-  assert.equal(diagnosticLogDirectory({ env: {}, platform: 'darwin', home: '/h' }), '/h/Library/Logs/LCU');
-  assert.equal(diagnosticLogDirectory({ env: {}, platform: 'linux', home: '/h' }), '/h/.local/state/lcu/logs');
-  assert.equal(diagnosticLogDirectory({ env: { XDG_STATE_HOME: '/s' }, platform: 'linux', home: '/h' }), '/s/lcu/logs');
+  // Paths are joined with the running host's separator, so expect the same join.
+  assert.equal(diagnosticLogDirectory({ env: {}, platform: 'darwin', home: '/h' }), join('/h', 'Library', 'Logs', 'LCU'));
+  assert.equal(diagnosticLogDirectory({ env: {}, platform: 'linux', home: '/h' }), join('/h', '.local', 'state', 'lcu', 'logs'));
+  assert.equal(diagnosticLogDirectory({ env: { XDG_STATE_HOME: '/s' }, platform: 'linux', home: '/h' }), join('/s', 'lcu', 'logs'));
   assert.equal(diagnosticLogDirectory({ env: { LCU_LOG_DIR: '/o', XDG_STATE_HOME: '/s' }, platform: 'darwin', home: '/h' }), '/o');
 });
 
