@@ -212,9 +212,9 @@ The [contract audit](verification/harness-contract-audit-2026-09-25.md) records 
 
 ## Diagnostic log
 
-The Claude Code relay and the shared client (Pi, Oh My Pi, Hermes) keep a local diagnostic log so a call that hangs can be explained afterwards: per call it shows when the call started, whether an approval was opened for it and for which app, whether the `lcu-approve` mod claimed that approval, what choice came back, and how the call ended. The log is written by `adapters/diagnostics.mjs`. It never throws and never changes a call's result: any filesystem error turns the log off for that process.
+The Claude Code and Codex relays and the shared client (Pi, Oh My Pi, Hermes) keep a local diagnostic log so a call that hangs can be explained afterwards: per call it shows when the call started, whether an approval was opened for it and for which app, whether the `lcu-approve` mod claimed that approval, what choice came back, and how the call ended. The log is written by `adapters/diagnostics.mjs`. It never throws and never changes a call's result: any filesystem error turns the log off for that process.
 
-**Location.** One file per adapter process, `<adapter>-<UTC YYYYMMDDTHHMMSSZ>-<pid>.jsonl` (adapter `claude`, `pi`, `omp`, `hermes` or `client`), one JSON object per line (`{"t":"<ISO UTC ms>","event":"...",...}`):
+**Location.** One file per adapter process, `<adapter>-<UTC YYYYMMDDTHHMMSSZ>-<pid>.jsonl` (adapter `claude`, `codex`, `pi`, `omp`, `hermes` or `client`), one JSON object per line (`{"t":"<ISO UTC ms>","event":"...",...}`):
 
 | Platform | Directory |
 | --- | --- |
