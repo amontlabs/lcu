@@ -17,7 +17,7 @@ from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.browser import _manifest_paths, _posix_wrapper, _write_private, install, status
+from lcu.browser import _RELAY_MINIMUM, _manifest_paths, _posix_wrapper, _write_private, install, status
 
 
 class BrowserSetupTests(unittest.TestCase):
@@ -497,6 +497,20 @@ class BrowserStatusTests(unittest.TestCase):
                 self.assertFalse(self.run_status())
                 self.assertIn('missing or outdated', self.output.getvalue())
 
+    def test_wrapper_with_a_damaged_body_requires_refresh(self):
+        good = self.relay.read_text()
+        for damaged in (good.replace('if [ ! -x "$python" ]', 'if false'),
+                        good.replace('exit 127', 'exit 0'),
+                        good.replace('python=', 'python=/nonexistent ; python=', 1),
+                        good + '# extra\n'):
+            with self.subTest(damaged=damaged[:0] or damaged.count('\n')):
+                self.assertNotEqual(damaged, good)
+                self.relay.write_text(damaged)
+                self.output.seek(0)
+                self.output.truncate()
+                self.assertFalse(self.run_status())
+                self.assertIn('missing or outdated', self.output.getvalue())
+
     def test_missing_wrapper_requires_refresh(self):
         self.relay.unlink()
         self.assertFalse(self.run_status())
@@ -543,12 +557,12 @@ class PosixRelayLauncherTests(unittest.TestCase):
         arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'x64', 'amd64': 'x64'}[platform.machine().lower()]
         host = self.directory / 'chrome/extension-host' / system / arch / name
         host.parent.mkdir(parents=True)
-        host.write_text('#!/bin/sh\nexec cat\n')  # Echoes the relayed frames back.
+        host.write_text('#!/bin/sh\nexec /bin/cat\n')  # Echoes the relayed frames back.
         host.chmod(0o700)
         self.relay = self.directory / 'lcu-native-host'
 
-    def install_wrapper(self, python):
-        _write_private(self.directory, self.relay, _posix_wrapper(str(python), self.script).encode())
+    def install_wrapper(self, python, **options):
+        _write_private(self.directory, self.relay, _posix_wrapper(str(python), self.script, **options).encode())
         self.assertEqual(self.relay.stat().st_mode & 0o777, 0o700)
 
     def launch(self, path):
@@ -586,6 +600,34 @@ class PosixRelayLauncherTests(unittest.TestCase):
         self.assert_round_trip(result)
         self.assertEqual(self.used(), [str(bin_dir / 'python3.14')])
 
+    def test_system_python_is_a_last_resort_only_when_the_relay_can_run_on_it(self):
+        empty = self.directory / 'empty'
+        empty.mkdir()
+        for version_ok in (True, False):
+            with self.subTest(version_ok=version_ok):
+                self.record.unlink(missing_ok=True)
+                system = self.directory / f'system-python-{version_ok}'
+                # The probe mirrors the relay's real minimum, not LCU's 3.12 requirement.
+                system.write_text(
+                    '#!/bin/sh\n'
+                    f'if [ "$1" = -c ]; then {shlex.quote(sys.executable)} "$@"; exit $?; fi\n'
+                    f'echo "$0" >> {shlex.quote(str(self.record))}\n'
+                    f'exec {shlex.quote(sys.executable)} "$@"\n')
+                system.chmod(0o700)
+                minimum = _RELAY_MINIMUM if version_ok else (99, 0)
+                with mock.patch('lcu.browser._RELAY_MINIMUM', minimum):
+                    self.install_wrapper(self.directory / 'removed/python', extra_dirs=[str(empty)],
+                                         system_python=str(system))
+                result, _ = self.launch(str(empty))
+                if version_ok:
+                    self.assert_round_trip(result)
+                    self.assertEqual(self.used(), [str(system)])
+                else:
+                    self.assertEqual(result.returncode, 127)
+                    self.assertEqual(result.stdout, b'')
+                    self.assertIn(b'no suitable Python', result.stderr)
+                    self.assertEqual(self.used(), [])
+
     def test_wrapper_quotes_unusual_paths(self):
         python = self.directory / "it's $HOME `x` python"
         _fake_python(python, self.record)
@@ -598,7 +640,7 @@ class PosixRelayLauncherTests(unittest.TestCase):
 class RelaySourceCompatibilityTests(unittest.TestCase):
     def test_relay_source_stays_parseable_by_python_3_8(self):
         source = (Path(__file__).resolve().parents[1] / 'lcu/native_host.py').read_text()
-        ast.parse(source, feature_version=(3, 8))
+        ast.parse(source, feature_version=_RELAY_MINIMUM)
 
 
 if __name__ == '__main__':

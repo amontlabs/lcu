@@ -24,6 +24,8 @@ _MACOS_NATIVE_HOST_DIRS = (
 
 
 _PLUGIN_DIGEST = '.lcu-browser-plugin'
+# The relay imports only the standard library and must stay parseable by this Python.
+_RELAY_MINIMUM = (3, 8)
 
 
 def _plugin_digest(plugin):
@@ -180,7 +182,7 @@ def _write_private(directory, path, data):
         staged_path.unlink(missing_ok=True)
 
 
-def _posix_wrapper(python, script):
+def _posix_wrapper(python, script, extra_dirs=None, system_python='/usr/bin/python3'):
     """Shell launcher for the relay: LCU's interpreter, else the same search as lcu/interpreter.py.
 
     It prints nothing to stdout, which carries Chrome's native-messaging frames.
@@ -188,7 +190,9 @@ def _posix_wrapper(python, script):
     from . import interpreter
 
     names = ' '.join(shlex.quote(name) for name in interpreter.NAMES)
-    extra = ':'.join(interpreter.EXTRA_DIRS)
+    extra = ':'.join(interpreter.EXTRA_DIRS if extra_dirs is None else extra_dirs)
+    # The relay itself runs on older Pythons; the system one is a last resort if it is new enough for that.
+    relay_check = f'import sys; sys.exit(sys.version_info < {_RELAY_MINIMUM})'
     return f"""#!/bin/sh
 # Written by `lcu browser install`. Chrome starts native hosts with a minimal PATH.
 script={shlex.quote(str(script))}
@@ -210,16 +214,29 @@ if [ ! -x "$python" ]; then
     IFS=$old_ifs
   done
   set +f
-  if [ -z "$python" ] && [ -x /usr/bin/python3 ]; then
-    python=/usr/bin/python3
+  if [ -z "$python" ] && [ -x {shlex.quote(system_python)} ] \\
+      && {shlex.quote(system_python)} -c {shlex.quote(relay_check)} >/dev/null 2>&1; then
+    python={shlex.quote(system_python)}
   fi
   if [ -z "$python" ]; then
-    echo 'LCU Chrome native-host relay failed: Python 3.12 or newer was not found.' >&2
+    echo 'LCU Chrome native-host relay failed: no suitable Python was found.' >&2
     exit 127
   fi
 fi
 exec "$python" -B -u "$script" "$@"
 """
+
+
+def _wrapper_is_current(text, script):
+    """True when `text` is exactly the launcher this release writes for `script`, whatever interpreter it pins."""
+    for line in text.splitlines():
+        if line.startswith('python='):
+            try:
+                (python,) = shlex.split(line[len('python='):])
+            except ValueError:
+                return False
+            return text == _posix_wrapper(python, script)
+    return False
 
 
 def _install_locked(root, system, destination, selected_app):
@@ -382,10 +399,7 @@ def status(root, family='chrome'):
             source_matches = script.read_bytes() == (root / 'lcu/native_host.py').read_bytes()
             if system != 'windows':
                 # The launcher Chrome runs must be ours and must point at this script.
-                wrapper = relay.read_text()
-                source_matches = (source_matches and wrapper.startswith('#!/bin/sh\n')
-                                  and f'\nscript={shlex.quote(str(script))}\n' in wrapper
-                                  and wrapper.endswith('\nexec "$python" -B -u "$script" "$@"\n'))
+                source_matches = source_matches and _wrapper_is_current(relay.read_text(), script)
             connected_host = (
                 relay.name == relay_name and relay.is_file() and os.access(relay, os.X_OK)
                 and source_matches
