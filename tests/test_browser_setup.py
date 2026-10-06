@@ -848,6 +848,26 @@ class RefreshTests(unittest.TestCase):
             self.assertFalse(edge.exists())
             self.assertTrue(chrome.is_file())
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX permission bits')
+    def test_other_owners_manifests_keep_their_permissions(self):
+        install(self.root)
+        taken = json.dumps({'name': 'com.openai.codexextension', 'path': '/Applications/ChatGPT.app/host'})
+        self.edge.write_text(taken)
+        self.edge.chmod(0o600)
+        self.assertEqual(refresh(self.root).status, 'unchanged')
+        self.assertEqual(self.edge.read_text(), taken)
+        self.assertEqual(self.edge.stat().st_mode & 0o777, 0o600)
+
+    @unittest.skipIf(os.name == 'nt' or (hasattr(os, 'geteuid') and os.geteuid() == 0), 'needs an unprivileged POSIX user')
+    def test_an_unreadable_manifest_stops_the_refresh_before_anything_is_written(self):
+        install(self.root)
+        self.calls = 0
+        self.edge.chmod(0)
+        self.addCleanup(self.edge.chmod, 0o644)
+        with self.assertRaises(PermissionError):
+            refresh(self.root)
+        self.assertEqual(self.calls, 0)
+
     @unittest.skipIf(os.name == 'nt', 'POSIX effective user ids')
     def test_root_leaves_the_account_alone(self):
         destination = install(self.root)
@@ -878,7 +898,7 @@ class RefreshTests(unittest.TestCase):
 
         def installer(command, **_options):
             if command[0] == 'reg.exe':
-                return subprocess.CompletedProcess(command, 0, stdout=f'{registered["value"] or manifest} REG_SZ')
+                return subprocess.CompletedProcess(command, 0, stdout=f'\r\nHKEY_CURRENT_USER\\...\r\n    (Default)    REG_SZ    {registered["value"] or manifest}\r\n')
             installs.append(command)
             manifest.parent.mkdir(parents=True, exist_ok=True)
             manifest.write_text(json.dumps({'name': 'com.openai.codexextension', 'path': str(
@@ -915,7 +935,7 @@ class RefreshTests(unittest.TestCase):
             manifest.write_text(json.dumps({'path': 'C:\\ChatGPT\\extension-host.exe'}))
             self.assertEqual(refresh(root), ('elsewhere', moved.destination, []))
             manifest.write_text(json.dumps({'path': str(moved.destination / 'lcu-native-host.cmd')}))
-            registered['value'] = 'C:\\ChatGPT\\manifest.json'  # another owner holds the registry key
+            registered['value'] = f'{manifest}.backup'  # another owner's entry that only starts with our path
             calls = len(installs)
             self.assertEqual(refresh(root), ('elsewhere', moved.destination, []))
             self.assertEqual(len(installs), calls)

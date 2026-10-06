@@ -8,7 +8,9 @@ import os
 from pathlib import Path
 import platform
 import shlex
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -368,24 +370,32 @@ def _marker_beside(manifest_path):
 
 
 def _read_or_none(path):
+    """The bytes of `path`, None when it does not exist. Any other failure propagates."""
     try:
         return path.read_bytes()
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return None
 
 
+def _file_state(path):
+    """(bytes, permission bits) of `path`, None when it does not exist."""
+    data = _read_or_none(path)
+    return None if data is None else (data, stat.S_IMODE(path.stat().st_mode))
+
+
 def _restore(path, saved):
-    """Put back what `path` held before (nothing, when `saved` is None); other owners' entries stay theirs."""
-    if path.is_symlink() or _read_or_none(path) == saved:
+    """Put back what `path` held before, bytes and permissions (nothing, when `saved` is None)."""
+    if path.is_symlink() or _file_state(path) == saved:
         return
     if saved is None:
         path.unlink(missing_ok=True)
         return
+    data, mode = saved
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.lcu-manifest-', delete=False) as staged:
         staged_path = Path(staged.name)
-        staged.write(saved)
+        staged.write(data)
     try:
-        staged_path.chmod(0o644)
+        staged_path.chmod(mode)
         staged_path.replace(path)
     finally:
         staged_path.unlink(missing_ok=True)
@@ -440,7 +450,14 @@ def _windows_registered(manifest_path):
     """True when the account's Chrome native-host registration names `manifest_path`."""
     key = r'HKCU\Software\Google\Chrome\NativeMessagingHosts\com.openai.codexextension'
     registered = subprocess.run(['reg.exe', 'query', key, '/ve'], capture_output=True, text=True, timeout=20)
-    return not registered.returncode and str(manifest_path) in registered.stdout
+    if registered.returncode:
+        return False
+    # `reg query` prints `    <value name>    REG_SZ    <data>`; the name is localized, so match the type.
+    values = re.findall(r'REG_(?:EXPAND_)?SZ\s+(.*?)\s*$', registered.stdout, re.MULTILINE)
+
+    def normal(text):
+        return os.path.normcase(os.path.normpath(str(text)))
+    return any(normal(value) == normal(manifest_path) for value in values)
 
 
 def refresh(root):
@@ -492,7 +509,7 @@ def refresh(root):
     for path in existing:
         if path.is_symlink():  # the original installer would write through it, and nothing here could undo that
             raise ValueError(f'Native-host manifest must be a regular file: {path}')
-    others = {path: _read_or_none(path) for path in manifests if path not in ours}
+    others = {path: _file_state(path) for path in manifests if path not in ours}  # unreadable: stop before any write
     with _destination_lock(destination):
         before = _relay_snapshot(destination, system, ours)
         try:
