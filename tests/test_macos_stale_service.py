@@ -218,7 +218,7 @@ class DiagnoseTests(unittest.TestCase):
 
 class SingleFlightTests(unittest.TestCase):
     def test_a_burst_of_callers_shares_one_run_and_the_next_burst_runs_again(self):
-        from threading import Event, Thread
+        from threading import Event, Lock, Thread
         release, started, runs = Event(), Event(), []
 
         def work():
@@ -228,13 +228,31 @@ class SingleFlightTests(unittest.TestCase):
             return {'ok': True, 'run': len(runs)}
 
         flight = SingleFlight(work)
+
+        class CountingLock:
+            """Counts finished lock sections, so followers are known to have joined the run."""
+            def __init__(self):
+                self.inner, self.sections = Lock(), 0
+
+            def __enter__(self):
+                self.inner.acquire()
+
+            def __exit__(self, *exc):
+                self.sections += 1
+                self.inner.release()
+
+        flight.lock = CountingLock()
         results = []
         threads = [Thread(target=lambda: results.append(flight())) for _ in range(8)]
         threads[0].start()
         self.assertTrue(started.wait(5))
         for thread in threads[1:]:
             thread.start()
-        time.sleep(0.2)
+        # The leader's first section plus one per follower; none can lead once this holds.
+        deadline = time.monotonic() + 5
+        while flight.lock.sections < 8 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(flight.lock.sections, 8)
         release.set()
         for thread in threads:
             thread.join(5)
