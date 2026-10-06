@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -29,6 +30,9 @@ class OriginsTests(unittest.TestCase):
         path = self.sessions / f'{name}.toml'
         path.write_text(text, encoding='utf-8')
         return path
+
+    def files(self):
+        return sorted(p.name for p in self.sessions.iterdir() if p.name != origins.LOCK_NAME)
 
     def run_origins(self, *argv, env=None):
         out, err = io.StringIO(), io.StringIO()
@@ -186,7 +190,7 @@ class OriginsTests(unittest.TestCase):
         self.assertEqual(origins.tomllib.loads(path.read_text(encoding='utf-8')), before)
         if os.name == 'posix':
             self.assertEqual(path.stat().st_mode & 0o777, 0o640)
-        self.assertEqual([p.name for p in self.sessions.iterdir()], ['abc.toml'])
+        self.assertEqual(self.files(), ['abc.toml'])
 
     def test_forget_leaves_unknown_structures_untouched(self):
         cases = {
@@ -206,7 +210,7 @@ class OriginsTests(unittest.TestCase):
                 self.assertIn('leaving it untouched', err)
                 self.assertNotIn('5 minutes', out)
                 self.assertEqual(path.read_text(), text)
-                self.assertEqual([p.name for p in self.sessions.iterdir()], ['abc.toml'])
+                self.assertEqual(self.files(), ['abc.toml'])
 
     def test_hash_inside_a_string_is_not_a_comment(self):
         path = self.session('abc', '[origins]\ndenied = ["https://bad.example", "https://a.example/#x"]\n')
@@ -253,7 +257,7 @@ class OriginsTests(unittest.TestCase):
             code, _, _ = self.run_origins('forget', 'https://bad.example')
         self.assertEqual(code, 0)
         self.assertEqual(self.state('abc'), {'allowed': ['https://new.example'], 'denied': ['https://late.example']})
-        self.assertEqual([p.name for p in self.sessions.iterdir()], ['abc.toml'])
+        self.assertEqual(self.files(), ['abc.toml'])
         self.assertEqual(path.read_text().count('late.example'), 1)
 
     def test_forget_reports_a_runtime_write_that_lands_after_the_replace(self):
@@ -269,6 +273,61 @@ class OriginsTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('original runtime changed', err)
         self.assertNotIn('5 minutes', out)
+
+    def test_concurrent_forgets_are_serialized(self):
+        path = self.session('abc', '[origins]\nallowed = ["https://a.example", "https://b.example"]\n')
+        paused, release, second_done = threading.Event(), threading.Event(), threading.Event()
+        real = origins.write_atomically
+        errors = []
+
+        def pausing(target, text, mode):
+            temporary = real(target, text, mode)
+            paused.set()
+            release.wait(10)
+            return temporary
+
+        def first():
+            try:
+                with mock.patch.object(origins, 'write_atomically', pausing):
+                    origins.forget_in(path, 'https://a.example', ('allowed',))
+            except Exception as exc:  # reported through the assertion below
+                errors.append(exc)
+
+        def second():
+            try:
+                origins.forget_in(path, 'https://b.example', ('allowed',))
+            except Exception as exc:
+                errors.append(exc)
+            second_done.set()
+
+        one = threading.Thread(target=first)
+        one.start()
+        self.assertTrue(paused.wait(10))
+        two = threading.Thread(target=second)
+        two.start()
+        self.assertFalse(second_done.wait(0.3), 'the second command ran while the first held the lock')
+        release.set()
+        one.join(10)
+        two.join(10)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.state('abc')['allowed'], [])
+
+    def test_lock_gives_up_when_it_stays_held(self):
+        self.session('abc')
+        with origins.locked(self.sessions):
+            with self.assertRaises(origins.OriginsError) as caught:
+                with origins.locked(self.sessions, wait=0.2):
+                    pass
+        self.assertIn('another `lcu origins` command', str(caught.exception))
+        with origins.locked(self.sessions, wait=0.2):
+            pass
+
+    def test_lock_file_is_not_a_session(self):
+        self.session('abc')
+        self.run_origins('forget', 'https://bad.example')
+        self.assertTrue((self.sessions / origins.LOCK_NAME).exists())
+        sessions = json.loads(self.run_origins('list', '--json')[1])['sessions']
+        self.assertEqual([entry['session'] for entry in sessions], ['abc'])
 
     def test_forget_gives_up_when_the_file_never_settles(self):
         path = self.session('abc')
@@ -287,7 +346,7 @@ class OriginsTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('kept changing', err)
         self.assertIn('bad.example', path.read_text())
-        self.assertEqual([p.name for p in self.sessions.iterdir()], ['abc.toml'])
+        self.assertEqual(self.files(), ['abc.toml'])
 
     def test_forget_with_nothing_saved(self):
         code, out, _ = self.run_origins('forget', 'https://bad.example')

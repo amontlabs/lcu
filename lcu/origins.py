@@ -8,6 +8,7 @@ entries; it never adds one, so granting access stays with the original prompt. I
 `browser/config.toml` or `browser_use.origins` in `config.toml`.
 """
 import argparse
+import contextlib
 import ipaddress
 import json
 import os
@@ -24,6 +25,8 @@ from .runtime import default_codex_home
 KINDS = ('allowed', 'denied')
 SESSION_ID = re.compile(r'[A-Za-z0-9_-]{1,128}')  # the original runtime's own rule for a session id
 WRITE_ATTEMPTS = 5
+LOCK_NAME = '.lcu-origins.lock'  # not a session file: no .toml suffix
+LOCK_WAIT = 10  # seconds
 CACHE_NOTE = ('A running agent may keep its saved decisions in memory for up to 5 minutes. Restart the '
               'agent, or wait, and the next request for the site asks again.')
 _DEFAULT_PORTS = {'http': 80, 'https': 443}
@@ -227,15 +230,58 @@ def write_atomically(path, text, mode):
         raise
 
 
+@contextlib.contextmanager
+def locked(directory, *, wait=LOCK_WAIT):
+    """Serialize LCU's own writers on one sessions folder with an advisory lock on a side file.
+
+    The original runtime does not take this lock, so it cannot protect against the runtime itself.
+    """
+    try:
+        descriptor = os.open(Path(directory) / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise OriginsError(f'cannot lock {directory}: {exc.strerror or exc}') from None
+    try:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise OriginsError('another `lcu origins` command is changing these files; '
+                                       'try again in a moment.') from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            if os.name == 'nt':
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(descriptor)
+
+
 def forget_in(path, origin, kinds, *, attempts=WRITE_ATTEMPTS):
     """Remove `origin` from the given lists of one session file. Returns {kind: count removed}.
 
-    The original runtime does not share a lock with LCU (it serializes only its own writes), so the
-    file is read again just before the replace and the change is recomputed if the runtime wrote in
-    between, and read once more afterwards to report a write that landed after it. A write in the
-    instant between the first two reads can still be lost, which no check without a lock the runtime
-    shares can prevent.
+    Concurrent `lcu origins` commands are serialized by `locked`. The original runtime shares no lock
+    with LCU (it serializes only its own writes, in-process), so the file is also read again just
+    before the replace, and the change is recomputed if the runtime wrote before that read, and once
+    more afterwards to report a write that landed after the replace. A runtime write between the
+    last pre-replace read and the replace itself is overwritten without being noticed; no check
+    without a lock the runtime shares can close that window, which is microseconds wide.
     """
+    with locked(Path(path).parent):
+        return _forget_in(path, origin, kinds, attempts=attempts)
+
+
+def _forget_in(path, origin, kinds, *, attempts):
     path = Path(path)
     for _ in range(attempts):
         if path.is_symlink():
