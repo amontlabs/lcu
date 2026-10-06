@@ -41,6 +41,7 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Oh My Pi native plugin links are profile-scoped'):
             lcu_bridge.configure_omp(self.root, ['x'], self.root, scope='project', project=None, env={})
 
+    @unittest.skipIf(sys.platform == 'win32', 'the macOS lifecycle layout is POSIX-separated; Node joins paths with backslashes on Windows')
     def test_a_dict_the_function_fills_is_returned(self):
         runtime = self.root / 'cua_node'
         env = {'CUA_REPL_ENABLED_SURFACES': 'computer', 'SKY_CUA_SERVICE_PATH': str(self.root / 'Sky.app')}
@@ -50,6 +51,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(filled['LCU_MAC_SKY_SERVICE_PATH'].split('/@oai/sky/')[0], str(runtime / 'lib/node_modules'))
         self.assertIn('macos_sky_service.mjs', filled['NODE_REPL_TRUSTED_SERVICES'])
 
+    @unittest.skipIf(sys.platform == 'win32', 'the fake codex CLI is a #!-script, which Windows cannot execute')
     def test_app_server_session(self):
         cli = self.root / 'fake-codex'
         cli.write_text(f'''#!{sys.executable}

@@ -130,7 +130,9 @@ class WindowsBridgeTests(unittest.TestCase):
 
     def test_hands_over_to_the_private_node_with_the_generation_and_original_arguments(self):
         generation = self.prefix / 'apps' / ('a' * 64)
-        environ = {'NODE_OPTIONS': '--require /evil.cjs', 'KEEP': 'x', '__LCU_Q_NODE_PATH': 'injected'}
+        # HOME/USERPROFILE: argument parsing asks pathlib for the home directory, which Windows derives from them.
+        home = {'HOME': str(self.base), 'USERPROFILE': str(self.base)}
+        environ = {'NODE_OPTIONS': '--require /evil.cjs', 'KEEP': 'x', '__LCU_Q_NODE_PATH': 'injected', **home}
         with mock.patch.object(bridge, 'prepare_generation', return_value=(generation, None)) as prepare, \
              mock.patch.dict(bridge.os.environ, environ, clear=True), \
              mock.patch.object(bridge.subprocess, 'run', return_value=SimpleNamespace(returncode=3)) as run:
@@ -146,8 +148,9 @@ class WindowsBridgeTests(unittest.TestCase):
         self.assertFalse(run.call_args.kwargs['check'])
         # Review R4: Node's startup variables are quarantined (scripts/startup_env.mjs restores them).
         self.assertEqual(run.call_args.kwargs['env'], {
-            'KEEP': 'x', '__LCU_Q_NODE_OPTIONS': '--require /evil.cjs', '__LCU_Q': 'NODE_OPTIONS'})
+            'KEEP': 'x', **home, '__LCU_Q_NODE_OPTIONS': '--require /evil.cjs', '__LCU_Q': 'NODE_OPTIONS'})
 
+    @unittest.skipIf(sys.platform == 'win32', 'the fake node.exe is a #!/bin/sh script, which Windows cannot execute (runs on POSIX CI)')
     @unittest.skipUnless(shutil.which('node'), 'needs node')
     def test_a_caller_preload_never_runs_in_the_installer_node(self):
         generation = self.base / 'apps' / ('a' * 64)

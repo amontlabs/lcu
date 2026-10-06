@@ -62,11 +62,11 @@ def _jsonable(value):
     return value
 
 
-def _split(stdout):
+def _split(stdout, stderr=''):
     """Everything before the result marker is what the function printed."""
     printed, marker, rest = stdout.partition(MARK)
     if not marker:
-        raise RuntimeError('lcu_bridge.mjs produced no result: ' + stdout[-2000:])
+        raise RuntimeError('lcu_bridge.mjs produced no result: ' + stdout[-2000:] + ('\nstderr: ' + stderr[-2000:] if stderr else ''))
     return printed, json.loads(rest.splitlines()[0])
 
 
@@ -83,7 +83,7 @@ def call_with_args(module, function, *args, root=None, node=None, timeout=300, e
     process = subprocess.run([node or find_node(root), '--disable-warning=ExperimentalWarning', str(BRIDGE), 'call'],
                              input=json.dumps(request), capture_output=True, text=True, timeout=timeout,
                              env=env if env is not None else os.environ.copy())
-    printed, reply = _split(process.stdout)
+    printed, reply = _split(process.stdout, process.stderr)
     if printed:
         sys.stdout.write(printed)
     if process.stderr:
