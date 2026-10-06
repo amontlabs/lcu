@@ -62,6 +62,67 @@ function lifetimeSignal(runtime, session_id, turn_id) {
   }));
 }
 
+const NATIVE_PIPE_FAILURE = /native pipe startup failed/i;
+// Upper bound on what a failed request waits for the diagnosis, connection included.
+const DIAGNOSE_TIMEOUT_MS = 3_000;
+
+// Ask the private host whether an older Computer Use service is still running
+// from a replaced app bundle. Resolves to the host's explanation, or undefined
+// when there is none or the host cannot answer in time; it never rejects.
+function staleServiceNote(runtime) {
+  const address = runtime?.env?.LCU_MAC_LIFETIME_SOCKET;
+  if (!address || typeof runtime.nativePipe?.createConnection !== 'function') {
+    return Promise.resolve(undefined);
+  }
+  return new Promise(resolve => {
+    let socket;
+    let finished = false;
+    let data = Buffer.alloc(0);
+    const timer = setTimeout(() => finish(), DIAGNOSE_TIMEOUT_MS);
+    function finish(note) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      try { socket?.end(); } catch {}
+      resolve(note);
+    }
+    Promise.resolve().then(() => runtime.nativePipe.createConnection(address)).then(connection => {
+      if (finished) {
+        try { connection.end(); } catch {}
+        return;
+      }
+      socket = connection;
+      socket.on('data', chunk => {
+        data = Buffer.concat([data, Buffer.from(chunk)]);
+        if (data.length > 65536) return finish();
+        const newline = data.indexOf(10);
+        if (newline < 0) return;
+        try {
+          const result = JSON.parse(data.subarray(0, newline).toString('utf8'));
+          finish(result?.ok === true && Array.isArray(result.stale) && result.stale.length &&
+            typeof result.message === 'string' && result.message.trim()
+            ? result.message.slice(0, 512) : undefined);
+        } catch { finish(); }
+      });
+      socket.on('error', () => finish());
+      socket.on('close', () => finish());
+      socket.write(Buffer.from(JSON.stringify({type: 'diagnose'}) + '\n'));
+    }).catch(() => finish());
+  });
+}
+
+// Keep the original error, its class and fields; only extend the message when
+// the host found a stale service. Any failure to diagnose leaves it untouched.
+async function explainNativePipeFailure(runtime, error) {
+  try {
+    const message = error?.message;
+    if (typeof message !== 'string' || !NATIVE_PIPE_FAILURE.test(message)) return error;
+    const note = await staleServiceNote(runtime);
+    if (note) error.message = `${message} ${note}`;
+  } catch {}
+  return error;
+}
+
 function register() {
   if (registered) return;
   const runtime = globalThis.nodeRepl;
@@ -364,5 +425,10 @@ export async function handleRpc(request) {
         turn_id: context.turn_id, app: context.app});
     }
   }
-  return (await original).handleRpc(request);
+  const service = await original;
+  try {
+    return await service.handleRpc(request);
+  } catch (error) {
+    throw await explainNativePipeFailure(runtime, error);
+  }
 }

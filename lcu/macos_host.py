@@ -13,6 +13,108 @@ from threading import Condition, Thread
 from uuid import uuid4
 
 
+SKY_SERVICE_NAME = 'SkyComputerUseService'
+# `ps` reports the start time in whole seconds and the file time has sub-second
+# precision, so a change this close to the start is never read as an update.
+STALE_MARGIN_SECONDS = 2
+_MONTHS = {name: number for number, name in enumerate(
+    ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'), 1)}
+
+
+def parse_process_start(fields):
+    """Local epoch seconds from the five `ps lstart` fields, or None when malformed."""
+    try:
+        _, month, day, clock, year = fields
+        hour, minute, second = (int(part) for part in clock.split(':'))
+        month, day, year = _MONTHS[month], int(day), int(year)
+        if not (1 <= day <= 31 and 0 <= hour <= 23 and 0 <= minute <= 59 and
+                0 <= second <= 60 and 1970 <= year <= 9999):
+            return None
+        return time.mktime((year, month, day, hour, minute, second, 0, 0, -1))
+    except (KeyError, ValueError, OverflowError):
+        return None
+
+
+def parse_process_table(text):
+    """Return running Sky services from `ps -axo pid=,lstart=,comm=` output.
+
+    Lines that name the service but cannot be parsed are counted, not guessed at.
+    """
+    services, unparsed = [], 0
+    for line in text.splitlines():
+        if SKY_SERVICE_NAME not in line:
+            continue
+        # pid, then lstart as `Wed Oct  7 00:34:53 2026`, then the executable path
+        # (which may contain spaces).
+        fields = line.split(None, 6)
+        started = parse_process_start(fields[1:6]) if len(fields) == 7 else None
+        path = fields[6].strip() if len(fields) == 7 else ''
+        if (started is None or not fields[0].isdigit() or not os.path.isabs(path) or
+                os.path.basename(path) != SKY_SERVICE_NAME):
+            unparsed += 1
+            continue
+        services.append({'pid': int(fields[0]), 'path': path, 'started': started})
+    return services, unparsed
+
+
+def bundle_replaced_at(executable, stat=os.stat):
+    """When the service bundle on disk last changed, or None when it is gone.
+
+    This is the newest inode change time (ctime) of the executable and the bundle
+    Info.plist. An in-place app update keeps the inodes and the build-time mtimes
+    (observed live: mtime days before the update, creation time months before it),
+    while ctime cannot be set by an updater and moves to the moment the files were
+    replaced. Starting the service does not change it.
+    """
+    try:
+        times = [stat(executable).st_ctime]
+    except OSError:
+        return None
+    try:
+        times.append(stat(Path(executable).parents[1] / 'Info.plist').st_ctime)
+    except (OSError, IndexError):
+        pass
+    return max(times)
+
+
+def stale_service_message(pids):
+    if len(pids) == 1:
+        subject, verb, quits = f'A Computer Use service (pid {pids[0]})', 'still holds', 'It quits'
+    else:
+        subject = f'Computer Use services (pids {", ".join(str(pid) for pid in pids)})'
+        verb, quits = 'still hold', 'They quit'
+    return (f'{subject} started before ChatGPT was updated {verb} the connection. '
+            f'{quits} on its own about a minute after it is last used: wait, or quit it, then retry.')
+
+
+def diagnose_sky_services(*, run=subprocess.run, stat=os.stat):
+    """List running Sky services and flag those older than their bundle. Kills nothing."""
+    result = run(['ps', '-axo', 'pid=,lstart=,comm='], stdin=subprocess.DEVNULL,
+                 capture_output=True, text=True, timeout=2, check=False,
+                 env={**os.environ, 'LC_ALL': 'C'})
+    if result.returncode != 0:
+        raise ValueError(f'ps exited with status {result.returncode}.')
+    found, unparsed = parse_process_table(result.stdout)
+    services = []
+    for service in found:
+        replaced = bundle_replaced_at(service['path'], stat)
+        services.append({
+            **service, 'bundle_replaced': replaced, 'bundle_missing': replaced is None,
+            'stale': replaced is not None and replaced > service['started'] + STALE_MARGIN_SECONDS})
+    stale = sorted(service['pid'] for service in services if service['stale'])
+    diagnosis = {'services': services, 'stale': stale, 'unparsed': unparsed}
+    if stale:
+        diagnosis['message'] = stale_service_message(stale)
+    return diagnosis
+
+
+def diagnose_response():
+    try:
+        return {'ok': True, **diagnose_sky_services()}
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)[:512]}
+
+
 def turn_ended_payload(session_id, turn_id):
     return json.dumps({
         'type': 'agent-turn-complete',
@@ -274,6 +376,13 @@ def serve(address, client, control_address=None):
                 connection.settimeout(3)
                 try:
                     request = LineReader(connection).read()
+                    if isinstance(request, dict) and request.get('type') == 'diagnose':
+                        # Read-only: list Sky services and report; never signal them.
+                        try:
+                            connection.sendall((json.dumps(diagnose_response(), separators=(',', ':')) + '\n').encode())
+                        except OSError:
+                            pass
+                        continue
                     session_id = request.get('session_id') if isinstance(request, dict) else None
                     turn_id = request.get('turn_id') if isinstance(request, dict) else None
                     if (not isinstance(session_id, str) or not session_id.strip() or

@@ -24,9 +24,15 @@ let failTurnEndedOnce = false;
 const pending = new Map();
 const observedContexts = [];
 const lifetimeMessages = [];
+const diagnoseRequests = [];
+let diagnoseReply;
 
 await writeFile(servicePath, `export async function handleRpc(request) {
   globalThis.originalRpcCount = (globalThis.originalRpcCount || 0) + 1;
+  if (request.fail) {
+    const error = Object.assign(new Error(request.fail), {code: -10001, errorName: 'fixtureFailure'});
+    throw request.freeze ? Object.freeze(error) : error;
+  }
   if (request.wait) return new Promise(resolve => { globalThis.completeAction = resolve; });
   return {ok: true};
 }\n`);
@@ -99,6 +105,12 @@ const controlServer = createServer(socket => consumeLines(socket, message => {
   serviceSocket?.write(`${JSON.stringify(message)}\n`);
 }));
 const lifetimeServer = createServer(socket => consumeLines(socket, message => {
+  if (message.type === 'diagnose') {
+    diagnoseRequests.push(message);
+    // undefined: never answer, as a host stuck behind other work would.
+    if (diagnoseReply !== undefined) socket.end(`${diagnoseReply}\n`);
+    return;
+  }
   lifetimeMessages.push(message);
   socket.end('{"notified":true}\n');
 }));
@@ -362,6 +374,61 @@ try {
   await handleRpc({type: 'execute', method: 'list_apps', args: []});
   assert.equal(globalThis.originalRpcCount, rpcCountAtCapacity + 1,
     'a new Sky request should dispatch after turn cleanup frees a metadata slot');
+
+  // A native-pipe startup failure names a stale Computer Use service when the
+  // private host finds one, and is otherwise reported exactly as the original.
+  globalThis.nodeRepl.requestMeta = {};
+  const startupFailure = 'Sky Computer Use native pipe startup failed';
+  const staleNote = 'A Computer Use service (pid 321) started before ChatGPT was updated still holds ' +
+    'the connection. It quits on its own about a minute after it is last used: wait, or quit it, then retry.';
+  const failure = (message, extra) =>
+    handleRpc({type: 'execute', method: 'list_apps', args: [], fail: message, ...extra})
+      .then(() => assert.fail('the original error must be thrown'), error => error);
+  diagnoseReply = JSON.stringify({ok: true, stale: [321], message: staleNote, services: []});
+  const explained = await failure(startupFailure);
+  assert.ok(explained instanceof Error);
+  assert.equal(explained.message, `${startupFailure} ${staleNote}`);
+  assert.equal(explained.code, -10001);
+  assert.equal(explained.errorName, 'fixtureFailure');
+  assert.deepEqual(diagnoseRequests, [{type: 'diagnose'}]);
+
+  for (const reply of [
+    JSON.stringify({ok: true, stale: [], services: []}),
+    JSON.stringify({ok: false, error: 'ps exited with status 1.'}),
+    JSON.stringify({ok: true, stale: [321], message: '   '}),
+    JSON.stringify({ok: true, stale: [321]}),
+    '{not json',
+  ]) {
+    diagnoseReply = reply;
+    const before = diagnoseRequests.length;
+    assert.equal((await failure(startupFailure)).message, startupFailure, reply);
+    assert.equal(diagnoseRequests.length, before + 1);
+  }
+
+  // Other failures are not diagnosed at all.
+  diagnoseReply = JSON.stringify({ok: true, stale: [321], message: staleNote});
+  const unrelatedCount = diagnoseRequests.length;
+  assert.equal((await failure('Sky Computer Use request failed')).message, 'Sky Computer Use request failed');
+  assert.equal(diagnoseRequests.length, unrelatedCount);
+
+  // An unreachable host leaves the original error, immediately.
+  const lifetimeAddress = globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET;
+  globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET = join(root, 'missing.sock');
+  assert.equal((await failure(startupFailure)).message, startupFailure);
+  globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET = undefined;
+  assert.equal((await failure(startupFailure)).message, startupFailure);
+  globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET = lifetimeAddress;
+
+  // A host that never answers delays the original error by a bounded time only.
+  diagnoseReply = undefined;
+  const hangStarted = Date.now();
+  assert.equal((await failure(startupFailure)).message, startupFailure);
+  const hangMs = Date.now() - hangStarted;
+  assert.ok(hangMs >= 2_500 && hangMs < 4_500, `diagnosis wait was ${hangMs} ms`);
+
+  // A frozen error object cannot be extended, and is still thrown unchanged.
+  diagnoseReply = JSON.stringify({ok: true, stale: [321], message: staleNote});
+  assert.equal((await failure(startupFailure, {freeze: true})).message, startupFailure);
 
   for (const raw of [undefined, '{bad metadata']) {
     globalThis.nodeRepl.requestMeta = raw === undefined ? {} : {'x-codex-turn-metadata': raw};

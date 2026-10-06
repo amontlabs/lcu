@@ -223,7 +223,7 @@ Interactive setup launches the guided `lcu doctor` flow automatically after regi
 
 Whatever `doctor` reports, readiness is only confirmed when the reconnected agent makes its first approved screenshot call against a harmless window, such as a blank TextEdit document, and you check the returned image.
 
-On macOS, `doctor` safely checks original runtime metadata and names the selected app/helper entries from their bundle metadata. It does not inspect application content or determine whether Accessibility or screen-capture grants are enabled; its **Open** choices are explicit, and its recheck repeats only the metadata check. `doctor` first checks the helper's socket path length (see [Home folder length](#macos)) and exits 2 when it is too long. It now exits 0 when the original provider loads (permission grants are still reported as not verifiable by LCU) and exits 2 when the provider check fails. `--check-desktop` still exits nonzero on macOS because this check cannot verify the permission grants.
+On macOS, `doctor` safely checks original runtime metadata and names the selected app/helper entries from their bundle metadata. It does not inspect application content or determine whether Accessibility or screen-capture grants are enabled; its **Open** choices are explicit, and its recheck repeats only the metadata check. `doctor` first checks the helper's socket path length (see [Home folder length](#macos)) and exits 2 when it is too long. It now exits 0 when the original provider loads (permission grants are still reported as not verifiable by LCU) and exits 2 when the provider check fails. `--check-desktop` still exits nonzero on macOS because this check cannot verify the permission grants. It also warns, without changing the exit status, when a Computer Use service older than the installed app is still running (see [Native pipe startup failed after a ChatGPT update](#native-pipe-startup-failed-after-a-chatgpt-update)).
 
 On Linux, `doctor` calls the original runtime's `list_windows` and `get_screenshot` methods. It reports only status and counts; LCU discards the returned image data locally. The original API may create its normal temporary capture files. A successful result verifies these two original runtime calls in the current desktop session, then asks you to verify an agent call.
 
@@ -289,6 +289,14 @@ Custom harnesses must deliver the original instructions and images, present site
 Chrome calls fail with `Browser request-header policy requires caller identity.` when the extension is still connected to the original ChatGPT native host instead of LCU's relay. Restart Chrome, or turn the ChatGPT extension off and on in `chrome://extensions`, then list tabs again.
 
 If the `com.openai.codexextension` manifest points somewhere other than LCU's relay, for example at the ChatGPT app's own host, `lcu browser status` prints where it points. Run `lcu browser install`, then reconnect the extension as above.
+
+### Native pipe startup failed after a ChatGPT update
+
+Every Computer Use call fails with `Sky Computer Use native pipe startup failed` right after the ChatGPT app updated itself, and the app's own Computer Use logs `socket lock is unavailable`. A Computer Use service that was started from the previous app version is still running. It keeps the socket in the ChatGPT group container but refuses every client (the system log shows `teamNotFound`), so a new connection cannot be made until it exits.
+
+LCU cannot change that signed service. When a call fails this way, LCU checks for a service older than the installed app and, if it finds one, adds to the error: "A Computer Use service (pid N) started before ChatGPT was updated still holds the connection. It quits on its own about a minute after it is last used: wait, or quit it, then retry." On macOS, `lcu doctor` prints the same text as a warning without changing its exit status. LCU never quits the service itself.
+
+Wait about a minute without using Computer Use and retry, or quit the named process in Activity Monitor and retry. Without a stale service, LCU works whether the ChatGPT app is open or not. This occurred once, on the update from ChatGPT 26.930.21537 to 26.930.61225, and cleared after about 4 minutes. The new message has not been verified against a live app update yet.
 
 ## Approval mode
 
