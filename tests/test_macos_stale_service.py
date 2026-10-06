@@ -41,6 +41,13 @@ def stat_with(times):
     return stat
 
 
+def whole_bundle(executable, when):
+    """Every file the diagnosis reads, with one change time."""
+    contents = Path(executable).parents[1]
+    return {str(executable): when, str(contents / 'Info.plist'): when,
+            str(contents / '_CodeSignature' / 'CodeResources'): when}
+
+
 class ProcessTableTests(unittest.TestCase):
     def test_parses_pid_start_and_a_path_with_spaces(self):
         services, unparsed = parse_process_table('\n'.join([
@@ -51,6 +58,11 @@ class ProcessTableTests(unittest.TestCase):
         self.assertEqual(unparsed, 0)
         self.assertEqual(services, [{'pid': 45404, 'path': EXECUTABLE,
                                      'started': epoch('Wed Oct 7 00:34:53 2026')}])
+
+    def test_keeps_non_ascii_path_characters(self):
+        path = f'/Users/Jos\u00e9/ChatGPT.app/Contents/MacOS/{SKY_SERVICE_NAME}'
+        services, _ = parse_process_table(f'7 Wed Oct  7 00:34:53 2026 {path}')
+        self.assertEqual(services[0]['path'], path)
 
     def test_counts_unparseable_service_lines_instead_of_guessing(self):
         services, unparsed = parse_process_table('\n'.join([
@@ -78,10 +90,15 @@ class BundleTimeTests(unittest.TestCase):
         run = ps(f'45404 Thu Jan  1 00:10:00 1970 {EXECUTABLE}')
         self.assertEqual(diagnose_sky_services(run=run, stat=stat)['stale'], [])
 
-    def test_the_executable_alone_is_enough_and_a_missing_executable_is_none(self):
-        self.assertEqual(bundle_replaced_at(EXECUTABLE, stat_with({EXECUTABLE: 100.0})), 100.0)
-        self.assertIsNone(bundle_replaced_at(EXECUTABLE, stat_with({PLIST: 250.0, SEAL: 250.0})))
-        self.assertEqual(bundle_replaced_at('/' + SKY_SERVICE_NAME, stat_with({'/' + SKY_SERVICE_NAME: 5.0})), 5.0)
+    def test_a_missing_or_unreadable_file_makes_the_time_unknown_not_a_guess(self):
+        for present in ({EXECUTABLE: 900.0}, {EXECUTABLE: 900.0, PLIST: 900.0},
+                        {EXECUTABLE: 900.0, SEAL: 900.0}, {PLIST: 250.0, SEAL: 250.0}):
+            self.assertIsNone(bundle_replaced_at(EXECUTABLE, stat_with(present)), present)
+        run = ps(f'45404 Thu Jan  1 00:10:00 1970 {EXECUTABLE}')
+        diagnosis = diagnose_sky_services(run=run, stat=stat_with({EXECUTABLE: 900.0}))
+        self.assertEqual(diagnosis['stale'], [])
+        self.assertTrue(diagnosis['services'][0]['bundle_missing'])
+        self.assertIsNone(bundle_replaced_at('/' + SKY_SERVICE_NAME, stat_with({'/' + SKY_SERVICE_NAME: 5.0})))
 
 
 class StartTimeTests(unittest.TestCase):
@@ -106,7 +123,7 @@ class StartTimeTests(unittest.TestCase):
 class DiagnoseTests(unittest.TestCase):
     def test_flags_a_service_started_before_its_bundle_was_replaced(self):
         run = ps(f'45404 Tue Oct  6 11:00:00 2026   {EXECUTABLE}')
-        stat = stat_with({EXECUTABLE: 'Wed Oct 7 00:21:00 2026', PLIST: 'Wed Oct 7 00:21:00 2026'})
+        stat = stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026'))
         diagnosis = diagnose_sky_services(run=run, stat=stat)
         self.assertEqual(diagnosis['stale'], [45404])
         self.assertTrue(diagnosis['services'][0]['stale'])
@@ -115,11 +132,13 @@ class DiagnoseTests(unittest.TestCase):
                                                         'ChatGPT was updated still holds the connection. '))
         self.assertTrue(diagnosis['message'].endswith('wait, or quit it, then retry.'))
         self.assertEqual(run.call_args.args[0], ['ps', '-axo', 'pid=,lstart=,comm='])
-        self.assertEqual(run.call_args.kwargs['env']['LC_ALL'], 'C')
+        env = run.call_args.kwargs['env']
+        self.assertEqual((env['LC_TIME'], env['LC_CTYPE'], env['TZ']), ('C', 'UTF-8', 'UTC'))
+        self.assertNotIn('LC_ALL', env)
 
     def test_a_service_started_after_the_replacement_is_fresh(self):
         run = ps(f'45404 Wed Oct  7 00:34:53 2026   {EXECUTABLE}')
-        stat = stat_with({EXECUTABLE: 'Wed Oct 7 00:21:00 2026', PLIST: 'Wed Oct 7 00:21:00 2026'})
+        stat = stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026'))
         diagnosis = diagnose_sky_services(run=run, stat=stat)
         self.assertEqual(diagnosis['stale'], [])
         self.assertNotIn('message', diagnosis)
@@ -129,7 +148,7 @@ class DiagnoseTests(unittest.TestCase):
         start = epoch('Wed Oct 7 00:34:53 2026')
         run = ps(f'45404 Wed Oct  7 00:34:53 2026   {EXECUTABLE}')
         for replaced, stale in ((start + 1.9, False), (start + 2.5, True)):
-            diagnosis = diagnose_sky_services(run=run, stat=stat_with({EXECUTABLE: replaced}))
+            diagnosis = diagnose_sky_services(run=run, stat=stat_with(whole_bundle(EXECUTABLE, replaced)))
             self.assertEqual(diagnosis['stale'] == [45404], stale, replaced)
 
     def test_no_service_running(self):
@@ -146,15 +165,15 @@ class DiagnoseTests(unittest.TestCase):
 
     def test_unparseable_output_flags_nothing(self):
         diagnosis = diagnose_sky_services(run=ps(f'??? {EXECUTABLE}', 'not a process table'),
-                                          stat=stat_with({EXECUTABLE: 'Wed Oct 7 00:21:00 2026'}))
+                                          stat=stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026')))
         self.assertEqual((diagnosis['services'], diagnosis['stale'], diagnosis['unparsed']), ([], [], 1))
 
     def test_only_the_older_of_two_services_is_flagged(self):
         other = '/Users/x/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/' + SKY_SERVICE_NAME
         run = ps(f'45404 Wed Oct  7 00:34:53 2026 {other}',
                  f'  200 Tue Oct  6 11:00:00 2026 {EXECUTABLE}')
-        stat = stat_with({EXECUTABLE: 'Wed Oct 7 00:21:00 2026',
-                          other: 'Wed Oct 7 00:34:50 2026'})
+        stat = stat_with({**whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026'),
+                          **whole_bundle(other, 'Wed Oct 7 00:34:50 2026')})
         diagnosis = diagnose_sky_services(run=run, stat=stat)
         self.assertEqual(diagnosis['stale'], [200])
         self.assertEqual([service['pid'] for service in diagnosis['services']], [45404, 200])
@@ -177,6 +196,9 @@ class DiagnoseTests(unittest.TestCase):
             executable = Path(base) / 'Codex Computer Use.app/Contents/MacOS' / SKY_SERVICE_NAME
             executable.parent.mkdir(parents=True)
             executable.write_text('service')
+            (executable.parents[1] / 'Info.plist').write_text('plist')
+            (executable.parents[1] / '_CodeSignature').mkdir()
+            (executable.parents[1] / '_CodeSignature' / 'CodeResources').write_text('seal')
             changed = os.stat(executable).st_ctime
             older = time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(changed - 600))
             newer = time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(changed + 600))
@@ -186,7 +208,7 @@ class DiagnoseTests(unittest.TestCase):
     def test_the_diagnosis_only_lists_processes_and_never_signals_one(self):
         run = ps(f'45404 Tue Oct  6 11:00:00 2026 {EXECUTABLE}')
         with patch('os.kill') as kill, patch('os.killpg') as killpg:
-            diagnose_sky_services(run=run, stat=stat_with({EXECUTABLE: 'Wed Oct 7 00:21:00 2026'}))
+            diagnose_sky_services(run=run, stat=stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026')))
         kill.assert_not_called()
         killpg.assert_not_called()
         run.assert_called_once()

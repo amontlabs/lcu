@@ -60,30 +60,23 @@ def parse_process_table(text):
 
 
 def bundle_replaced_at(executable, stat=os.stat):
-    """When the service bundle on disk was last replaced, or None when it is gone.
+    """When the service bundle on disk was last replaced, or None when that is unknown.
 
     This is the oldest inode change time (ctime) among the executable, the bundle
     Info.plist and its code-signature seal. An app update replaces the whole bundle:
     observed live, all 167 files had the update time as ctime while their mtimes
     (build time) and creation times were days to months older, so neither of those
     can detect it. Requiring all three to have changed keeps one metadata change
-    (chmod, an extended attribute) on a single file from reading as an update.
+    (chmod, an extended attribute) on a single file from reading as an update, so
+    when any of them is missing or unreadable the answer is None, not a guess.
     Starting the service does not change ctime.
     """
     try:
-        times = [stat(executable).st_ctime]
-    except OSError:
-        return None
-    try:
         contents = Path(executable).parents[1]
-    except IndexError:
-        return times[0]
-    for sibling in (contents / 'Info.plist', contents / '_CodeSignature' / 'CodeResources'):
-        try:
-            times.append(stat(sibling).st_ctime)
-        except OSError:
-            pass
-    return min(times)
+        return min(stat(path).st_ctime for path in (
+            executable, contents / 'Info.plist', contents / '_CodeSignature' / 'CodeResources'))
+    except (OSError, IndexError):
+        return None
 
 
 def stale_service_message(pids):
@@ -96,11 +89,18 @@ def stale_service_message(pids):
             f'{quits} on its own about a minute after it is last used: wait, or quit it, then retry.')
 
 
+def _ps_environment():
+    """English month names and UTC times; UTF-8 so `ps` does not escape non-ASCII paths."""
+    environment = {key: value for key, value in os.environ.items() if key != 'LC_ALL'}
+    environment.update(LC_TIME='C', LC_CTYPE='UTF-8', TZ='UTC')
+    return environment
+
+
 def diagnose_sky_services(*, run=subprocess.run, stat=os.stat):
     """List running Sky services and flag those older than their bundle. Kills nothing."""
     result = run(['ps', '-axo', 'pid=,lstart=,comm='], stdin=subprocess.DEVNULL,
-                 capture_output=True, text=True, timeout=2, check=False,
-                 env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'})
+                 capture_output=True, timeout=2, check=False,
+                 encoding='utf-8', errors='replace', env=_ps_environment())
     if result.returncode != 0:
         raise ValueError(f'ps exited with status {result.returncode}.')
     found, unparsed = parse_process_table(result.stdout)
