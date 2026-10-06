@@ -245,6 +245,111 @@ describe('WindowsInstallerTests', () => {
   });
 });
 
+// LCU 0.9.6 #20, Node side of tests/test_windows_install_host.py: the release publication's cleanup boundary
+// (removing an app copy this run created is the bridge's part: tests/test_windows_install_host.py).
+describe('WindowsInstallHostTests (Node publication)', () => {
+  let base; let source; let prefix; let official; let generation;
+  beforeEach(() => {
+    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-winhost-')));
+    source = path.join(base, 'archive');
+    fs.mkdirSync(path.join(source, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(source, 'scripts/windows_launcher.py'), 'fixture');
+    fs.writeFileSync(path.join(source, 'scripts/windows_launcher.mjs'), 'fixture dispatcher');
+    fs.writeFileSync(path.join(source, 'runtime.lock.json'), JSON.stringify({ platforms: { windows: { architectures: { x64: {} } } } }));
+    prefix = path.join(base, 'installed');
+    fs.mkdirSync(prefix);
+    official = officialApp(base);
+    ({ generation } = publishGeneration(prefix, official));
+    Object.assign(installWindows.internals, {
+      SOURCE: source, platform: () => 'win32', architecture: () => 'x64', verify: () => {},
+      checked_prefix: () => prefix, windows: fakeWindows, materialize_original_host: () => {}, paths: () => {},
+    });
+  });
+  afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
+
+  const releases = () => (fs.existsSync(path.join(prefix, 'releases')) ? fs.readdirSync(path.join(prefix, 'releases')) : []);
+
+  it('a host extraction failure removes the partial release and publishes nothing', () => {
+    installWindows.internals.materialize_original_host = (app) => {
+      assert.ok(fs.statSync(app).isDirectory()); // the generation existed when the host was extracted
+      throw new ValueError('Required Windows host layout is unavailable: late failure');
+    };
+    throwsMatching(() => installWindows.install(prefix, { app_generation: generation }), /late failure/);
+    assert.deepEqual(releases(), []);
+    assert.equal(fs.existsSync(path.join(prefix, 'current.json')), false);
+  });
+
+  it('a redirected release directory is refused inside the cleanup boundary', () => {
+    const elsewhere = path.join(base, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    fs.symlinkSync(elsewhere, path.join(prefix, 'releases'));
+    throwsMatching(() => installWindows.install(prefix, { app_generation: generation }), /redirected Windows release directory/);
+    assert.deepEqual(fs.readdirSync(elsewhere), []);
+    assert.equal(fs.existsSync(path.join(prefix, 'current.json')), false);
+  });
+
+  it('a failed launcher restore still removes the release and reports the restore failure', () => {
+    fs.writeFileSync(path.join(prefix, 'launcher.json'), 'previous launcher pair');
+    const calls = [];
+    installWindows.internals.atomic_bytes = (file) => {
+      calls.push(path.basename(file));
+      if (calls.length === 2) throw Object.assign(new Error('command locked'), { name: 'OSError' });
+      if (calls.length === 3) throw Object.assign(new Error('restore locked'), { name: 'OSError' });
+    };
+    throwsMatching(() => installWindows.install(prefix, { app_generation: generation }), /restore locked/);
+    assert.deepEqual(calls, ['launcher.json', 'windows_launcher.mjs', 'launcher.json']);
+    assert.deepEqual(releases(), []);
+    assert.equal(fs.existsSync(path.join(prefix, 'current.json')), false);
+  });
+
+  it('--check-host prints the read-only layout verdict for the bridge', () => {
+    let stdout = '';
+    io.stdout = (text) => { stdout += text; };
+    const seen = [];
+    installWindows.internals.execPath = () => '/staged/node.exe';
+    installWindows.internals.plan_original_host = (app, options) => { seen.push([app, options]); };
+    installWindows.main(['--check-host', official]);
+    assert.equal(stdout, '{"ok": true}\n');
+    assert.deepEqual(seen, [[official, { node: '/staged/node.exe' }]]);
+    stdout = '';
+    installWindows.internals.plan_original_host = () => {
+      throw new ValueError('Required Windows host layout is unavailable: no "factory"');
+    };
+    installWindows.main(['--check-host', official]);
+    assert.equal(stdout, '{"ok": false, "error": "Required Windows host layout is unavailable: no \\"factory\\""}\n');
+    installWindows.internals.plan_original_host = () => { throw new TypeError('bug'); };
+    assert.throws(() => installWindows.main(['--check-host', official]), /bug/);
+    assert.equal(fs.existsSync(path.join(prefix, 'releases')), false); // nothing is written
+  });
+
+  it('--check-host runs the real structural check on a fixture archive', () => {
+    const app = path.join(base, 'app-with-asar');
+    const asar = path.join(app, 'app/resources/app.asar');
+    fs.mkdirSync(path.dirname(asar), { recursive: true });
+    const options = '{codexCliPath,nativePipeDirectory,windowsHelperPath,windowsHelperTransportModulePath}';
+    const writeAsar = (main) => {
+      const content = Buffer.from(main);
+      const header = Buffer.from(JSON.stringify({ files: { '.vite': { files: { build: { files: {
+        'main-h.js': { offset: '0', size: content.length } } } } } } }));
+      const pre = Buffer.alloc(16);
+      pre.writeUInt32LE(4, 0); pre.writeUInt32LE(8 + header.length, 4); pre.writeUInt32LE(4 + header.length, 8);
+      pre.writeUInt32LE(header.length, 12);
+      fs.writeFileSync(asar, Buffer.concat([pre, header, content]));
+    };
+    const check = () => spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning',
+      path.join(ROOT, 'scripts/install_windows.mjs'), '--check-host', app], { encoding: 'utf8' });
+    writeAsar(`function Kne(${options}){return {closeActiveTurn(){},nativePipeDirectory}}\n`);
+    let done = check();
+    assert.equal(done.status, 0, done.stderr);
+    assert.equal(done.stdout, '{"ok": true}\n');
+    writeAsar('const x=1;\n');
+    done = check();
+    assert.equal(done.status, 0, done.stderr);
+    assert.match(done.stdout, /^\{"ok": false, "error": "Required Windows host layout is unavailable: no main bundle has a top-level native-pipe host factory/);
+    assert.deepEqual(fs.readdirSync(app).sort(), ['app']);
+  });
+});
+
 describe('WindowsInstallerReviewTests', () => {
   let base; let source; let prefix;
   beforeEach(() => {

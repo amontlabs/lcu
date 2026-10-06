@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import * as tested from '../../lcu/tested.mjs';
 import { PySystemExit } from '../../lcu/compat/argparse.mjs';
-import { captureIo, tempDir } from './runtime_support.mjs';
+import { captureIo, tempDir, withEnv } from './runtime_support.mjs';
 import { mkdirSync, chmodSync } from 'node:fs';
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url));
@@ -229,7 +229,7 @@ describe('TestedVersionTests', () => {
     if (text === null) return;
     assert.ok(text.startsWith('{\n  "lcu_version": "9.9.9",\n  "release": '));
     assert.deepEqual(Object.keys(JSON.parse(text)), ['lcu_version', 'release', 'platform', 'architecture', 'app',
-      'compatibility', 'changed_since_install', 'setup', 'pending', 'update']);
+      'compatibility', 'changed_since_install', 'setup', 'pending', 'update', 'diagnostic_log']);
   });
 
   it('review #12: arbitrary evidence keeps its key order (numeric-looking keys) in status JSON', async (t) => {
@@ -276,6 +276,29 @@ describe('TestedVersionTests', () => {
     assert.ok(out.includes('Original app: ChatGPT 27.1.1'));
     assert.ok(out.includes('Warning: ChatGPT 27.1.1 with CUA'));
     assert.ok(out.includes('LCU will still use it'));
+  });
+
+  it('test_status_and_doctor_name_the_diagnostic_log_and_its_policy', async (t) => {
+    makeRelease();
+    record([entry()]);
+    const logDir = join(root, 'diagnostics');
+    await withEnv({ LCU_LOG_DIR: logDir }, async () => {
+      const text = await runStatus(t, ['--json']);
+      if (text === null) return;
+      assert.deepEqual(JSON.parse(text).diagnostic_log,
+        { dir: logDir, enabled: true, retention_days: 7, max_total_mb: 20, max_file_mb: 2 });
+      assert.ok((await runStatus(t, [])).includes(`Diagnostic log: ${logDir}`));
+      const result = await doctorRun(t, { version: PAIR.app_version, runtime: PAIR.runtime });
+      if (!result) return;
+      assert.ok(result[1].includes(`Diagnostic log: ${logDir} (metadata only; kept 7 days, at most 20 MB in total ` +
+        'and 2 MB per file'), result[1]);
+    }, { clear: false });
+    await withEnv({ LCU_DIAGNOSTIC_LOG: '0' }, async () => {
+      const text = await runStatus(t, ['--json']);
+      if (text === null) return;
+      assert.equal(JSON.parse(text).diagnostic_log.enabled, false);
+      assert.ok((await runStatus(t, [])).includes('Diagnostic log: off'));
+    }, { clear: false });
   });
 
   it('test_status_and_doctor_report_an_app_changed_since_install (doctor half)', async (t) => {

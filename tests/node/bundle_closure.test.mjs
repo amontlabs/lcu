@@ -33,7 +33,8 @@ const PLATFORMS = {
   },
   windows: {
     entries: ['lcu/entry.mjs', 'scripts/install_windows.mjs', 'scripts/windows_launcher.mjs',
-      'lcu/windows_host_entry.cjs', 'lcu/windows_lifetime_host.cjs', 'lcu/windows_sky_service.mjs'],
+      'lcu/windows_host_entry.cjs', 'lcu/windows_host_analyze.cjs', 'lcu/windows_lifetime_host.cjs',
+      'lcu/windows_sky_service.mjs'],
     lazy: ['lcu/session.mjs'],
   },
 };

@@ -3,13 +3,16 @@
 
 Install-time bridge only (stdlib Python 3.12 or later, as before: bundle.verify uses hashlib.file_digest and the
 redirect checks use Path.is_junction). The registered Store app cannot be executed in place, so
-this script makes the intact private copy of it, validates the copy completely, publishes the generation
+this script first checks the app's native-pipe host layout with a temporary copy of only its node.exe (which runs
+`scripts/install_windows.mjs --check-host`, a read-only analysis), then, holding the prefix lock, makes the intact
+private copy of it, validates the copy completely, publishes the generation
 atomically and then hands over to that copy's own node.exe, which runs scripts/install_windows.mjs. Nothing else
 of the installation happens in Python. It ships as scripts/install_windows.py (the name `lcu update` of an
 older release runs).
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -20,6 +23,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import uuid
 import xml.etree.ElementTree as ET
 from typing import Mapping
@@ -320,6 +324,100 @@ def _validated_copy(app, selected):
         expected_inventory=selected.inventory)
 
 
+@contextlib.contextmanager
+def _install_lock(prefix):
+    """Hold an exclusive, process-lifetime lock on the prefix while installing."""
+    path = prefix / '.lcu-install.lock'
+    if _redirected(path):
+        raise ValueError(f'Refusing a redirected Windows install lock: {path}')
+    with open(path, 'ab') as handle:
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ValueError('Another LCU install is already running for this prefix; '
+                             'wait for it to finish and run this install again.') from exc
+        yield
+
+
+def _generation_in_use(prefix, generation):
+    """True when any release under the prefix records this app generation."""
+    releases = prefix / 'releases'
+    if not releases.is_dir():
+        return False
+    for descriptor in releases.glob('*/installation.json'):
+        try:
+            recorded = json.loads(descriptor.read_text())['app']
+            if Path(recorded).parent == generation:
+                return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return True  # unreadable or malformed record: assume it may use the generation
+    return False
+
+
+class InstallRun(contextlib.ExitStack):
+    """One install of a prefix: holds the prefix lock (entered by prepare_generation) until the Node installer has
+    finished, and remembers an app generation this run created so a failure can remove it again."""
+
+    def __init__(self):
+        super().__init__()
+        self.prefix = None
+        self.created = None
+
+    def discard_new_generation(self):
+        # Remove only a copy this run created; a generation that already existed
+        # (or that a committed release uses) is never touched.
+        if self.created is not None and not _generation_in_use(self.prefix, self.created):
+            shutil.rmtree(_copy_path(self.created), ignore_errors=True)
+
+
+def plan_original_host(app, *, node):
+    """The read-only native-pipe host layout check (lcu/windows_host.mjs plan_original_host), run by `node`
+    through the Node installer's --check-host mode. Raises ValueError with the layout error."""
+    command = [str(node), '--disable-warning=ExperimentalWarning', str(SOURCE / 'scripts/install_windows.mjs'),
+               '--check-host', str(app)]
+    try:
+        result = subprocess.run(command, capture_output=True, env=quarantined_environment(os.environ),
+                                timeout=900, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('Required Windows host layout is unavailable: the structural analyzer could not run '
+                         f'({exc.__class__.__name__})') from exc
+    try:
+        response = json.loads(result.stdout)
+    except ValueError:
+        response = None
+    if result.returncode != 0 or not isinstance(response, dict):
+        detail = result.stderr.decode('utf-8', 'replace').strip().splitlines()[:1]
+        raise ValueError('Required Windows host layout is unavailable: the layout check could not run' +
+                         (f' ({detail[0][:160]})' if detail else ''))
+    if response.get('ok') is not True:
+        raise ValueError(str(response.get('error') or 'Required Windows host layout is unavailable'))
+
+
+def _preflight_host(selected):
+    """Check the selected app's native-pipe host layout read-only, before anything is copied.
+
+    The protected Store directory refuses direct execution, so the structural
+    analyzer runs with a temporary copy of only the app's own node.exe; the
+    selected app itself is only read. Nothing from this check remains afterwards.
+    """
+    node = _component(selected.app, 'app/resources/cua_node/bin/node.exe')
+    if _redirected(node) or not node.is_file():
+        raise ValueError('The selected ChatGPT app has no usable app/resources/cua_node/bin/node.exe.')
+    with tempfile.TemporaryDirectory(prefix='lcu-host-check-', ignore_cleanup_errors=True) as scratch:
+        staged = Path(scratch) / 'node.exe'
+        shutil.copy2(_copy_path(node), _copy_path(staged))
+        try:
+            plan_original_host(selected.app, node=staged)
+        except ValueError as exc:
+            raise ValueError(f'{exc} (observed ChatGPT app {selected.version}, '
+                             f'runtime {selected.runtime_version}; nothing was installed)') from exc
+
+
 def checked_prefix(prefix):
     prefix = Path(prefix)
     if not prefix.is_absolute() or '..' in prefix.parts or len(prefix.parts) < 3:
@@ -337,9 +435,11 @@ def checked_prefix(prefix):
     return prefix
 
 
-def prepare_generation(prefix):
-    """The part of scripts/install_windows.py install() that precedes the release: select the registered Store app
-    and make (or reuse, after full validation) its intact private copy. Returns (generation, selected)."""
+def prepare_generation(prefix, run=None):
+    """The part of scripts/install_windows.py install() that precedes the release: select the registered Store app,
+    check its native-pipe host layout, and make (or reuse, after full validation) its intact private copy.
+    Returns (generation, selected). With `run` (an InstallRun), the prefix lock is taken into it before the
+    generation is touched and a generation this call creates is recorded there."""
     if platform.system() != 'Windows':
         raise ValueError('The Windows installer must run in Windows 11 x64.')
     if sys.version_info < (3, 12):
@@ -362,10 +462,18 @@ def prepare_generation(prefix):
     digest = inventory_sha256(inventory)
     if digest != selected.inventory_digest:
         raise ValueError('Selected Windows application inventory changed after validation.')
+    # Fail on an unrecognised host layout before the 2 GB copy or any prefix write.
+    print('LCU: Checking the original Windows native host layout...', file=sys.stderr, flush=True)
+    _preflight_host(selected)
     # Keep the registered MSIX intact. Its protected WindowsApps directory does
     # not permit direct execution, so run an unchanged private copy instead.
     prefix.mkdir(parents=True, exist_ok=True)
     (prefix / '.lcu-install').touch(exist_ok=True)
+    # One install at a time per prefix: a generation another run is creating or
+    # reusing must never be removed by this run's failure handling.
+    if run is not None:
+        run.enter_context(_install_lock(prefix))
+        run.prefix = prefix
     apps = prefix / 'apps'
     if _redirected(apps):
         raise ValueError(f'Refusing a redirected Windows app generation directory: {apps}')
@@ -396,6 +504,8 @@ def prepare_generation(prefix):
             (stage / 'inventory.json').write_text(json.dumps(
                 inventory, sort_keys=True, separators=(',', ':')) + '\n')
             os.replace(stage, generation)
+            if run is not None:
+                run.created = generation
         except BaseException:
             shutil.rmtree(_copy_path(stage), ignore_errors=True)
             raise
@@ -465,11 +575,21 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     validate_arguments(parser, args)
-    generation, _ = prepare_generation(args.prefix)
-    node = node_executable(generation)
-    command = [str(node), '--disable-warning=ExperimentalWarning', str(SOURCE / 'scripts/install_windows.mjs'),
-               '--app-generation', str(generation), '--legacy-python', sys.executable, *argv]
-    return subprocess.run(command, check=False, env=quarantined_environment(os.environ)).returncode
+    with InstallRun() as run:
+        generation, _ = prepare_generation(args.prefix, run)
+        node = node_executable(generation)
+        command = [str(node), '--disable-warning=ExperimentalWarning', str(SOURCE / 'scripts/install_windows.mjs'),
+                   '--app-generation', str(generation), '--legacy-python', sys.executable, *argv]
+        try:
+            status = subprocess.run(command, check=False, env=quarantined_environment(os.environ)).returncode
+        except BaseException:
+            run.discard_new_generation()
+            raise
+        if status != 0:
+            # The Node installer removed its own partial release; the app copy this run made goes too
+            # unless a committed release records it.
+            run.discard_new_generation()
+        return status
 
 
 if __name__ == '__main__':

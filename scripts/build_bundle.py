@@ -96,8 +96,9 @@ LCU_ONLY = {
     'linux': ('linux_sky_service.mjs', 'session.mjs'),
     'darwin': ('macos_host.mjs', 'macos_sky_service.mjs', 'session.mjs'),
     # macos_host.mjs: windows_host.mjs imports its process/line helpers. platforms.mjs: doctor.mjs imports it.
+    # windows_host_analyze.cjs: the structural host analyzer, run with the app's Node (#20).
     'windows': ('macos_host.mjs', 'windows.mjs', 'windows_host.mjs', 'windows_host_entry.cjs',
-                'windows_lifetime_host.cjs', 'windows_sky_service.mjs'),
+                'windows_host_analyze.cjs', 'windows_lifetime_host.cjs', 'windows_sky_service.mjs'),
 }
 LCU_OTHER_PLATFORMS = {name for names in LCU_ONLY.values() for name in names}
 SCRIPTS_COMMON = ('bundle_runtime.mjs', 'startup_env.mjs', 'install.mjs', 'installed_app.mjs')
@@ -123,6 +124,9 @@ def runtime_files(target, source=None):
             files.append(f'lcu/{path.name}')
     files += [f'lcu/compat/{path.name}' for path in sorted((source / 'lcu/compat').glob('*.mjs'))]
     files += [f'scripts/{name}' for name in (*SCRIPTS[target], *SCRIPTS_COMMON)]
+    if target == 'windows':
+        # The pinned acorn parser the analyzer uses, shipped as is (see docs/PROVENANCE.md).
+        files += ['lcu/vendor/acorn/acorn.js', 'lcu/vendor/acorn/LICENSE']
     files += ['bin/lcu.cmd'] if target == 'windows' else ['bin/lcu', 'bin/lcu-session']
     if target == 'linux':
         files.append('bin/lcu-codex-sandbox')
@@ -164,9 +168,19 @@ def smoke_test(release, target, node=None):
         raise ValueError(f'The archive failed its Node smoke test: {result.stderr.strip() or result.stdout.strip()}')
 
 
+def check_runtime_version():
+    """The installer checks bundle.json against scripts/bundle_runtime.mjs, so both copies must name one release."""
+    text = (SOURCE / 'scripts/bundle_runtime.mjs').read_text()
+    match = re.search(r"^export const VERSION = '([^']+)';$", text, re.M)
+    if match is None or match.group(1) != VERSION:
+        found = match.group(1) if match else 'none'
+        raise ValueError(f'scripts/bundle_runtime.mjs VERSION ({found}) must equal scripts/bundle.py VERSION ({VERSION}).')
+
+
 def build(output, package=None, *, target='linux', app=None):
     if package is not None:
         raise ValueError('Build-time --package is retired. Install the official app separately before LCU setup.')
+    check_runtime_version()
     # The Windows archive contains only platform-neutral LCU source and locked
     # JavaScript dependencies. Build it on a trusted development host; the
     # Windows installer validates the registered official MSIX in place.

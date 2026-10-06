@@ -12,7 +12,7 @@ import {
 import { arch as hostArch, platform as hostOs } from 'node:os';
 import { posix as path } from 'node:path';
 
-import { groupMembers as accountGroupMembers } from './compat/accounts.mjs';
+import { getpwuid, groupMembers as accountGroupMembers } from './compat/accounts.mjs';
 import { AclReaderUnavailableError, aclWritersUntrusted, posixAcl, posixAclPaths, posixAclTree } from './compat/acl.mjs';
 import { pyStrip, pySplitlines } from './compat/argparse.mjs';
 import { fromNodeError } from './compat/pyerr.mjs';
@@ -42,6 +42,45 @@ export const MAC_EXECUTABLES = [
   'Resources/cua_node/bin/node',
   'Resources/cua_node/bin/node_repl',
 ];
+
+// The signed helper binds its socket here (or at the path in this variable) and
+// refuses a path longer than the AF_UNIX sun_path limit. LCU cannot change that
+// in the helper; it can only detect it.
+export const MAC_SOCKET_ENV = 'SKY_CUA_SERVICE_NATIVE_PIPE_PATH';
+export const MAC_SOCKET_SUFFIX = `Library/Group Containers/${OPENAI_TEAM_ID}.${MAC_HELPER_ID}/IPC/computeruse.sock`;
+export const MAC_SOCKET_MAX_BYTES = 103;
+
+/**
+ * [path, overridden]: the socket path LCU checks for the signed Mac helper, and whether the env override set it.
+ *
+ * SKY_CUA_SERVICE_NATIVE_PIPE_PATH in the given environment wins when set (the helper's own
+ * environment is not visible to LCU); otherwise the path is
+ * under the account's real home folder, not $HOME.
+ */
+export function mac_socket_path(environ = null) {
+  const override = (environ === null ? process.env : environ)[MAC_SOCKET_ENV];
+  if (override) {
+    return [override, true];
+  }
+  // os.path.join(pwd.getpwuid(os.getuid()).pw_dir, MAC_SOCKET_SUFFIX): no normalisation
+  const home = internals.getpwuid(internals.getuid()).pw_dir;
+  return [home === '' || home.endsWith('/') ? home + MAC_SOCKET_SUFFIX : `${home}/${MAC_SOCKET_SUFFIX}`, false];
+}
+
+/** A message when the helper's socket path is too long to bind, else null. */
+export function mac_socket_path_problem(environ = null) {
+  const [socket, overridden] = mac_socket_path(environ);
+  const size = Buffer.byteLength(socket, 'utf8'); // len(os.fsencode(path))
+  if (size <= MAC_SOCKET_MAX_BYTES) {
+    return null;
+  }
+  const source = overridden ? `The path comes from ${MAC_SOCKET_ENV}.`
+    : 'The path comes from your home folder, so the ChatGPT app is affected too.';
+  return ("Computer Use cannot start for this macOS account: the ChatGPT helper's socket path is " +
+          `${size} bytes (macOS limit ${MAC_SOCKET_MAX_BYTES}): ${socket}. ${source} ` +
+          'LCU cannot change the signed helper. Use an account whose home folder path is short enough ' +
+          '(13 ASCII characters or fewer after /Users/).');
+}
 
 const S_IFMT = constants.S_IFMT;
 const S_IFLNK = constants.S_IFLNK;
@@ -114,6 +153,7 @@ export const internals = {
   run,
   getuid: () => process.getuid(),
   geteuid: () => process.geteuid(),
+  getpwuid: (uid) => getpwuid(uid), // pwd.getpwuid
   group_members: null, // set below
   posix_acl: null,
   platform: () => process.platform,

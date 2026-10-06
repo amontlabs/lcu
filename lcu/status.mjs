@@ -12,6 +12,7 @@ import { pathExpanduser, pathStr } from './compat/pathlib.mjs';
 import { fromNodeError, isOSError, pyStr } from './compat/pyerr.mjs';
 import { decode } from './compat/utf8.mjs';
 import { paths } from './runtime.mjs';
+import * as diagnostic_log from './diagnostic_log.mjs';
 import * as tested from './tested.mjs';
 import * as update from './update.mjs';
 import { load_setup_state, setup_state_path } from './setup.mjs';
@@ -111,6 +112,7 @@ export function collect(root) {
     setup: saved,
     pending: truthy(saved) ? get(saved, 'pending') : [],
     update: update.cached_notice(root),
+    diagnostic_log: diagnostic_log.status(),
   };
 }
 
@@ -158,4 +160,5 @@ export async function main(root, argv = null) {
     const line = update.status_line(root);
     print(line === null || line === undefined ? 'None' : line);
   }
+  print(diagnostic_log.summary());
 }

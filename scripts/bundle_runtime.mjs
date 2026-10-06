@@ -3,7 +3,7 @@
 // byte and is covered by tests/compat/test_hash.py.) Paths are absolute strings; inventory() returns a Map.
 import { architecture, inventory as hashInventory, verify as hashVerify } from '../lcu/compat/hash.mjs';
 
-export const VERSION = '0.9.4';
+export const VERSION = '0.9.6';
 
 export { architecture };
 

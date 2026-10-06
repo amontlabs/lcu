@@ -47,6 +47,8 @@ __lcu_print_help() {
        lcu browser install
        lcu browser status
        lcu apps [list|allow APP|revoke APP] [--json]   (macOS)
+       lcu origins [list [--session ID] [--json]]
+       lcu origins forget ORIGIN [--session ID | --all-sessions] [--allowed | --denied]
        lcu prune [--keep N] [--yes]
        lcu update [--check [--json]] [--yes]
        lcu doctor

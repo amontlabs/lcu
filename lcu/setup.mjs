@@ -49,6 +49,7 @@ import * as claude_mod_mod from './claude_mod.mjs';
 import * as claude_visibility_mod from './claude_visibility.mjs';
 import * as codex_hooks_mod from './codex_hooks.mjs';
 import * as harness_setup_mod from './harness_setup.mjs';
+import * as platforms_mod from './platforms.mjs';
 import * as runtime_mod from './runtime.mjs';
 import * as tested_mod from './tested.mjs';
 
@@ -563,6 +564,7 @@ export const impl = {
   report_tested_pair: (...a) => tested_mod.report(...a),
   browser_install: (...a) => browser_mod.install(...a),
   app_paths: (...a) => runtime_mod.paths(...a),
+  mac_socket_path_problem: (...a) => platforms_mod.mac_socket_path_problem(...a),
   release_dir: () => nodePath.dirname(nodePath.dirname(fs.realpathSync(fileURLToPath(import.meta.url)))),
 };
 
@@ -1992,6 +1994,10 @@ async function main_body(argv) {
       lock.release();
     }
     print('Configuration prepared. Restart/reconnect the selected agent, then ask it to use LCU to inspect the desktop.');
+    if (platform() === 'darwin') {
+      const problem = impl.mac_socket_path_problem();
+      if (problem) print(`Warning: ${problem}`);
+    }
     if (args.get('chrome')) {
       try {
         const browser_status = await impl.run([...direct_runtime, 'browser', 'status'], { capture_output: true, text: true, timeout: 20 });

@@ -622,10 +622,39 @@ export async function codex_needs_setup(home = null, env = null) {
   });
 }
 
+/** Refresh the Chrome relay `lcu browser install` set up earlier; never enables Chrome, never fails the update. */
+export async function refresh_chrome_relay(root) {
+  const command = `${stable_command(root)} browser install`;
+  try {
+    const browser = await import('./browser.mjs'); // `from . import browser` inside the try, as in Python
+    const [state, destination, displaced] = browser.refresh(root);
+    if (state === 'absent') return;
+    if (state === 'elsewhere') {
+      print('Chrome: the native-host manifest no longer points at the LCU relay, so it was left alone. '
+        + `To use Chrome through LCU again, run \`${command}\`.`);
+    } else if (state === 'root') {
+      print(`Chrome: the relay was not refreshed because the update ran as root. As the desktop account, run \`${command}\`.`);
+    } else {
+      print(`Refreshed the Chrome relay at ${strOf(destination)}.`);
+      if (state === 'changed') {
+        print('If the extension was already connected, restart Chrome or turn the ChatGPT extension off and on '
+          + "so it reconnects through LCU's relay.");
+      }
+      if (truthy(displaced)) {
+        print('Chrome: a native-host manifest points somewhere other than the LCU relay and was left alone '
+          + `(${strOf(displaced[0])}). To use Chrome through LCU again, run \`${command}\`.`);
+      }
+    }
+  } catch (exc) {
+    // `except Exception`: BaseExceptions (KeyboardInterrupt, SystemExit) pass through.
+    if (exc?.name === 'KeyboardInterrupt' || exc?.constructor?.name === 'PySystemExit') throw exc;
+    eprint(`lcu update: could not refresh the Chrome relay (${excStr(exc)}); run \`${command}\`.`);
+  }
+}
+
 /** Refresh what setup copied out of an earlier release; `lcu update` runs it from the new release. */
 export async function post_install(root, home = null) {
   const claude_mod = await import('./claude_mod.mjs');
-  const browser = await import('./browser.mjs');
   root = P(root);
   home = P(home || home_());
   const target = claude_mod.destination(home);
@@ -633,12 +662,12 @@ export async function post_install(root, home = null) {
     claude_mod.install(home, root);
     print(`Refreshed the Claude Code lcu-approve mod at ${target}.`);
   }
+  // 0.9.6 (#22): reinstall the relay an earlier `lcu browser install` set up. browser.refresh also rewrites this
+  // installation's Python-era relays to the Node launcher (BRIEF addendum G).
+  await refresh_chrome_relay(root);
   if (await codex_needs_setup(home)) {
     print(`Codex: run \`${stable_command(root)} setup --agent codex\` to add the LCU update-notice hook.`);
   }
-  // Browser relays copied outside the release (Chrome native-messaging launchers) still point at the previous
-  // release's runtime; the new browser module rewrites the ones LCU owns (BRIEF addendum G).
-  await browser.migrate_relays(root, home);
   // Windows harness registrations written by a Python release (or the interim direct-Node form) move to the
   // validating <prefix>\lcu.cmd (BRIEF addendum G); failures are reported, the install stays done.
   const { failures } = await migrate_windows_registrations(root, home);

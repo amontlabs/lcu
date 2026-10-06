@@ -240,6 +240,11 @@ class TarDifferentialTest(unittest.TestCase):
             self.assertEqual(py['name'], js['name'], f'{ident}: {py} {js}')
             self.assertEqual(self.normalize(py['message'], ident), self.normalize(js['message'], ident), ident)
         a, b = snapshot(dirs['py']), snapshot(dirs['js'])
+        # a symlink whose target lies inside the per-side tree (the prefilled "outside" directory) differs only by side
+        for side, snap in (('py', a), ('js', b)):
+            for entry in snap.values():
+                if entry[0] == 'symlink' and isinstance(entry[2], str):
+                    entry[2] = entry[2].replace(str(self.base / side), '<B>/SIDE')
         self.assertTrue(same_snapshot(a, b), f'{ident}: trees differ\npython={json.dumps(a, indent=1, sort_keys=True)}'
                                              f'\nnode={json.dumps(b, indent=1, sort_keys=True)}')
         return py

@@ -1,7 +1,7 @@
 # LCU (unreleased): Node runtime, no Python on Linux and macOS
 
 Draft release notes. The version is not bumped here. Everything below is intentional; the black-box differential
-(`tests/blackbox`, oracle = 0.9.4 at `tests/blackbox/BASE`) lists each difference as a reviewed entry in
+(`tests/blackbox`, oracle = the Python 0.9.6 release at `tests/blackbox/BASE`) lists each difference as a reviewed entry in
 `tests/blackbox/deviations.json` with its justification, and every other scenario is byte-identical.
 
 ## What changed
@@ -17,7 +17,7 @@ No Node ships in the archives, nothing is compiled, and the app is still never c
 - **Linux system packages gain `acl`** (`getfacl`), used to refuse an app directory that carries a POSIX ACL LCU cannot
   read. With `--skip-system` install it yourself. If `getfacl` is missing, LCU falls back to a small
   `/usr/bin/python3` xattr reader (python3 stays a Linux system package for that and the X-Resource helper); if
-  neither works it refuses only entries that actually have an ACL.
+  neither works, the app check refuses with `cannot inspect POSIX ACLs` rather than assume there are none.
 
 ## Launch shims and the pre-Node check
 
@@ -29,8 +29,9 @@ Node by absolute path (never one found on `PATH`) after a check that runs before
   of trusted members is refused, and root refuses an app that another account can replace (run the installer as that
   account, or make the app root-owned).
 - Both: the Node must be the bundled Node of the selected app (the installer's `--existing-app` or default app, the
-  release's `app` link for the launchers): its real path is `<app>/resources/cua_node/bin/node` (Linux) or
-  `<app>/Contents/Resources/cua_node/bin/node` (macOS) of that app's real path.
+  release's `app` link for the launchers): the app's own `resources/cua_node/bin/node` (Linux) or
+  `Contents/Resources/cua_node/bin/node` (macOS) must resolve to it, and its real path must lie inside the app's real
+  path. Links inside the app are allowed, links leaving it are refused, as in 0.9.x.
 - macOS, in 0.9.4's order and with its messages: the selected app is a `ChatGPT.app` directory (for `--existing-app`
   not itself a link), its `Contents/Info.plist` names `com.openai.codex` and the Sky helper's names
   `com.openai.sky.CUAService`; then `codesign --verify --strict` must accept the Node as signed by OpenAI's team
@@ -106,7 +107,9 @@ Node by absolute path (never one found on `PATH`) after a check that runs before
   runs the Node dispatcher; registrations run it through `cmd.exe`. Windows has fixture tests only, no live claim.
 - The Chrome native-host relay written by `lcu browser install` is a `/bin/sh` launcher that runs the stable `lcu`
   (`lcu update --post-install` migrates relays LCU wrote earlier; foreign or unmarked files are left alone).
-  `windows_launcher.py` is kept as a compatibility trampoline.
+  Its host directory holds a `.lcu-relay-implementation` stamp (a digest of the release's relay code) instead of a
+  copied relay script, so `lcu browser status` and the post-update refresh still notice when the relay code changed
+  and print the reconnect hint. `windows_launcher.py` is kept as a compatibility trampoline.
 
 ## Output and diagnostics
 
@@ -161,4 +164,5 @@ Node by absolute path (never one found on `PATH`) after a check that runs before
 - The Python white-box unit tests of the removed modules are replaced by `tests/node/*.test.mjs`
   (`tests/node/run-all.sh` runs them on the Node on `PATH` and on the app's Node). Differential tests against the Python
   implementation load it from the frozen oracle tree (`tests/blackbox/oracle.py`, `LCU_ORACLE_ROOT`).
-- `scripts/bundle_runtime.mjs` repeats `VERSION` of `scripts/bundle.py`; bump both (a test checks they match).
+- `scripts/bundle_runtime.mjs` repeats `VERSION` of `scripts/bundle.py`; bump both (a test checks they match and
+  `scripts/build_bundle.py` refuses to build when they differ).

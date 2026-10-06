@@ -15,6 +15,7 @@ import { after, afterEach, beforeEach, describe, test } from 'node:test';
 
 import { io as argparseIo, PySystemExit, types } from '../../lcu/compat/argparse.mjs';
 import * as setup from '../../lcu/setup.mjs';
+import * as platforms from '../../lcu/platforms.mjs';
 import * as tested from '../../lcu/tested.mjs';
 import { ALIASES, CLIENTS } from '../../lcu/setup_clients.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
@@ -190,7 +191,7 @@ class Fixture {
 
   async runMain(argv = [], { agents = ALL, reconcile = false } = {}) {
     Object.assign(setup.impl, {
-      platform: 'linux',
+      platform: this.platform ?? 'linux', // test_setup_pending.py (0.9.6): getattr(self, 'platform', ...)
       installer_environment: () => {},
       installer_paths: () => {},
       configure: (...a) => this.configure(...a),
@@ -1737,6 +1738,69 @@ describe('review regressions (port-setup.md)', () => {
     await capture(() => setup.main(['--prefix', f.prefix, '--session', 'direct', '--yes', '--chrome']));
     assert.deepEqual(registered, ['C:\\Windows\\System32\\cmd.exe', '/d', '/c', path.join(f.prefix, 'lcu.cmd'), '--chrome']);
     assert.deepEqual(pinnedAtRegistration, { registrations: { 'codex|user|': path.join(f.prefix, 'apps/g1/node.exe') } });
+  });
+});
+
+// ------------------------------------------------------------------------------------------- 0.9.6 #15, setup side
+// tests/test_macos_socket_path.py SetupSocketTests: the end-of-setup warning for a macOS home folder too long for
+// the Sky helper's socket, through the real platforms.mac_socket_path_problem with the account home faked as
+// Python's patch('pwd.getpwuid') does (platforms.internals.getpwuid, U4's seam).
+const SOCKET_SUFFIX = '/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/IPC/computeruse.sock';
+const homeOfLength = (size) => `/Users/${'a'.repeat(size - SOCKET_SUFFIX.length - '/Users/'.length)}`;
+
+describe('SetupSocketTests (test_macos_socket_path.py, setup side)', () => {
+  const withHome = async (home, fn) => {
+    const savedGetpwuid = platforms.internals.getpwuid;
+    const savedEnv = process.env[platforms.MAC_SOCKET_ENV];
+    platforms.internals.getpwuid = () => ({ pw_dir: home });
+    delete process.env[platforms.MAC_SOCKET_ENV];
+    try {
+      return await fn();
+    } finally {
+      platforms.internals.getpwuid = savedGetpwuid;
+      if (savedEnv !== undefined) process.env[platforms.MAC_SOCKET_ENV] = savedEnv;
+    }
+  };
+  const runDarwin = (f, home) => withHome(home, () => {
+    f.platform = 'darwin';
+    return f.runMain(['--agent', 'codex'], { agents: ['codex'] });
+  });
+
+  test('too long home warns at the end without failing setup', async () => {
+    const f = new Fixture();
+    const [code, out, err] = await runDarwin(f, homeOfLength(104));
+    assert.equal(code, 0, err);
+    const warning = out.indexOf('Warning: Computer Use cannot start for this macOS account');
+    assert.ok(warning > out.indexOf('Configuration prepared.') && out.indexOf('Configuration prepared.') >= 0, out);
+    assert.deepEqual(f.registered[0].names, ['codex']);
+  });
+
+  test('export setup warns too', async () => {
+    const f = new Fixture();
+    f.platform = 'darwin';
+    setup.impl.export_bundle = async () => {};
+    try {
+      const [code, out, err] = await withHome(homeOfLength(104),
+        () => f.runMain(['--export', path.join(f.root, 'plugin')], { agents: [] }));
+      assert.equal(code, 0, err);
+      assert.ok(out.includes('Warning: Computer Use cannot start for this macOS account'), out);
+    } finally {
+      setup.impl.export_bundle = SAVED_IMPL.export_bundle;
+    }
+  });
+
+  test('short home prints no warning', async () => {
+    const f = new Fixture();
+    const [code, out, err] = await runDarwin(f, homeOfLength(103));
+    assert.equal(code, 0, err);
+    assert.ok(!out.includes('socket path'));
+  });
+
+  test('linux setup never warns', async () => {
+    const f = new Fixture();
+    const [code, out, err] = await withHome(homeOfLength(300), () => f.runMain(['--agent', 'codex'], { agents: ['codex'] }));
+    assert.equal(code, 0, err);
+    assert.ok(!out.includes('socket path'));
   });
 });
 

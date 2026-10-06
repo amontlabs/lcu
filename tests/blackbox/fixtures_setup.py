@@ -21,7 +21,7 @@ LINUX = ('linux',)
 
 def setup_scenario(name, **options):
     """Register a Linux, disposable-container scenario (setup resolves the account home through the OS)."""
-    options.setdefault('normalise', ('tmpdir-suffix',))
+    options.setdefault('normalise', ('tmpdir-suffix', 'diagnostic-log'))
     register = scenario(name, hosts=LINUX, account_home=True, **options)
 
     def wrap(fn):

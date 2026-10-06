@@ -8,10 +8,13 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
 
 import * as update from '../../lcu/update.mjs';
 import * as claude_mod from '../../lcu/claude_mod.mjs';
+import * as browser from '../../lcu/browser.mjs';
+import { io as argparseIo } from '../../lcu/compat/argparse.mjs';
 import { PlainOSError } from '../../lcu/compat/http.mjs';
 import { dumps, toPlain, ValueError } from '../../lcu/compat/pyjson.mjs';
 import { TimeoutExpired } from '../../lcu/compat/subprocess.mjs';
@@ -422,6 +425,149 @@ describe('update', () => {
     await update.post_install(root, home);
     assert.equal(out, '');
     assert.equal(fs.readFileSync(path.join(target, '.claude-plugin/plugin.json'), 'utf8'), '{"name": "someone-else"}');
+  });
+
+  // ---- 0.9.6 #22: the Chrome relay is refreshed after an update (test_update.py post_install_output cases), through
+  // the real browser.refresh. As in tests/node/browser.test.mjs RefreshTests, only the app resolution, the original
+  // installer (a stand-in that writes the manifests) and the OS identity are fixtures (browser.hooks).
+  describe('post_install Chrome relay refresh (real browser.refresh)', () => {
+    const STABLE = '/opt/lcu/current/bin/lcu';
+    const savedHooks = { ...browser.hooks };
+    const savedArgIo = { ...argparseIo };
+    let relay;
+    const support = () => path.join(home, 'Library/Application Support');
+    const manifestOf = (dir) => path.join(support(), dir, 'NativeMessagingHosts/com.openai.codexextension.json');
+    const taken = '{"name": "com.openai.codexextension", "path": "/Applications/ChatGPT.app/host"}';
+
+    beforeEach(() => {
+      relay = { calls: 0, fail: null };
+      const resources = path.join(root, 'app/Contents/Resources');
+      const source = path.join(resources, 'plugins/openai-bundled/plugins/chrome');
+      fs.mkdirSync(path.join(source, 'scripts'), { recursive: true });
+      fs.writeFileSync(path.join(source, 'scripts/installManifest.mjs'), 'fixture');
+      fs.mkdirSync(path.join(source, 'extension-host/macos/arm64'), { recursive: true });
+      fs.writeFileSync(path.join(source, 'extension-host/macos/arm64/ChatGPT for Chrome'), 'fixture');
+      for (const relative of browser._relay_implementation(ROOT)) {
+        fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true });
+        fs.copyFileSync(path.join(ROOT, relative), path.join(root, relative));
+      }
+      const env = { HOME: home, NODE_REPL_NODE_PATH: '/fake/node', CODEX_CLI_PATH: '/fake/codex', CUA_REPL_NODE_REPL_PATH: '/fake/repl' };
+      const installer = (command, options) => {
+        relay.calls += 1;
+        const plugin = path.dirname(path.dirname(fileURLToPath(command.at(-1))));
+        fs.writeFileSync(path.join(plugin, 'extension-host/macos/arm64/extension-host-config.json'), JSON.stringify({ nodePath: '/fake/node' }));
+        for (const dir of ['Google/Chrome', 'Microsoft Edge']) {
+          const file = path.join(options.env.HOME, 'Library/Application Support', dir, 'NativeMessagingHosts/com.openai.codexextension.json');
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(file, JSON.stringify({ name: 'com.openai.codexextension', path: path.join(plugin, 'extension-host/macos/arm64/ChatGPT for Chrome') }));
+        }
+        return { args: [], returncode: relay.fail ? 1 : 0, stdout: '', stderr: relay.fail ?? '' };
+      };
+      Object.assign(browser.hooks, {
+        system: () => 'Darwin', paths: () => [path.join(root, 'app'), resources, null, {}], environment: () => env,
+        capture_run: installer, stable_lcu: () => STABLE, geteuid: () => 501,
+      });
+      for (const key of ['XDG_CONFIG_HOME', 'CHROME_CONFIG_HOME', 'XDG_DATA_HOME', 'SUDO_USER']) delete process.env[key];
+      argparseIo.stdout = () => {}; // browser.install's own output is not under test here
+    });
+    afterEach(() => {
+      Object.assign(browser.hooks, savedHooks);
+      Object.assign(argparseIo, savedArgIo);
+    });
+
+    async function postInstallOutput() {
+      out = ''; err = '';
+      const status = await update.post_install(root, home);
+      assert.equal(status, 0);
+      return [out, err];
+    }
+    const install = () => { const destination = browser.install(root); relay.calls = 0; return destination; };
+
+    test('post_install refreshes an installed chrome relay and asks to reconnect when it changed', async () => {
+      const destination = install();
+      fs.writeFileSync(path.join(destination, 'lcu-native-host'), '#!/bin/sh\n# an older wrapper\n');
+      const [text, errors] = await postInstallOutput();
+      assert.ok(text.includes(`Refreshed the Chrome relay at ${destination}.`), text);
+      assert.ok(text.includes('restart Chrome or turn the ChatGPT extension off and on'));
+      assert.equal(errors, '');
+      assert.equal(relay.calls, 1);
+    });
+
+    test('post_install asks to reconnect when only the relay implementation changed (upstream #22 semantics)', async () => {
+      const destination = install();
+      fs.appendFileSync(path.join(root, 'lcu/native_host.mjs'), '\n// a newer relay\n');
+      let [text, errors] = await postInstallOutput();
+      assert.equal(errors, '');
+      assert.equal(text, `Refreshed the Chrome relay at ${destination}.\n`
+        + "If the extension was already connected, restart Chrome or turn the ChatGPT extension off and on so it reconnects through LCU's relay.\n");
+      [text, errors] = await postInstallOutput();
+      assert.equal(text, `Refreshed the Chrome relay at ${destination}.\n`); // recorded: unchanged the next time
+    });
+
+    test('post_install does not ask to reconnect when the relay is unchanged', async () => {
+      install();
+      const [text, errors] = await postInstallOutput();
+      assert.ok(text.includes('Refreshed the Chrome relay at'));
+      assert.ok(!text.includes('Chrome or'));
+      assert.equal(errors, '');
+    });
+
+    test('post_install reports a displaced chrome manifest beside a refresh', async () => {
+      install();
+      fs.writeFileSync(manifestOf('Google/Chrome'), taken);
+      const [text] = await postInstallOutput();
+      assert.ok(text.includes('Refreshed the Chrome relay at'));
+      assert.ok(text.includes(manifestOf('Google/Chrome')));
+      assert.ok(text.includes('left alone'));
+      assert.ok(text.includes('browser install'));
+    });
+
+    test('post_install is silent about chrome when it was never set up', async () => {
+      assert.deepEqual(await postInstallOutput(), ['', '']);
+      assert.equal(relay.calls, 0);
+    });
+
+    test('post_install reports a manifest that points elsewhere', async () => {
+      install();
+      fs.writeFileSync(manifestOf('Google/Chrome'), taken);
+      fs.unlinkSync(manifestOf('Microsoft Edge'));
+      const [text] = await postInstallOutput();
+      assert.ok(text.includes('left alone'));
+      assert.ok(text.includes('browser install'));
+      assert.ok(!text.includes('Refreshed the Chrome relay'));
+      assert.equal(fs.readFileSync(manifestOf('Google/Chrome'), 'utf8'), taken);
+    });
+
+    test('post_install tells root to run browser install as the desktop account', async () => {
+      install();
+      browser.hooks.geteuid = () => 0;
+      const [text] = await postInstallOutput();
+      assert.ok(text.includes('ran as root'));
+      assert.ok(text.includes('browser install'));
+      assert.equal(relay.calls, 0);
+    });
+
+    test('a failed relay refresh warns and does not fail the update', async () => {
+      install();
+      relay.fail = 'node crashed';
+      const [text, errors] = await postInstallOutput();
+      assert.equal(text, '');
+      assert.ok(errors.includes('could not refresh the Chrome relay'));
+      assert.ok(errors.includes('installer failed'), errors);
+      assert.ok(errors.includes('browser install'));
+      assert.ok(errors.startsWith('lcu update: could not refresh the Chrome relay (') && errors.endsWith(
+        `); run \`${path.join(path.dirname(path.dirname(root)), 'current/bin/lcu')} browser install\`.\n`), errors);
+    });
+
+    test('post_install without a relay on disk touches no browser files', async () => {
+      out = '';
+      assert.equal(await update.post_install(root, home), 0);
+      assert.equal(relay.calls, 0);
+      assert.equal(out, '');
+      assert.equal(fs.existsSync(path.join(home, '.local/share/lcu')), false);
+      assert.equal(fs.existsSync(path.join(home, 'Library/Application Support/lcu')), false);
+      assert.equal(fs.existsSync(path.join(home, 'local/lcu')), false);
+    });
   });
 
   test('codex hint only when registered without notice hook', async () => {

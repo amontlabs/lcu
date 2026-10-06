@@ -92,7 +92,8 @@ class ClaudePluginHookTests(unittest.TestCase):
         for directory in (self.home, self.record, self.assets, self.scratch):
             directory.mkdir()
         self.app = root / 'ChatGPT.app'
-        self.app.mkdir()
+        # The Node-era installer runs on the app's bundled Node, which the hook checks before downloading.
+        executable(self.app / 'Contents/Resources/cua_node/bin/node', '#!/bin/sh\nexit 0\n')
         self.state = root / 'data'
         self.prefix = self.home / '.local/share/lcu'
         self.lcu = self.prefix / 'current/bin/lcu'
@@ -171,7 +172,7 @@ class ClaudePluginHookTests(unittest.TestCase):
 
     def test_a_tilde_app_path_is_expanded(self):
         app = self.home / 'Applications/ChatGPT.app'
-        app.mkdir(parents=True)
+        executable(app / 'Contents/Resources/cua_node/bin/node', '#!/bin/sh\nexit 0\n')  # checked before download
         self.assertIn('was installed and registered', self.run_hook(LCU_APP='~/Applications/ChatGPT.app'))
         self.assertEqual(self.recorded('install.args'),
                          [f'--prefix {self.prefix} --existing-app {app} --runtime-only'])
@@ -223,21 +224,28 @@ class ClaudePluginHookTests(unittest.TestCase):
         self.assertIn('official ChatGPT desktop app', message)
         self.assertEqual(self.recorded('curl.calls'), [])
 
-    def test_a_missing_python_is_reported_before_any_download(self):
+    # Replaces test_a_missing_python_is_reported_before_any_download: the installer no longer needs Python
+    # (it runs on the selected app's bundled Node), so the hook's pre-download prerequisite is that Node.
+    def test_an_app_without_its_bundled_node_is_reported_before_any_download(self):
+        (self.app / 'Contents/Resources/cua_node/bin/node').unlink()
+        message = self.run_hook()
+        self.assertIn('has no usable bundled Node', message)
+        self.assertIn('https://chatgpt.com/download/', message)
+        self.assertEqual(self.recorded('curl.calls'), [])
+        self.assertFalse(self.lcu.exists())
+
+    def test_no_python_is_needed_to_install(self):
         tools = Path(self.temporary.name) / 'tools'
         tools.mkdir()
-        for name in ('cat', 'mkdir', 'rmdir', 'rm', 'find', 'tr', 'sed'):
-            (tools / name).symlink_to(shutil.which(name))
-        for name in ('curl', 'uname'):
+        for name in ('cat', 'cp', 'mkdir', 'rmdir', 'rm', 'find', 'tr', 'sed', 'awk', 'grep', 'tar', 'shasum',
+                     'mktemp', 'tail', 'gzip', 'perl'):
+            if shutil.which(name):
+                (tools / name).symlink_to(shutil.which(name))
+        for name in ('curl', 'uname', 'plutil'):
             shutil.copy2(self.shims / name, tools / name)
-        probe = 'import sys; sys.exit(sys.version_info < (3, 12))'
-        for directory in ('/opt/homebrew/bin', '/usr/local/bin'):
-            for name in ('python3.14', 'python3.13', 'python3.12', 'python3'):
-                candidate = Path(directory) / name
-                if candidate.exists() and not subprocess.run([str(candidate), '-c', probe]).returncode:
-                    self.skipTest(f'{candidate} qualifies and the hook always searches {directory}')
-        self.assertIn('Python 3.12 or newer', self.run_hook(path=str(tools)))
-        self.assertEqual(self.recorded('curl.calls'), [])
+        (tools / 'python3').symlink_to(sys.executable)  # only the test's plutil stand-in uses it
+        message = self.run_hook(path=str(tools))
+        self.assertIn(f'{VERSION} was installed and registered', message)
 
     def test_installer_failure_is_reported_as_valid_json_and_leaves_no_registration(self):
         message = self.run_hook(FAKE_INSTALL_FAILS='1')

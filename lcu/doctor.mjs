@@ -17,10 +17,11 @@ import { mkdtemp } from './compat/tempfile.mjs';
 import { decode } from './compat/utf8.mjs';
 import { posix as path } from 'node:path';
 
-import { MAC_HELPER } from './platforms.mjs';
+import { MAC_HELPER, mac_socket_path_problem } from './platforms.mjs';
 import { unshimmed_env } from './sandbox_shim.mjs';
 import { changed_since_install, report as report_tested_pair } from './tested.mjs';
 import { status_line } from './update.mjs';
+import { summary as diagnostic_log_summary } from './diagnostic_log.mjs';
 import { environment, paths } from './runtime.mjs';
 import { attribute_error_get } from './compat/pystr.mjs';
 
@@ -200,6 +201,8 @@ export const internals = {
   open_settings: null, // _open_settings
   linux_sandbox_works: null,
   mac_instructions: null,
+  sys_platform: () => process.platform, // sys.platform
+  mac_socket_path_problem: () => mac_socket_path_problem(), // lcu.platforms.mac_socket_path_problem
 };
 
 const print = (text = '') => internals.write(text + '\n');
@@ -532,6 +535,16 @@ export async function main(root, argv = null, { resolved = null, env = null } = 
   const update_line = status_line(root);
   if (update_line) {
     print(update_line);
+  }
+  print(diagnostic_log_summary());
+  // (U3: the diagnostic-log summary line is printed here, before the macOS socket check.)
+  if (target === 'mac' && internals.sys_platform() === 'darwin') {
+    // The helper runs on this host; a test or tool inspecting a macOS install elsewhere has no home to check.
+    const problem = internals.mac_socket_path_problem();
+    if (problem) {
+      print(problem);
+      return 2;
+    }
   }
   if (target === 'linux') {
     print_linux_sandbox_status(env);

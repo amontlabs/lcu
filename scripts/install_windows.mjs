@@ -49,6 +49,7 @@ export const internals = {
   linesep: () => (process.platform === 'win32' ? '\r\n' : '\n'),
   windows: windowsModule,
   materialize_original_host: (...args) => windowsHostModule.materialize_original_host(...args),
+  plan_original_host: (...args) => windowsHostModule.plan_original_host(...args),
   paths: (...args) => runtimeModule.paths(...args),
   run: runProcess,
   execPath: () => process.execPath,
@@ -313,17 +314,21 @@ export function install(prefix, { app_generation = null, legacy_python = null } 
     throw new ValueError('Run scripts/install_windows.py: it prepares the private copy of the Windows application.');
   }
   const { generation, selected, digest } = load_generation(prefix, app_generation);
-  const releases = path.join(prefix, 'releases');
-  if (_redirected(releases)) {
-    throw new ValueError(`Refusing a redirected Windows release directory: ${releases}`);
-  }
-  mkdirSync(releases, { recursive: true });
-  const release = path.join(releases, `${VERSION}-${randomUUID().replaceAll('-', '').slice(0, 12)}`);
+  let release = null;
   const previous_launchers = new Map();
   const replaced_launchers = [];
   let temporary = null;
+  let committed = false;
   const app = path.join(generation, 'app');
+  // Everything from here on is inside the cleanup boundary, including the
+  // release directory checks, so a failure never leaves a partial release behind.
   try {
+    const releases = path.join(prefix, 'releases');
+    if (_redirected(releases)) {
+      throw new ValueError(`Refusing a redirected Windows release directory: ${releases}`);
+    }
+    mkdirSync(releases, { recursive: true });
+    release = path.join(releases, `${VERSION}-${randomUUID().replaceAll('-', '').slice(0, 12)}`);
     copytree(internals.SOURCE, release);
     internals.verify(release, arch, 'windows');
     internals.materialize_original_host(app, path.join(release, 'lcu-host'));
@@ -358,14 +363,19 @@ export function install(prefix, { app_generation = null, legacy_python = null } 
     temporary = path.join(prefix, `.current-${randomUUID().replaceAll('-', '')}.json`);
     write_text(temporary, `${dumps({ release: path.basename(release) })}\n`);
     internals.replace(temporary, path.join(prefix, 'current.json'));
+    committed = true;
   } catch (error) {
-    if (temporary !== null) rmSync(temporary, { force: true });
-    for (const file of [...replaced_launchers].reverse()) {
-      const content = previous_launchers.get(file);
-      if (content === null) rmSync(file, { force: true });
-      else internals.atomic_bytes(file, content);
+    if (committed) throw error;
+    try {
+      if (temporary !== null) rmSync(temporary, { force: true });
+      for (const file of [...replaced_launchers].reverse()) {
+        const content = previous_launchers.get(file);
+        if (content === null) rmSync(file, { force: true });
+        else internals.atomic_bytes(file, content);
+      }
+    } finally {
+      if (release !== null) rmSync(_copy_path(release), { recursive: true, force: true });
     }
-    rmSync(_copy_path(release), { recursive: true, force: true });
     throw error;
   }
   return release;
@@ -393,9 +403,30 @@ export function build_parser() {
 const truthy = (value) => value !== null && value !== undefined && value !== false && value !== ''
   && !(Array.isArray(value) && value.length === 0);
 
+/**
+ * `--check-host APP`: the bridge's read-only native-pipe host layout check before the private copy
+ * (scripts/install_windows.py _preflight_host). It runs with a temporary copy of the selected app's node.exe, which
+ * also runs the structural analyzer. Prints {"ok": true} or {"ok": false, "error": "<layout error>"}.
+ */
+export function check_host(app) {
+  try {
+    internals.plan_original_host(app, { node: internals.execPath() });
+  } catch (error) {
+    if (!(error instanceof ValueError)) throw error;
+    io.stdout(`${dumps(new Map([['ok', false], ['error', error.message]]))}\n`);
+    return;
+  }
+  io.stdout(`${dumps(new Map([['ok', true]]))}\n`);
+}
+
 export function main(argv = null) {
+  argv = argv ?? process.argv.slice(2);
+  if (argv.length === 2 && argv[0] === '--check-host') {
+    check_host(argv[1]);
+    return;
+  }
   const parser = build_parser();
-  const args = parser.parse_args(argv ?? process.argv.slice(2));
+  const args = parser.parse_args(argv);
   const g = (key) => args.get(key);
   if (g('runtime_only') && (truthy(g('agent')) || g('chrome') || g('audio') || g('no_chrome')
       || g('no_audio') || g('project') !== null || g('scope') !== 'user')) {

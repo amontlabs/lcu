@@ -12,13 +12,15 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { machine as osMachine } from 'node:os';
+import { win32 } from 'node:path';
 
 import { run as captureRun } from './capture.mjs';
 import { ArgumentParser, io, PySystemExit, pyStrip, types } from './compat/argparse.mjs';
 import { sha256File } from './compat/hash.mjs';
 import { acquireSync } from './compat/lock.mjs';
 import { flavour, IDENTITY } from './compat/flavour.mjs';
-import { expanduser, pathExpanduser } from './compat/pathlib.mjs';
+import { getpwnam, PyKeyError } from './compat/accounts.mjs';
+import { expanduser, normpath, pathExpanduser } from './compat/pathlib.mjs';
 import { winPathStr } from './compat/winpath.mjs';
 import { dumps, isDict, loads, ValueError } from './compat/pyjson.mjs';
 import { quote } from './compat/shlex.mjs';
@@ -53,6 +55,9 @@ export const hooks = {
   _write_stamp: (destination, digest) => _write_stamp(destination, digest),
   stable_lcu: (root, system) => _stable_lcu(root, system),
   acquire: (path) => acquireSync(F.native(path)),
+  geteuid: () => (typeof process.geteuid === 'function' ? process.geteuid() : null),
+  getpwnam: (name) => getpwnam(name),
+  install: (root, directory) => install(root, directory),
   // pathlib follows the host OS (PureWindowsPath on Windows). Tests select the Windows flavour on a POSIX host and
   // map its drive to a temporary directory (compat/flavour.mjs); production never changes these.
   windows_paths: () => process.platform === 'win32',
@@ -369,13 +374,53 @@ function stageFile(directory, target, bytes, mode) {
   }
 }
 
-/** Write the relay launcher into `destination`; returns its path. */
-export function _publish_relay(root, destination, system) {
-  if (!isFile(join(root, 'lcu/native_host.mjs'))) {
-    throw new ValueError('The LCU Chrome native-host relay is missing from this release.');
+/**
+ * The release files the relay process runs: lcu/native_host.mjs and its static import closure inside the release.
+ * Their digest is recorded beside the launcher (_RELAY_STAMP) so `refresh` can tell that the implementation an
+ * already-connected extension is using changed, as Python saw it in its copied relay script.
+ */
+export const RELAY_ENTRY = 'lcu/native_host.mjs';
+export const _RELAY_STAMP = '.lcu-relay-implementation';
+const IMPORT = /^\s*(?:import|export)\s[^'"]*?from\s*['"](\.{1,2}\/[^'"]+)['"]|^\s*import\s*['"](\.{1,2}\/[^'"]+)['"]/gm;
+
+/** Release-relative paths of the relay implementation, sorted; ValueError when any of them is missing. */
+export function _relay_implementation(root) {
+  const seen = new Set();
+  const pending = [RELAY_ENTRY];
+  while (pending.length) {
+    const relative = pending.pop();
+    if (seen.has(relative)) continue;
+    const path = join(root, relative);
+    if (!isFile(path)) throw new ValueError('The LCU Chrome native-host relay is missing from this release.');
+    seen.add(relative);
+    for (const match of readFileSync(path, 'utf8').matchAll(IMPORT)) {
+      const spec = match[1] ?? match[2];
+      const parts = relative.split('/').slice(0, -1);
+      for (const piece of spec.split('/')) {
+        if (piece === '..') parts.pop();
+        else if (piece !== '.') parts.push(piece);
+      }
+      pending.push(parts.join('/'));
+    }
   }
+  return [...seen].sort();
+}
+
+/** sha256 identity of this release's relay implementation; ValueError when any of its files is missing. */
+export function _relay_implementation_digest(root) {
+  const digest = createHash('sha256');
+  for (const relative of _relay_implementation(root)) {
+    digest.update(Buffer.from(`F ${relative} ${sha256File(F.native(join(root, relative)))}\0`, 'utf8'));
+  }
+  return digest.digest('hex');
+}
+
+/** Write the relay launcher and the implementation stamp into `destination`; returns the launcher's path. */
+export function _publish_relay(root, destination, system) {
+  const implementation = _relay_implementation_digest(root);
   const relay = join(destination, relayName(system));
   stageFile(destination, relay, _relay_launcher(hooks.stable_lcu(root, system), destination, system), 0o700);
+  stageFile(destination, join(destination, _RELAY_STAMP), Buffer.from(textOut(`${implementation}\n`), 'utf8'), 0o600);
   if (system === 'Windows') unlinkMissingOk(join(destination, 'lcu-native-host.py')); // Python-era relay copy
   return relay;
 }
@@ -386,11 +431,18 @@ function dataDirectory(env, system, home) {
   return pathStr(env.XDG_DATA_HOME ?? join(home, '.local/share'));
 }
 
+/** Where this account keeps LCU's private browser host copies. */
+export function _data_root(system, env = null) {
+  env = env ?? process.env;
+  return join(dataDirectory(env, system, homeOf(env, system)), 'lcu/browser');
+}
+
 function selectedApp(root, system) {
   return system === 'Windows' ? hooks.paths(root)[0] : resolve(join(root, 'app'));
 }
 
-export function install(root, directory = null) {
+/** [system, destination, selected_app] of the private host copy `lcu browser install` keeps for `root`. */
+export function _host_location(root, directory = null, env = null) {
   root = pathStr(root);
   const system = hooks.system();
   if (!['Linux', 'Darwin', 'Windows'].includes(system)) {
@@ -398,19 +450,24 @@ export function install(root, directory = null) {
   }
   // The upstream installer writes its host configuration beside the executable.
   // Keep the sealed release immutable; give this account a private host copy.
-  const home = homeOf(process.env, system);
-  const data = dataDirectory(process.env, system, home);
   const selected = selectedApp(root, system);
   const identity = createHash('sha256').update(String(selected), 'utf8').digest('hex').slice(0, 16);
-  const destination = directory !== null && directory !== undefined
-    ? F.absolute(F.windows ? winPathStr(String(directory)) : pathExpanduser(String(directory))) : join(data, 'lcu/browser', identity);
+  const destination = directory !== null && directory !== undefined && directory !== ''
+    ? F.absolute(F.windows ? winPathStr(String(directory)) : pathExpanduser(String(directory)))
+    : join(_data_root(system, env), identity);
+  return [system, destination, selected];
+}
+
+export function install(root, directory = null) {
+  root = pathStr(root);
+  const [system, destination, selected] = _host_location(root, directory);
   return _destination_lock(destination, () => _install_locked(root, system, destination, selected));
 }
 
 /** PurePath.is_relative_to */
 const isRelativeTo = (path, base) => F.isRelativeTo(path, base);
 
-export function _install_locked(root, system, destination, selected_app) {
+export function _install_locked(root, system, destination, selected_app, env_overrides = null) {
   const marker = join(destination, '.lcu-browser-host');
   const expected = `${selected_app}\n`;
   if (isSymlink(destination)) throw new ValueError('The browser host directory must not be a symlink.');
@@ -422,6 +479,10 @@ export function _install_locked(root, system, destination, selected_app) {
   const selected = hooks.paths(root);
   // The persisted Codex path is the real executable, not the sandbox shim.
   const env = unshimmed_env(hooks.environment(root, selected));
+  for (const [key, value] of Object.entries(env_overrides ?? {})) {
+    if (value === null) delete env[key];
+    else env[key] = value;
+  }
   // Runtime selection returns the original resource tree. Linux stores it
   // under app/resources; macOS stores it under app/Contents/Resources.
   const source = join(selected[1], 'plugins/openai-bundled/plugins/chrome');
@@ -488,13 +549,312 @@ export function _install_locked(root, system, destination, selected_app) {
   }
   if (changed === 0) throw new ValueError('The original Chrome installer produced no manifest for the selected host.');
   if (system === 'Windows') {
-    const key = 'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.openai.codexextension';
-    const registered = hooks.run(['reg.exe', 'query', key, '/ve'], { capture: true, timeout: 20000 });
-    if (registered.returncode || !String(registered.stdout).includes([...manifestPaths][0])) {
+    if (!_windows_registered([...manifestPaths][0])) {
       throw new ValueError('The original Chrome installer did not register the selected manifest for this account.');
     }
   }
   return destination;
+}
+
+// Refresh after `lcu update` (upstream #22, lcu/browser.py refresh) ---------------------------------------------
+
+/** The directory of the launcher the regular manifest file `manifest_path` names, else null. */
+function _launcher_dir(manifest_path) {
+  try {
+    if (isSymlink(manifest_path) || !isFile(manifest_path)) return null;
+    return parentOf(pathStr(pyGet(loads(readText(manifest_path)), 'path', '')));
+  } catch (error) {
+    // (OSError, ValueError, AttributeError)
+    if (error instanceof ValueError || error?.name === 'AttributeError' || typeof error?.code === 'string') return null;
+    throw error;
+  }
+}
+
+const keyOf = (path) => F.key(path);
+const inPaths = (path, list) => list.some((item) => F.same(item, path));
+
+function _points_into(manifest_path, directories) {
+  const directory = _launcher_dir(manifest_path);
+  return directory !== null && inPaths(directory, directories);
+}
+
+function _marker_beside(manifest_path) {
+  const directory = _launcher_dir(manifest_path);
+  return directory !== null && isFile(join(directory, '.lcu-browser-host'));
+}
+
+/** The bytes of `path`, null when it does not exist. Any other failure propagates. */
+function _read_or_none(path) {
+  try {
+    return readFileSync(path);
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+    throw error;
+  }
+}
+
+/** [bytes, permission bits] of `path`, null when it does not exist. */
+function _file_state(path) {
+  const data = _read_or_none(path);
+  return data === null ? null : [data, statSync(path).mode & 0o7777];
+}
+
+const sameState = (a, b) => (a === null || b === null ? a === b : a[0].equals(b[0]) && a[1] === b[1]);
+
+function stageBytes(path, data, mode, prefix) {
+  const { fd, path: staged } = mkstemp({ prefix, dir: parentOf(path) });
+  try {
+    try {
+      writeAll(fd, data);
+    } finally {
+      closeSync(fd);
+    }
+    chmodSync(staged, mode);
+    _check_lock();
+    renameSync(staged, path);
+  } finally {
+    unlinkMissingOk(staged);
+  }
+}
+
+/** Put back what `path` held before, bytes and permissions (nothing, when `saved` is null). */
+function _restore(path, saved) {
+  if (isSymlink(path) || sameState(_file_state(path), saved)) return;
+  if (saved === null) {
+    unlinkMissingOk(path);
+    return;
+  }
+  stageBytes(path, saved[0], saved[1], '.lcu-manifest-');
+}
+
+/** The bytes Chrome and the extension depend on, to tell whether a refresh changed anything. */
+function _relay_snapshot(destination, system, manifest_paths) {
+  const launcher = relayName(system);
+  // The original installer also writes the host's runtime paths beside its binary.
+  const hostConfigs = [];
+  const hosts = join(destination, 'chrome/extension-host');
+  for (const os of listDirs(hosts)) {
+    for (const arch of listDirs(join(hosts, os))) {
+      const config = join(hosts, os, arch, 'extension-host-config.json');
+      if (lstatOrNull(config)) hostConfigs.push(config);
+    }
+  }
+  hostConfigs.sort(comparePaths);
+  const files = [join(destination, launcher), join(destination, 'lcu-native-host.py'), join(destination, _RELAY_STAMP),
+    join(destination, _PLUGIN_DIGEST),
+    ...hostConfigs, ...[...manifest_paths].sort(comparePaths)];
+  return files.map((path) => [pathStr(path), _file_state(path)]);
+}
+
+const sameSnapshot = (a, b) => a.length === b.length
+  && a.every(([path, state], index) => path === b[index][0] && sameState(state, b[index][1]));
+
+/** Python's namedtuple Refreshed(status, destination, displaced): unpackable and with named fields. */
+export function Refreshed(status, destination, displaced) {
+  return Object.assign([status, destination, displaced], { status, destination, displaced });
+}
+
+const normcase = (text) => (F.windows ? String(text).replaceAll('/', '\\').toLowerCase() : String(text));
+
+/**
+ * The app a relay directory's marker records when this installation made it, else null.
+ *
+ * A directory is ours when its `.lcu-browser-host` marker names the selected app, or (Windows) a
+ * private app generation under this prefix: the Store app changed since `lcu browser install` ran.
+ */
+function _owned_marker(directory, expected_app, apps) {
+  const marker = join(directory, '.lcu-browser-host');
+  let recorded;
+  try {
+    if (isSymlink(directory) || isSymlink(marker) || !isFile(marker)) return null;
+    recorded = readText(marker);
+  } catch (error) {
+    if (typeof error?.code === 'string') return null;
+    throw error;
+  }
+  const app = normcase(pyStrip(recorded));
+  if (recorded === expected_app || (apps && app.startsWith(normcase(apps) + (F.windows ? '\\' : '/')))) return recorded;
+  return null;
+}
+
+/** [[directory, recorded app]] of this installation's relays: those the manifests name and those kept under `data_root`. */
+function _owned_relay_dirs(manifests, data_root, expected_app, apps) {
+  const directories = [];
+  const add = (directory) => { if (directory !== null && !inPaths(directory, directories)) directories.push(directory); };
+  manifests.map(_launcher_dir).forEach(add);
+  try {
+    for (const entry of readdirSync(data_root)) if (isDir(join(data_root, entry))) add(join(data_root, entry));
+  } catch (error) {
+    if (typeof error?.code !== 'string') throw error;
+  }
+  const owned = [];
+  for (const directory of directories) {
+    const recorded = _owned_marker(directory, expected_app, apps);
+    if (recorded !== null) owned.push([directory, recorded]);
+  }
+  return owned;
+}
+
+/** True when the account's Chrome native-host registration names `manifest_path`. */
+export function _windows_registered(manifest_path) {
+  const key = 'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.openai.codexextension';
+  const registered = hooks.run(['reg.exe', 'query', key, '/ve'], { capture: true, timeout: 20000 });
+  if (registered.returncode) return false;
+  // `reg query` prints `    <value name>    REG_SZ    <data>`; the name is localized, so match the type.
+  const values = [...String(registered.stdout).matchAll(/REG_(?:EXPAND_)?SZ[ \t\r\f\v]+(.*?)[ \t\r\f\v]*$/gm)].map((m) => m[1]);
+  const normal = (text) => (F.windows ? win32.normalize(String(text)).toLowerCase() : normpath(String(text)));
+  return values.some((value) => normal(value) === normal(manifest_path));
+}
+
+const partsCount = (path) => pathStr(path).split(/[\\/]+/).filter(Boolean).length + 1;
+
+/** Overrides that make the original installer write its manifests under `scratch`, plus real -> scratch roots. */
+function _scratch_environment(env, scratch) {
+  const roots = [[pathStr(env.HOME ?? expanduser('~')), join(scratch, 'home')]];
+  const overrides = { HOME: join(scratch, 'home'), XDG_CONFIG_HOME: null, CHROME_CONFIG_HOME: null };
+  for (const [key, name] of [['XDG_CONFIG_HOME', 'xdg'], ['CHROME_CONFIG_HOME', 'chrome']]) {
+    if (env[key]) {
+      roots.push([pathStr(env[key]), join(scratch, name)]);
+      overrides[key] = join(scratch, name);
+    }
+  }
+  roots.sort((a, b) => partsCount(b[0]) - partsCount(a[0]));
+  return [overrides, roots];
+}
+
+/** Publish a manifest the way `_install_locked` does: staged beside it and renamed over it. */
+function _write_manifest(path, data) {
+  stageBytes(path, data, 0o644, '.lcu-manifest-');
+}
+
+/**
+ * Run the install path with the original installer's manifests going to a scratch home, then publish ours.
+ *
+ * The original installer writes a manifest for every browser. Run against the real ones it would, for a
+ * moment or after a failure, point other owners' (or never set up) browsers at LCU's host and could
+ * overwrite what another installer wrote meanwhile. In scratch it cannot touch them: only the manifests
+ * that already named this relay are then replaced, once the whole install path has succeeded.
+ */
+function _refresh_in_scratch(root, system, destination, selected_app, ours, env, saved) {
+  const temporary = hostMkdtemp({ prefix: 'lcu-browser-refresh-' });
+  try {
+    const scratch = F.realpath(temporary);
+    const [overrides, roots] = _scratch_environment(env, scratch);
+    mkdirSync(join(scratch, 'home'));
+    _install_locked(root, system, destination, selected_app, overrides);
+    const staged = [];
+    for (const path of ours) {
+      const pair = roots.find(([real]) => F.isRelativeTo(path, real));
+      const twin = pair ? join(pair[1], pathStr(path).slice(pathStr(pair[0]).length).replace(/^[\\/]+/, '')) : null;
+      if (twin === null || !isFile(twin)) {
+        throw new ValueError(`The original Chrome installer produced no manifest for ${path}.`);
+      }
+      staged.push([path, readFileSync(twin)]);
+    }
+    for (const [path, data] of staged) {
+      // changed or removed meanwhile by someone else: theirs now
+      if (sameState(_file_state(path), saved.get(keyOf(path)))) _write_manifest(path, data);
+    }
+  } finally {
+    rmtreeQuiet(temporary);
+  }
+}
+
+/**
+ * Refresh the relay a previous `lcu browser install` made for this installation; never enables Chrome.
+ *
+ * Returns Refreshed(status, destination, displaced). `status` is
+ *   'absent'     no relay was installed for this installation, or its manifests were removed (nothing is touched),
+ *   'elsewhere'  one is, but no native-host manifest (or Windows registry entry) points at it any more (nothing is touched),
+ *   'root'       one is installed but this process runs as root (nothing is touched),
+ *   'unchanged'  reinstalled; every relay file and manifest came out byte for byte the same,
+ *   'changed'    reinstalled; the relay, its host configuration or its manifest differs, so Chrome must reconnect.
+ * `displaced` lists Chrome manifests that point somewhere other than a relay of this installation and were left alone.
+ * The relay is found from the manifests that name it and from LCU's host directory, so a custom `--directory`
+ * that is still registered and a Windows app generation that has since been replaced are found too. Errors
+ * propagate. The existing install path does the work; only manifests that already named the relay are replaced.
+ * (Node port: the relay this writes is the stable-command launcher, see _relay_launcher.)
+ */
+export function refresh(root) {
+  root = pathStr(root);
+  let system = hooks.system();
+  if (!['Linux', 'Darwin', 'Windows'].includes(system)) return Refreshed('absent', null, []);
+  let env = { ...process.env };
+  const asRoot = hooks.geteuid() === 0;
+  if (asRoot && env.SUDO_USER) {
+    // `sudo lcu update` runs with root's home; look where the desktop account keeps its relay.
+    try {
+      const account = hooks.getpwnam(env.SUDO_USER);
+      env = Object.fromEntries(Object.entries(env)
+        .filter(([key]) => !['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'CHROME_CONFIG_HOME'].includes(key)));
+      env.HOME = account.pw_dir;
+    } catch (error) {
+      if (error?.name !== 'KeyError' && !(error instanceof PyKeyError)) throw error;
+    }
+  }
+  const manifests = _manifest_paths(env, system);
+  const existing = [...manifests].filter((path) => isFile(path) || isSymlink(path)).sort(comparePaths);
+  if (!existing.some(_marker_beside) && !isDir(_data_root(system, env))) {
+    return Refreshed('absent', null, []); // never set up: do not even resolve the app
+  }
+  let defaultDestination;
+  let selected;
+  [system, defaultDestination, selected] = _host_location(root, null, env);
+  const expected = `${selected}\n`;
+  const prefix = parentOf(parentOf(resolve(root)));
+  const owned = _owned_relay_dirs(existing, _data_root(system, env), expected,
+    system === 'Windows' ? join(prefix, 'apps') : null);
+  if (!owned.length) return Refreshed('absent', null, []);
+  const ownedDirs = owned.map(([directory]) => directory);
+  const ours = existing.filter((path) => _points_into(path, ownedDirs));
+  if (!ours.length) {
+    if (!existing.length) return Refreshed('absent', null, []);
+    // The ChatGPT app (or the user) took the manifest back. Re-pointing it is what the explicit
+    // `lcu browser install` is for; an update must not take the connector from another owner.
+    return Refreshed('elsewhere', defaultDestination, []);
+  }
+  // Reinstall where the relay is. A replaced app generation moves to the directory of the selected one.
+  const active = [];
+  for (const directory of ours.map(_launcher_dir)) if (!inPaths(directory, active)) active.push(directory);
+  const recordedFor = (directory) => owned.find(([d]) => F.same(d, directory))?.[1];
+  const current = active.filter((directory) => recordedFor(directory) === expected).sort(comparePaths);
+  const destination = inPaths(defaultDestination, active) ? defaultDestination : (current.length ? current[0] : defaultDestination);
+  if (system === 'Windows' && !_windows_registered(ours[0])) {
+    // The original installer would replace the registration; another owner holds it, so only report.
+    return Refreshed('elsewhere', defaultDestination, []);
+  }
+  if (asRoot) {
+    // `sudo lcu update` must not write root-owned files into the desktop account's browser setup.
+    return Refreshed('root', destination, []);
+  }
+  const displaced = existing.filter((path) => !inPaths(path, ours) && pathStr(path).toLowerCase().includes('chrome'));
+  return _destination_lock(destination, () => {
+    const before = _relay_snapshot(destination, system, ours);
+    const saved = new Map(ours.map((path) => [keyOf(path), _file_state(path)]));
+    try {
+      if (system === 'Windows') {
+        // One manifest, already ours, and the registry entry is checked above; the installer
+        // records the manifest path in HKCU, so it has to write the real one.
+        _install_locked(root, system, destination, selected);
+      } else {
+        _refresh_in_scratch(root, system, destination, selected, ours, env, saved);
+      }
+    } catch (error) {
+      if (system === 'Windows') {
+        // Only the real manifest was written, and it may now name the original host instead of
+        // the relay. Put it back only in that state; a later change by someone else stays theirs.
+        for (const path of ours) {
+          const directory = _launcher_dir(path);
+          if (directory !== null && F.isRelativeTo(directory, join(destination, 'chrome/extension-host'))) {
+            _restore(path, saved.get(keyOf(path)));
+          }
+        }
+      }
+      throw error;
+    }
+    const after = _relay_snapshot(destination, system, ours);
+    return Refreshed(sameSnapshot(before, after) ? 'unchanged' : 'changed', destination, displaced);
+  });
 }
 
 /** dict.get on parsed JSON; anything but an object is Python's AttributeError (a traceback there). */
@@ -504,8 +864,18 @@ function pyGet(document, key, fallback = null) {
 }
 
 /** True when `relay` (the manifest's path) is the launcher this installation generates for its directory. */
-function relayCurrent(root, relay, system) {
+function launcherCurrent(root, relay, system) {
   return readFileSync(relay).equals(_relay_launcher(hooks.stable_lcu(root, system), parentOf(relay), system));
+}
+
+/**
+ * The launcher is current AND the relay implementation it runs is this release's, present and recorded beside it
+ * (Python: the copied script equals lcu/native_host.py). Missing implementation files raise ValueError.
+ */
+function relayCurrent(root, relay, system) {
+  if (!launcherCurrent(root, relay, system)) return false;
+  const stamp = join(parentOf(relay), _RELAY_STAMP);
+  return !isSymlink(stamp) && isFile(stamp) && pyStrip(readText(stamp)) === _relay_implementation_digest(root);
 }
 
 /** Report setup from upstream diagnostics; this is not a connection test. */
@@ -558,6 +928,7 @@ export function status(root, family = 'chrome') {
   }
 
   let connectedHost = false;
+  let foreignHost = null;
   if (truthy(manifest.get('correct')) && truthy(manifest.get('manifestPath'))) {
     try {
       const data = loads(readText(manifest.get('manifestPath')));
@@ -571,10 +942,21 @@ export function status(root, family = 'chrome') {
       const [system, name] = pair;
       const host = join(directory, 'chrome/extension-host', system, arch, name);
       const target = { macos: 'Darwin', linux: 'Linux', windows: 'Windows' }[system];
+      const expectedApp = `${system === 'windows' ? selected[0] : resolve(join(root, 'app'))}\n`;
+      let ownRelay;
+      try {
+        ownRelay = nameOf(relay) === relayName(target) && readText(join(directory, '.lcu-browser-host')) === expectedApp;
+      } catch (error) {
+        if (typeof error?.code !== 'string') throw error;
+        ownRelay = false;
+      }
+      if (!ownRelay) foreignHost = relay;
+      // The launcher Chrome runs must be the one this installation writes for that directory.
+      const sourceMatches = relayCurrent(root, relay, target);
       connectedHost = (
         nameOf(relay) === relayName(target) && isFile(relay) && executable(relay)
-        && relayCurrent(root, relay, target)
-        && readText(join(directory, '.lcu-browser-host')) === `${system === 'windows' ? selected[0] : resolve(join(root, 'app'))}\n`
+        && sourceMatches
+        && ownRelay
         && pyStrip(readText(join(directory, _PLUGIN_DIGEST))) === _plugin_digest(plugin)
         && isFile(host) && executable(host));
     } catch (error) {
@@ -582,10 +964,22 @@ export function status(root, family = 'chrome') {
       if (!(error instanceof ValueError || typeof error?.code === 'string')) throw error;
     }
   }
-  if (connectedHost) print(`${label} connector: configured for this LCU installation.`);
-  else print(`${label} connector: missing or outdated. Run \`lcu browser install\`.`);
-  print(`Live browser connection: not checked. After setup, ask your agent to use LCU to list ${label} tabs.`);
+  if (connectedHost) {
+    print(`${label} connector: configured for this LCU installation.`);
+  } else if (foreignHost) {
+    print(`${label} connector: the native-host manifest points to ${foreignHost}, not this LCU installation's relay. `
+      + `Run \`lcu browser install\`, then ${_reconnect_step(browser)}`);
+  } else {
+    print(`${label} connector: missing or outdated. Run \`lcu browser install\`.`);
+  }
+  print(`Live browser connection: not checked. After setup, ${_reconnect_step(browser)} `
+    + `Then ask your agent to use LCU to list ${label} tabs.`);
   return enabled && connectedHost;
+}
+
+function _reconnect_step(browser) {
+  return `restart ${browser.get('shortDisplayName')}, or turn the ChatGPT extension off and on at `
+    + `${browser.get('extensionManagementUrl')}, so an already-connected extension reconnects through LCU's relay.`;
 }
 
 /** (dev, ino, real path) of a directory that is not a symlink, or null. */
@@ -644,7 +1038,7 @@ export function migrate_relays(root, home = null) {
       if (F.isRelativeTo(named, prefixApps) && !F.same(named, prefixApps)) return true;
     }
     try {
-      return relayCurrent(root, join(destination, relayName(system)), system);
+      return launcherCurrent(root, join(destination, relayName(system)), system);
     } catch {
       return false;
     }
@@ -706,9 +1100,10 @@ export async function main(root, argv) {
     if (!status(root, args.browser)) throw new PySystemExit(1);
     return;
   }
-  const destination = install(root, args.directory === null || args.directory === undefined ? null : String(args.directory));
+  const destination = hooks.install(root, args.directory === null || args.directory === undefined ? null : String(args.directory));
   print(`LCU browser native host configured: ${destination}`);
   print('Install or enable the official ChatGPT browser extension in the browser you want to use.');
   print('The extension and browser must run under this same desktop account. See docs/INSTALLATION.md.');
+  print('If the extension was already connected, restart the browser or turn the extension off and on in its extensions page so it reconnects through LCU\'s relay.');
   print('Check extension and connector setup with: lcu browser status');
 }

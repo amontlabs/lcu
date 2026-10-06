@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
 import * as browser from '../../lcu/browser.mjs';
+const RELAY_CLOSURE = browser._relay_implementation(new URL('../..', import.meta.url).pathname.replace(/\/$/, ''));
 import { io, PySystemExit } from '../../lcu/compat/argparse.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
 
@@ -49,8 +50,10 @@ function shq(text) {
 
 /** Install the relay source files of the real release into a fixture root. */
 function releaseRelay(root) {
-  mkdirSync(join(root, 'lcu'), { recursive: true });
-  writeFileSync(join(root, 'lcu/native_host.mjs'), readFileSync(join(ROOT, 'lcu/native_host.mjs')));
+  for (const relative of RELAY_CLOSURE) {
+    mkdirSync(dirname(join(root, relative)), { recursive: true });
+    writeFileSync(join(root, relative), readFileSync(join(ROOT, relative)));
+  }
 }
 
 const saved = { ...browser.hooks };
@@ -202,7 +205,7 @@ describe('BrowserSetupTests', () => {
     assert.equal(readFileSync(join(second, 'chrome/scripts/installManifest.mjs'), 'utf8'), 'version two');
     assert.equal(readFileSync(join(second, 'chrome/extension-host/macos/arm64/ChatGPT for Chrome'), 'utf8'), 'host two');
     assert.deepEqual(new Set(readdirSync(second)),
-      new Set(['chrome', 'lcu-native-host', '.lcu-browser-host', '.lcu-browser-plugin']));
+      new Set(['chrome', 'lcu-native-host', '.lcu-relay-implementation', '.lcu-browser-host', '.lcu-browser-plugin']));
   });
 
   it('macos missing original manifest fails', () => {
@@ -480,7 +483,10 @@ describe('BrowserStatusTests', () => {
     assert.ok(out.includes('Live browser connection: not checked'));
     assert.deepEqual(snapshot(), before);
     assert.equal(out, 'Chrome extension: enabled in Default.\nChrome connector: configured for this LCU installation.\n'
-      + 'Live browser connection: not checked. After setup, ask your agent to use LCU to list Chrome tabs.\n');
+      + 'Live browser connection: not checked. After setup, restart Chrome, or turn the ChatGPT extension off and on at '
+      + "chrome://extensions, so an already-connected extension reconnects through LCU's relay. "
+      + 'Then ask your agent to use LCU to list Chrome tabs.\n');
+    assert.ok(out.includes('turn the ChatGPT extension off and on at chrome://extensions'));
   });
 
   it('enabled extension with original host is not lcu ready', () => {
@@ -488,6 +494,102 @@ describe('BrowserStatusTests', () => {
     const [ok, out] = runStatus();
     assert.equal(ok, false);
     assert.ok(out.includes('lcu browser install'));
+  });
+
+  // ---- upstream 0.9.6 (#18): where the manifest points and how to reconnect ----
+  it('manifest pointing at original host says where and how to fix', () => {
+    writeFileSync(manifest, JSON.stringify({ path: '/original/ChatGPT for Chrome' }));
+    const [ok, text] = runStatus();
+    assert.equal(ok, false);
+    assert.ok(text.includes("points to /original/ChatGPT for Chrome, not this LCU installation's relay"), text);
+    assert.ok(text.includes('Run `lcu browser install`, then restart Chrome, or turn the ChatGPT extension off and on '
+      + 'at chrome://extensions'), text);
+  });
+
+  it('relay of another LCU installation is reported with its path', () => {
+    writeFileSync(join(hostDir, '.lcu-browser-host'), '/other/installation/app\n');
+    const [ok, text] = runStatus();
+    assert.equal(ok, false);
+    assert.ok(text.includes(`points to ${relay}, not this LCU installation's relay`), text);
+    assert.ok(text.includes('Run `lcu browser install`, then restart Chrome'), text);
+  });
+
+  it('install command prints reconnect step', async () => {
+    browser.hooks.install = () => '/fixture/host';
+    const [, out] = await (async () => {
+      let text = '';
+      const real = io.stdout;
+      io.stdout = (t) => { text += t; };
+      try { await browser.main(root, ['install']); } finally { io.stdout = real; }
+      return [null, text];
+    })();
+    assert.ok(out.includes('turn the extension off and on'), out);
+    assert.equal(out, 'LCU browser native host configured: /fixture/host\n'
+      + 'Install or enable the official ChatGPT browser extension in the browser you want to use.\n'
+      + 'The extension and browser must run under this same desktop account. See docs/INSTALLATION.md.\n'
+      + "If the extension was already connected, restart the browser or turn the extension off and on in its extensions page so it reconnects through LCU's relay.\n"
+      + 'Check extension and connector setup with: lcu browser status\n');
+  });
+
+  it('outdated LCU relay is not reported as foreign host', () => {
+    writeFileSync(relay, 'old relay');
+    const [ok, text] = runStatus();
+    assert.equal(ok, false);
+    assert.ok(text.includes('missing or outdated'));
+    assert.ok(!text.includes("not this LCU installation's relay"));
+  });
+
+  it('a damaged launcher or one for another directory requires refresh (Node form of the wrapper cases)', () => {
+    const good = readFileSync(relay, 'utf8');
+    for (const damaged of [good.replace('exit 1', 'exit 0'), `${good}# extra\n`, '#!/bin/sh\nexit 0\n',
+      browser._relay_launcher('/fixture prefix/current/bin/lcu', join(hostDir, 'elsewhere'), 'Darwin').toString()]) {
+      assert.notEqual(damaged, good);
+      writeFileSync(relay, damaged);
+      const [ok, text] = runStatus();
+      assert.equal(ok, false);
+      assert.ok(text.includes('missing or outdated'), text);
+    }
+  });
+
+  it('a missing relay implementation in the release requires refresh, not a foreign-host diagnosis (upstream: single file install without the script)', () => {
+    for (const relative of ['lcu/native_host.mjs', 'lcu/compat/pyjson.mjs']) {
+      const saved = readFileSync(join(root, relative));
+      unlinkSync(join(root, relative));
+      const [ok, text] = runStatus();
+      assert.equal(ok, false, relative);
+      assert.ok(text.includes('missing or outdated'), text);
+      assert.ok(!text.includes("not this LCU installation's relay"), text);
+      writeFileSync(join(root, relative), saved);
+    }
+    assert.equal(runStatus()[0], true);
+  });
+
+  it('a relay implementation stamp of another release requires refresh (upstream: outdated copied script)', () => {
+    writeFileSync(join(hostDir, '.lcu-relay-implementation'), `${'0'.repeat(64)}\n`);
+    const [ok, text] = runStatus();
+    assert.equal(ok, false);
+    assert.ok(text.includes('missing or outdated'));
+    unlinkSync(join(hostDir, '.lcu-relay-implementation'));
+    assert.equal(runStatus()[0], false);
+  });
+
+  it('the recorded implementation is the import closure of lcu/native_host.mjs (and loads on its own)', async () => {
+    const closure = browser._relay_implementation(ROOT);
+    assert.ok(closure.includes('lcu/native_host.mjs') && closure.includes('lcu/compat/pyjson.mjs') && closure.includes('lcu/compat/pyerr.mjs'), closure.join());
+    const copy = scratch();
+    for (const relative of closure) {
+      mkdirSync(dirname(join(copy, relative)), { recursive: true });
+      writeFileSync(join(copy, relative), readFileSync(join(ROOT, relative)));
+    }
+    const loaded = await import(pathToFileURL(join(copy, 'lcu/native_host.mjs')).href); // nothing outside the closure
+    assert.equal(typeof loaded.run, 'function');
+  });
+
+  it('missing wrapper requires refresh', () => {
+    unlinkSync(relay);
+    const [ok, text] = runStatus();
+    assert.equal(ok, false);
+    assert.ok(text.includes('missing or outdated'));
   });
 
   it('outdated relay requires refresh', () => {
@@ -945,7 +1047,7 @@ describe('Windows-shaped paths end to end (review round 2, R5)', () => {
     for (const [name, digest, stamp] of [['0.9.5-aaaaaaaaaaaa', A, 100], ['0.9.6-bbbbbbbbbbbb', B, 200]]) {
       const root = `${prefix}\\releases\\${name}`;
       write(`${root}\\installation.json`, JSON.stringify({ platform: 'windows', app: `${prefix}\\apps\\${digest}\\app` }));
-      write(`${root}\\lcu\\native_host.mjs`, readFileSync(join(ROOT, 'lcu/native_host.mjs')));
+      for (const relative of RELAY_CLOSURE) write(`${root}\\${relative.replaceAll('/', '\\')}`, readFileSync(join(ROOT, relative)));
       utimesSync(host(root), stamp, stamp);
     }
     write(`${prefix}\\.lcu-install`, '');
@@ -1017,5 +1119,364 @@ describe('Windows-shaped paths end to end (review round 2, R5)', () => {
     assert.deepEqual(readdirSync(host(`${prefix}\\releases`)), ['0.9.6-bbbbbbbbbbbb']);
     // The relay names only the stable command, so pruning A and the old release left it working.
     assert.equal(readFileSync(host(`${destination}\\lcu-native-host.cmd`), 'utf8'), WINDOWS_CMD('C:\\LCU\\lcu.cmd'));
+  });
+});
+
+// Port of upstream 0.9.6 RefreshTests (tests/test_browser_setup.py, #22): `refresh` is the update-time path; it
+// reuses `install` but only for a relay that is already ours. Node relay design: the launcher names the stable
+// LCU command, so a relay CODE change alone needs no rewrite (Python copied the script and reported 'changed');
+// the Python cases that changed lcu/native_host.py instead damage the launcher here.
+describe('RefreshTests', () => {
+  let base; let root; let home; let support; let chrome; let edge; let state;
+  const STABLE = '/opt/lcu/current/bin/lcu';
+  const pluginOf = (command) => dirname(dirname(fileURLToPath(command.at(-1))));
+  const manifestOf = (browserDir) => join(support, browserDir, 'NativeMessagingHosts/com.openai.codexextension.json');
+
+  beforeEach(() => {
+    base = scratch();
+    root = join(base, 'release');
+    home = join(base, 'home');
+    mkdirSync(home);
+    support = join(home, 'Library/Application Support');
+    const resources = join(root, 'app/Contents/Resources');
+    const source = join(resources, 'plugins/openai-bundled/plugins/chrome');
+    mkdirSync(join(source, 'scripts'), { recursive: true });
+    writeFileSync(join(source, 'scripts/installManifest.mjs'), 'fixture');
+    mkdirSync(join(source, 'extension-host/macos/arm64'), { recursive: true });
+    writeFileSync(join(source, 'extension-host/macos/arm64/ChatGPT for Chrome'), 'fixture');
+    releaseRelay(root);
+    chrome = manifestOf('Google/Chrome');
+    edge = manifestOf('Microsoft Edge');
+    state = { fail: null, during: null, homes: [], nodePath: '/fake/node', calls: 0 };
+    const env = { HOME: home, NODE_REPL_NODE_PATH: '/fake/node', CODEX_CLI_PATH: '/fake/codex', CUA_REPL_NODE_REPL_PATH: '/fake/repl' };
+    // The upstream installer: writes every browser's manifest, under the HOME it is run with.
+    const installer = (command, options) => {
+      state.calls += 1;
+      const plugin = pluginOf(command);
+      writeFileSync(join(plugin, 'extension-host/macos/arm64/extension-host-config.json'), JSON.stringify({ nodePath: state.nodePath }));
+      const runHome = options.env.HOME;
+      state.homes.push(runHome);
+      for (const browserDir of ['Google/Chrome', 'Microsoft Edge']) {
+        const path = join(runHome, 'Library/Application Support', browserDir, 'NativeMessagingHosts/com.openai.codexextension.json');
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, JSON.stringify({ name: 'com.openai.codexextension', path: join(plugin, 'extension-host/macos/arm64/ChatGPT for Chrome') }));
+      }
+      if (state.during) state.during();
+      return completed(state.fail ? 1 : 0, '', state.fail ?? '');
+    };
+    patch({ system: () => 'Darwin', paths: () => [join(root, 'app'), resources, null, {}], environment: () => env,
+      capture_run: installer, stable_lcu: () => STABLE, geteuid: () => 501 }, { HOME: home });
+    delete process.env.XDG_CONFIG_HOME;
+    delete process.env.CHROME_CONFIG_HOME;
+    delete process.env.XDG_DATA_HOME;
+  });
+  afterEach(restore);
+
+  const tuple = (result) => [result[0], result[1], result[2]];
+  const taken = JSON.stringify({ name: 'com.openai.codexextension', path: '/Applications/ChatGPT.app/host' });
+
+  it('nothing is installed or changed when the connector was never set up', () => {
+    assert.equal(browser.refresh(root)[0], 'absent');
+    assert.equal(state.calls, 0);
+    assert.equal(existsSync(join(support, 'lcu')), false);
+    assert.equal(existsSync(chrome), false);
+  });
+
+  it('windows never set up does not resolve the app', () => {
+    const local = join(base, 'win-empty/AppData/Local');
+    patch({ system: () => 'Windows', paths: () => { throw new Error('resolved the app'); } },
+      { USERPROFILE: dirname(dirname(local)), LOCALAPPDATA: local });
+    assert.deepEqual(tuple(browser.refresh(root)), ['absent', null, []]);
+    assert.equal(existsSync(local), false);
+  });
+
+  it('installed relay is refreshed and reports a change once', () => {
+    const destination = browser.install(root);
+    state.calls = 0;
+    assert.deepEqual(tuple(browser.refresh(root)), ['unchanged', destination, []]);
+    writeFileSync(join(destination, 'lcu-native-host'), '#!/bin/sh\n# an older wrapper\n');
+    assert.deepEqual(tuple(browser.refresh(root)), ['changed', destination, []]);
+    assert.equal(readFileSync(join(destination, 'lcu-native-host'), 'utf8'), POSIX_LAUNCHER(STABLE, destination));
+    assert.equal(JSON.parse(readFileSync(chrome, 'utf8')).path, join(destination, 'lcu-native-host'));
+    assert.equal(browser.refresh(root)[0], 'unchanged');
+    assert.equal(state.calls, 3);
+  });
+
+  it('a relay implementation change alone is reported once as changed (upstream: the copied script changed)', () => {
+    const destination = browser.install(root);
+    assert.equal(browser.refresh(root).status, 'unchanged');
+    writeFileSync(join(root, 'lcu/native_host.mjs'), `${readFileSync(join(root, 'lcu/native_host.mjs'), 'utf8')}\n// v2\n`);
+    assert.deepEqual(tuple(browser.refresh(root)), ['changed', destination, []]);
+    assert.equal(readFileSync(join(destination, '.lcu-relay-implementation'), 'utf8').trim(), browser._relay_implementation_digest(root));
+    assert.equal(readFileSync(join(destination, 'lcu-native-host'), 'utf8'), POSIX_LAUNCHER(STABLE, destination)); // launcher as before
+    assert.equal(browser.refresh(root).status, 'unchanged');
+    writeFileSync(join(root, 'lcu/compat/pyerr_tables.mjs'), `${readFileSync(join(root, 'lcu/compat/pyerr_tables.mjs'), 'utf8')}\n// v2\n`);
+    assert.equal(browser.refresh(root).status, 'changed'); // the import closure counts too
+  });
+
+  it('a Python-era relay (copied script) is rewritten to the Node launcher by a refresh', () => {
+    const destination = browser.install(root);
+    writeFileSync(join(destination, 'lcu-native-host'), '#!/usr/bin/env python3\n# relay\n');
+    writeFileSync(join(destination, 'lcu-native-host.py'), '# copied relay\n');
+    assert.equal(browser.refresh(root).status, 'changed');
+    assert.equal(readFileSync(join(destination, 'lcu-native-host'), 'utf8'), POSIX_LAUNCHER(STABLE, destination));
+  });
+
+  it('a manifest that points elsewhere is reported and left alone', () => {
+    const destination = browser.install(root);
+    state.calls = 0;
+    writeFileSync(chrome, taken);
+    unlinkSync(edge);
+    assert.deepEqual(tuple(browser.refresh(root)), ['elsewhere', destination, []]);
+    assert.equal(readFileSync(chrome, 'utf8'), taken);
+    assert.equal(state.calls, 0);
+  });
+
+  it('removed manifests are not recreated', () => {
+    browser.install(root);
+    state.calls = 0;
+    unlinkSync(chrome);
+    unlinkSync(edge);
+    assert.equal(browser.refresh(root)[0], 'absent');
+    assert.equal(existsSync(chrome), false);
+    assert.equal(state.calls, 0);
+  });
+
+  it('other browsers are never written by a refresh', () => {
+    browser.install(root);
+    writeFileSync(edge, taken);
+    const brave = manifestOf('BraveSoftware/Brave-Browser');
+    state.homes = [];
+    assert.equal(browser.refresh(root).status, 'unchanged');
+    assert.equal(readFileSync(edge, 'utf8'), taken);
+    assert.equal(existsSync(brave), false);
+    assert.equal(state.homes.length, 1);
+    assert.notEqual(state.homes[0], home); // the original installer ran against a scratch home
+    assert.equal(existsSync(state.homes[0]), false); // and it is gone
+  });
+
+  it('a registration made by another installer during the refresh survives', () => {
+    browser.install(root);
+    writeFileSync(edge, '{"path": "/chatgpt/edge-host"}');
+    const brave = manifestOf('BraveSoftware/Brave-Browser');
+    state.during = () => {
+      mkdirSync(dirname(brave), { recursive: true });
+      writeFileSync(brave, '{"path": "/other/host"}');
+      writeFileSync(edge, '{"path": "/other/edge-host"}');
+    };
+    assert.equal(browser.refresh(root).status, 'unchanged');
+    assert.equal(readFileSync(brave, 'utf8'), '{"path": "/other/host"}');
+    assert.equal(readFileSync(edge, 'utf8'), '{"path": "/other/edge-host"}');
+  });
+
+  it('a manifest of the relay that someone else changes during the refresh is not overwritten', () => {
+    const destination = browser.install(root);
+    unlinkSync(edge); // only Chrome is ours here; it is taken over while the installer runs
+    state.during = () => writeFileSync(chrome, '{"path": "/chatgpt/host"}');
+    assert.equal(browser.refresh(root).destination, destination);
+    assert.equal(readFileSync(chrome, 'utf8'), '{"path": "/chatgpt/host"}');
+    assert.equal(existsSync(edge), false);
+  });
+
+  it('a failed refresh does not take back a manifest changed meanwhile', () => {
+    browser.install(root);
+    state.during = () => writeFileSync(chrome, '{"path": "/chatgpt/host"}');
+    state.fail = 'node crashed';
+    assert.throws(() => browser.refresh(root), (e) => e.name === 'ValueError' && /installer failed/.test(e.message));
+    assert.equal(readFileSync(chrome, 'utf8'), '{"path": "/chatgpt/host"}');
+  });
+
+  it('a failed refresh leaves the working registration and other manifests alone', () => {
+    const destination = browser.install(root);
+    writeFileSync(edge, taken);
+    const before = readFileSync(chrome);
+    state.fail = 'node crashed';
+    assert.throws(() => browser.refresh(root), (e) => /installer failed/.test(e.message));
+    assert.deepEqual(readFileSync(chrome), before);
+    assert.equal(JSON.parse(readFileSync(chrome, 'utf8')).path, join(destination, 'lcu-native-host'));
+    assert.equal(readFileSync(edge, 'utf8'), taken);
+  });
+
+  it('a browser that was not set up is not registered by a refresh', () => {
+    browser.install(root);
+    unlinkSync(edge);
+    assert.equal(browser.refresh(root).status, 'unchanged');
+    assert.equal(existsSync(edge), false);
+  });
+
+  it('a reclaimed chrome manifest is reported while another browser is refreshed', () => {
+    const destination = browser.install(root);
+    writeFileSync(chrome, taken);
+    const result = browser.refresh(root);
+    assert.deepEqual([result.status, result.destination, result.displaced], ['unchanged', destination, [chrome]]);
+    assert.equal(readFileSync(chrome, 'utf8'), taken);
+    assert.equal(JSON.parse(readFileSync(edge, 'utf8')).path, join(destination, 'lcu-native-host'));
+  });
+
+  it('a relay in a custom directory is found by its manifest', () => {
+    const custom = join(base, 'custom-relay');
+    browser.install(root, custom);
+    writeFileSync(join(custom, 'lcu-native-host'), '#!/bin/sh\n# older\n');
+    assert.deepEqual(tuple(browser.refresh(root)), ['changed', custom, []]);
+    assert.equal(readFileSync(join(custom, 'lcu-native-host'), 'utf8'), POSIX_LAUNCHER(STABLE, custom));
+    const data = join(support, 'lcu/browser');
+    assert.ok(!(existsSync(data) && readdirSync(data).length));
+  });
+
+  it('a symlinked manifest of another owner is not written through', () => {
+    browser.install(root);
+    const target = join(base, 'someone-elses-file');
+    writeFileSync(target, 'theirs');
+    unlinkSync(edge);
+    symlinkSync(target, edge);
+    assert.equal(browser.refresh(root).status, 'unchanged');
+    assert.equal(readFileSync(target, 'utf8'), 'theirs');
+    assert.equal(lstatSync(edge).isSymbolicLink(), true);
+  });
+
+  it('linux does not recreate a removed registration', () => {
+    const config = join(home, '.config');
+    const linuxChrome = join(config, 'google-chrome/NativeMessagingHosts/com.openai.codexextension.json');
+    const linuxEdge = join(config, 'microsoft-edge/NativeMessagingHosts/com.openai.codexextension.json');
+    const plugin = join(root, 'app/resources/plugins/openai-bundled/plugins/chrome');
+    mkdirSync(join(plugin, 'scripts'), { recursive: true });
+    writeFileSync(join(plugin, 'scripts/installManifest.mjs'), 'fixture');
+    const installer = (command, options) => {
+      for (const browserDir of ['google-chrome', 'microsoft-edge']) {
+        const path = join(options.env.HOME, '.config', browserDir, 'NativeMessagingHosts/com.openai.codexextension.json');
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, JSON.stringify({ path: join(pluginOf(command), 'extension-host/linux/x64/extension-host') }));
+      }
+      return completed(0);
+    };
+    patch({ system: () => 'Linux', paths: () => [join(root, 'app'), join(root, 'app/resources'), null, {}], capture_run: installer },
+      { HOME: home, XDG_DATA_HOME: join(home, 'data') });
+    browser.install(root);
+    unlinkSync(linuxEdge);
+    assert.equal(browser.refresh(root).status, 'unchanged');
+    assert.equal(existsSync(linuxEdge), false);
+    assert.ok(statSync(linuxChrome).isFile());
+  });
+
+  it('a repaired launcher permission asks to reconnect', () => {
+    const destination = browser.install(root);
+    chmodSync(join(destination, 'lcu-native-host'), 0o600);
+    assert.equal(browser.refresh(root).status, 'changed');
+    assert.equal(statSync(join(destination, 'lcu-native-host')).mode & 0o777, 0o700);
+  });
+
+  it('a change only in the host\'s runtime configuration asks to reconnect', () => {
+    const destination = browser.install(root);
+    assert.equal(browser.refresh(root).status, 'unchanged');
+    state.nodePath = '/new/node';
+    assert.deepEqual(tuple(browser.refresh(root)), ['changed', destination, []]);
+    const config = join(destination, 'chrome/extension-host/macos/arm64/extension-host-config.json');
+    assert.deepEqual(JSON.parse(readFileSync(config, 'utf8')), { nodePath: '/new/node' });
+  });
+
+  it('the active custom directory wins over a leftover default relay', () => {
+    const defaultDir = browser.install(root);
+    const custom = join(base, 'custom-relay');
+    browser.install(root, custom);
+    assert.equal(JSON.parse(readFileSync(chrome, 'utf8')).path, join(custom, 'lcu-native-host'));
+    assert.deepEqual(tuple(browser.refresh(root)), ['unchanged', custom, []]);
+    assert.equal(JSON.parse(readFileSync(chrome, 'utf8')).path, join(custom, 'lcu-native-host'));
+    assert.ok(statSync(defaultDir).isDirectory());
+  });
+
+  it('root leaves the account alone', () => {
+    const destination = browser.install(root);
+    state.calls = 0;
+    browser.hooks.geteuid = () => 0;
+    assert.deepEqual(tuple(browser.refresh(root)), ['root', destination, []]);
+    assert.equal(state.calls, 0);
+  });
+
+  it('sudo looks for the relay in the desktop account\'s home', () => {
+    const destination = browser.install(root);
+    state.calls = 0;
+    const rootsHome = join(base, 'var-root');
+    mkdirSync(rootsHome);
+    browser.hooks.geteuid = () => 0;
+    process.env.HOME = rootsHome;
+    process.env.SUDO_USER = 'desktop';
+    browser.hooks.getpwnam = (name) => {
+      if (name === 'desktop') return { pw_dir: home };
+      const error = new Error(`getpwnam(): name not found: '${name}'`);
+      error.name = 'KeyError';
+      throw error;
+    };
+    assert.deepEqual(tuple(browser.refresh(root)), ['root', destination, []]);
+    process.env.SUDO_USER = 'nobody-here';
+    assert.equal(browser.refresh(root).status, 'absent');
+    assert.equal(state.calls, 0);
+  });
+
+  it('windows relay is refreshed and follows a replaced app generation', () => {
+    // Windows-labelled with host (POSIX) paths, as upstream's test; the native-path case is covered above.
+    const win = join(base, 'win');
+    const winRoot = join(win, 'prefix/releases/r1');
+    const generations = {};
+    for (const name of ['gen1', 'gen2']) {
+      const app = join(win, 'prefix/apps', name, 'app');
+      const plugin = join(app, 'resources/plugins/openai-bundled/plugins/chrome');
+      mkdirSync(join(plugin, 'scripts'), { recursive: true });
+      writeFileSync(join(plugin, 'scripts/installManifest.mjs'), 'fixture');
+      mkdirSync(join(plugin, 'extension-host/windows/x64'), { recursive: true });
+      writeFileSync(join(plugin, 'extension-host/windows/x64/extension-host.exe'), 'fixture');
+      generations[name] = [app, join(app, 'resources'), null, {}];
+    }
+    releaseRelay(winRoot);
+    const winHome = join(win, 'account');
+    const local = join(winHome, 'AppData/Local');
+    const manifest = join(local, 'OpenAI/extension/com.openai.codexextension.json');
+    const env = { USERPROFILE: winHome, LOCALAPPDATA: local, NODE_REPL_NODE_PATH: 'C:/node.exe' };
+    const registered = { value: null };
+    const installs = [];
+    const failing = { on: false };
+    let selected = generations.gen1;
+    const installer = (command) => {
+      if (command[0] === 'reg.exe') {
+        return completed(0, `\r\nHKEY_CURRENT_USER\\...\r\n    (Default)    REG_SZ    ${registered.value ?? manifest}\r\n`);
+      }
+      installs.push(command);
+      mkdirSync(dirname(manifest), { recursive: true });
+      writeFileSync(manifest, JSON.stringify({ name: 'com.openai.codexextension', path: join(pluginOf(command), 'extension-host/windows/x64/extension-host.exe') }));
+      return completed(failing.on ? 1 : 0);
+    };
+    patch({ system: () => 'Windows', paths: () => selected, environment: () => env, capture_run: installer, run: installer,
+      stable_lcu: () => 'C:\\LCU\\lcu.cmd' }, { USERPROFILE: winHome, LOCALAPPDATA: local });
+    assert.deepEqual(tuple(browser.refresh(winRoot)), ['absent', null, []]);
+    const destination = browser.install(winRoot);
+    assert.deepEqual(tuple(browser.refresh(winRoot)), ['unchanged', destination, []]);
+    writeFileSync(join(destination, 'lcu-native-host.cmd'), '@echo off\r\n"C:\\Python313\\python.exe" -B -u "%~dp0lcu-native-host.py" %*\r\n');
+    assert.deepEqual(tuple(browser.refresh(winRoot)), ['changed', destination, []]);
+    assert.equal(readFileSync(join(destination, 'lcu-native-host.cmd'), 'utf8'), WINDOWS_CMD('C:\\LCU\\lcu.cmd'));
+    assert.equal(JSON.parse(readFileSync(manifest, 'utf8')).path, join(destination, 'lcu-native-host.cmd'));
+    // A failing original installer has already rewritten the manifest; the working registration comes back.
+    failing.on = true;
+    const working = readFileSync(manifest, 'utf8');
+    assert.throws(() => browser.refresh(winRoot), (e) => /installer failed/.test(e.message));
+    assert.equal(readFileSync(manifest, 'utf8'), working);
+    failing.on = false;
+    // The Store app changed: the update's installer made a new private generation.
+    selected = generations.gen2;
+    const ours = readFileSync(manifest, 'utf8');
+    writeFileSync(manifest, JSON.stringify({ path: 'C:\\ChatGPT\\extension-host.exe' }));
+    assert.equal(browser.refresh(winRoot).status, 'elsewhere'); // reclaimed; the old generation's relay is still known
+    writeFileSync(manifest, ours);
+    const moved = browser.refresh(winRoot);
+    assert.equal(moved.status, 'changed');
+    assert.notEqual(moved.destination, destination);
+    assert.equal(readFileSync(join(moved.destination, '.lcu-browser-host'), 'utf8'), `${generations.gen2[0]}\n`);
+    assert.equal(JSON.parse(readFileSync(manifest, 'utf8')).path, join(moved.destination, 'lcu-native-host.cmd'));
+    assert.deepEqual(tuple(browser.refresh(winRoot)), ['unchanged', moved.destination, []]);
+    writeFileSync(manifest, JSON.stringify({ path: 'C:\\ChatGPT\\extension-host.exe' }));
+    assert.deepEqual(tuple(browser.refresh(winRoot)), ['elsewhere', moved.destination, []]);
+    writeFileSync(manifest, JSON.stringify({ path: join(moved.destination, 'lcu-native-host.cmd') }));
+    registered.value = `${manifest}.backup`; // another owner's entry that only starts with our path
+    const calls = installs.length;
+    assert.deepEqual(tuple(browser.refresh(winRoot)), ['elsewhere', moved.destination, []]);
+    assert.equal(installs.length, calls);
   });
 });

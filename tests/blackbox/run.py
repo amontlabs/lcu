@@ -27,6 +27,7 @@ import coverage
 import deviations
 import oracle
 import sandbox
+import snapshot
 from scenarios import load
 
 WORKTREE = HERE.parents[1]
@@ -183,7 +184,8 @@ def main(argv=None):
         if args.golden:
             target = HERE / 'golden' / host() / (entry.name.replace('/', '__') + '.txt')
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(left)
+            # Goldens are review artifacts: never let them name the real account (named normaliser `account`).
+            target.write_text(snapshot.normalise(left, ['account']))
             print(f'GOLDEN {entry.name} -> {target.relative_to(HERE)}')
             continue
         bad = left.startswith('HARNESS ERROR')

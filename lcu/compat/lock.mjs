@@ -184,7 +184,7 @@ function aborted(signal) {
 export function acquireSync(path, { timeout, file = LCU_LOCK_FILE, signal } = {}) {
   if (signal?.aborted) throw aborted(signal);
   const fd = openLockFile(path, file);
-  if (seams.platform === 'win32') return windowsAcquireSync(path, fd);
+  if (seams.platform === 'win32') return windowsAcquireSync(path, fd, timeout);
   const deadline = timeout === undefined ? undefined : Date.now() + timeout * 1000;
   try {
     for (let attempt = 0; ; attempt++) {
@@ -229,7 +229,7 @@ function attemptAsync(command, args, fd, signal) {
 export async function acquire(path, { timeout, signal, file = LCU_LOCK_FILE } = {}) {
   if (signal?.aborted) throw aborted(signal);
   const fd = openLockFile(path, file);
-  if (seams.platform === 'win32') return windowsAcquire(path, fd, signal);
+  if (seams.platform === 'win32') return windowsAcquire(path, fd, signal, timeout);
   const deadline = timeout === undefined ? undefined : Date.now() + timeout * 1000;
   try {
     for (let attempt = 0; ; attempt++) {
@@ -265,7 +265,7 @@ export function windowsPowerShell(env = process.env) {
  * tries, `pauseMs` apart), report LOCKED / DEADLOCK / OPENFAIL <hresult> on stdout (a private status
  * file), hold until stdin reaches EOF, then unlock, close and report RELEASED.
  */
-export function windowsHolderScript(path, { attempts = 10, pauseMs = 1000 } = {}) {
+export function windowsHolderScript(path, { attempts = 10, pauseMs = 1000, timeoutMs = null, pollMs = 50 } = {}) {
   const encoded = Buffer.from(path, 'utf8').toString('base64');
   return [
     "$ErrorActionPreference = 'Stop'",
@@ -276,12 +276,25 @@ export function windowsHolderScript(path, { attempts = 10, pauseMs = 1000 } = {}
     '  $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, $share)',
     '} catch { $out.WriteLine("OPENFAIL " + $_.Exception.HResult); $out.Flush(); exit 3 }',
     '$locked = $false',
-    `for ($i = 0; $i -lt ${attempts}; $i++) {`,
-    '  try { $fs.Lock(0, 1); $locked = $true; break } catch [System.IO.IOException] {',
-    `    if ($i -lt ${attempts - 1}) { [Threading.Thread]::Sleep(${pauseMs}) }`,
-    '  }',
-    '}',
-    'if (-not $locked) { $out.WriteLine("DEADLOCK"); $out.Flush(); $fs.Close(); exit 4 }',
+    ...(timeoutMs === null ? [
+      `for ($i = 0; $i -lt ${attempts}; $i++) {`,
+      '  try { $fs.Lock(0, 1); $locked = $true; break } catch [System.IO.IOException] {',
+      `    if ($i -lt ${attempts - 1}) { [Threading.Thread]::Sleep(${pauseMs}) }`,
+      '  }',
+      '}',
+      'if (-not $locked) { $out.WriteLine("DEADLOCK"); $out.Flush(); $fs.Close(); exit 4 }',
+    ] : [
+      // An explicit timeout: msvcrt.LK_NBLCK retried every pollMs until the deadline (callers such as
+      // lcu/origins.py `locked`), reported as TIMEOUT (LockTimeoutError), not msvcrt.LK_LOCK's DEADLOCK.
+      '$watch = [Diagnostics.Stopwatch]::StartNew()',
+      'while ($true) {',
+      '  try { $fs.Lock(0, 1); $locked = $true; break } catch [System.IO.IOException] {',
+      `    if ($watch.ElapsedMilliseconds -ge ${Math.max(0, Math.round(timeoutMs))}) { break }`,
+      `    [Threading.Thread]::Sleep(${pollMs})`,
+      '  }',
+      '}',
+      'if (-not $locked) { $out.WriteLine("TIMEOUT"); $out.Flush(); $fs.Close(); exit 5 }',
+    ]),
     '$out.WriteLine("LOCKED"); $out.Flush()',
     '[void][Console]::In.ReadToEnd()',
     '$fs.Unlock(0, 1); $fs.Close()',
@@ -295,10 +308,12 @@ export function windowsDeadlockError() {
   return new PyOSError({ errno: 36, strerror: 'Resource deadlock avoided', className: 'OSError', code: 'EDEADLK' }, 'win32');
 }
 
-function startHolder(path) {
+function startHolder(path, timeout) {
   const statusPath = join(tmpdir(), `.lcu-lock-${process.pid}-${randomBytes(8).toString('hex')}`);
   const statusFd = openSync(statusPath, O_CREAT | constants.O_EXCL | O_RDWR, 0o600);
-  const script = windowsHolderScript(path, { attempts: seams.windowsAttempts, pauseMs: seams.windowsPauseMs });
+  const script = windowsHolderScript(path, {
+    attempts: seams.windowsAttempts, pauseMs: seams.windowsPauseMs, timeoutMs: timeout === undefined ? null : timeout * 1000,
+  });
   const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
   const env = {};
@@ -344,10 +359,11 @@ function startHolder(path) {
   return { child, status, cleanup, exited: () => !alive() };
 }
 
-function holderResult(path, holder) {
+function holderResult(path, holder, timeout) {
   const gone = holder.exited(); // probed before reading, so a final report is never missed
   const lines = holder.status().split(/\r?\n/);
   if (lines.includes('DEADLOCK')) return windowsDeadlockError();
+  if (lines.includes('TIMEOUT')) return timeoutError(path, timeout);
   const open = lines.map((line) => /^OPENFAIL (-?\d+)$/.exec(line)).find(Boolean);
   if (open) return new LockError(`cannot lock ${path}: the lock holder could not open it (HRESULT ${open[1]})`);
   // LOCKED counts only while the holder still holds: a holder that already exited (or released)
@@ -377,14 +393,14 @@ function abandon(holder) {
   holder.cleanup();
 }
 
-function windowsAcquireSync(path, fd) {
+function windowsAcquireSync(path, fd, timeout) {
   let holder;
   try {
-    holder = startHolder(path);
-    // The holder answers within its attempts; allow generous start-up time on top, never forever.
-    const until = Date.now() + seams.windowsAttempts * seams.windowsPauseMs + 60000;
+    holder = startHolder(path, timeout);
+    // The holder answers within its attempts (or its timeout); allow generous start-up time on top, never forever.
+    const until = Date.now() + (timeout === undefined ? seams.windowsAttempts * seams.windowsPauseMs : timeout * 1000) + 60000;
     for (;;) {
-      const result = holderResult(path, holder);
+      const result = holderResult(path, holder, timeout);
       if (result === 'LOCKED') return new Lock(path, fd, holderState(holder));
       if (result) throw result;
       if (Date.now() > until) throw new LockError(`cannot lock ${path}: the lock holder did not answer`);
@@ -397,13 +413,13 @@ function windowsAcquireSync(path, fd) {
   }
 }
 
-async function windowsAcquire(path, fd, signal) {
+async function windowsAcquire(path, fd, signal, timeout) {
   let holder;
   try {
-    holder = startHolder(path);
+    holder = startHolder(path, timeout);
     for (;;) {
       if (signal?.aborted) throw aborted(signal);
-      const result = holderResult(path, holder);
+      const result = holderResult(path, holder, timeout);
       if (result === 'LOCKED') return new Lock(path, fd, holderState(holder));
       if (result) throw result;
       await sleep(10);

@@ -231,7 +231,42 @@ def cache_summary(sb):
 
 # -- fixture server -----------------------------------------------------------------------------------------
 
-CA = ASSETS / 'tls/ca.pem'
+OPENSSL = '/usr/bin/openssl'
+TLS_HOSTS = ('github.com', 'raw.githubusercontent.com', 'objects.githubusercontent.com',
+             'release-assets.githubusercontent.com')
+
+
+def tls_dir(sb):
+    """A throwaway test CA and a server certificate for the GitHub host names, generated with /usr/bin/openssl
+    into the sandbox's harness directory (same absolute path for A and B; never in the tree snapshot, never in Git)."""
+    directory = sb.bb / 'tls'
+    if (directory / 'server.pem').is_file():
+        return directory
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / 'ca.cnf').write_text(
+        '[req]\ndistinguished_name=dn\nprompt=no\nx509_extensions=v3\n[dn]\nCN=LCU blackbox test CA\n'
+        '[v3]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n'
+        'subjectKeyIdentifier=hash\n')
+    (directory / 'server.cnf').write_text(
+        '[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=github.com\n[v3]\nbasicConstraints=CA:FALSE\n'
+        'keyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n'
+        'authorityKeyIdentifier=keyid\nsubjectAltName=' + ','.join('DNS:' + host for host in TLS_HOSTS) + '\n')
+
+    def openssl(*args):
+        subprocess.run([OPENSSL, *args], cwd=directory, check=True, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    openssl('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'ca.key', '-out', 'ca.pem', '-days', '30',
+            '-sha256', '-config', 'ca.cnf')
+    openssl('req', '-new', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'server.key', '-out', 'server.csr',
+            '-config', 'server.cnf')
+    openssl('x509', '-req', '-in', 'server.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial',
+            '-out', 'server.pem', '-days', '30', '-sha256', '-extfile', 'server.cnf', '-extensions', 'v3')
+    return directory
+
+
+def ca_path(sb):
+    return tls_dir(sb) / 'ca.pem'
 
 
 def _free_port(start):
@@ -260,7 +295,8 @@ class Server:
         (self.root / 'routes.json').write_text('[]')
         (self.root / 'requests.log').write_text('')
         self.process = subprocess.Popen(
-            [self.sb.bb / 'tools/python3', ASSETS / 'fixture_server.py', str(self.port), str(self.root)],
+            [self.sb.bb / 'tools/python3', ASSETS / 'fixture_server.py', str(self.port), str(self.root),
+             str(tls_dir(self.sb))],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             env={'PATH': '/usr/bin:/bin', 'PYTHONDONTWRITEBYTECODE': '1'}, start_new_session=True)
         for _ in range(100):
@@ -289,8 +325,8 @@ class Server:
         if proxy:
             env['https_proxy'] = f'http://127.0.0.1:{self.port}'
         if trust:
-            env['SSL_CERT_FILE'] = str(CA)
-            env['NODE_EXTRA_CA_CERTS'] = str(CA)
+            env['SSL_CERT_FILE'] = str(ca_path(self.sb))
+            env['NODE_EXTRA_CA_CERTS'] = str(ca_path(self.sb))
         return env
 
     def routes(self, *rules):
@@ -349,7 +385,7 @@ def curl_with_ca(sb):
               f'LCU_BB_RECORDER={sandbox.shlex.quote(str(sb.recorder))} '
               f'LCU_BB_CONFIG={sandbox.shlex.quote(str(sb.config_path))} LCU_BB_LOG={sandbox.shlex.quote(str(sb.log_path))}\n'
               '"$LCU_BB_NODE" "$LCU_BB_RECORDER" curl "$@" || exit $?\n'
-              f'exec /usr/bin/curl --cacert {sandbox.shlex.quote(str(CA))} "$@"\n')
+              f'exec /usr/bin/curl --cacert {sandbox.shlex.quote(str(ca_path(sb)))} "$@"\n')
     fixtures.write(sb.bb / 'fakes/curl', script, 0o755)
     sb.fake('curl', default={})
 

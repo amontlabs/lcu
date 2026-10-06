@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """A GitHub-shaped HTTPS fixture served through an HTTP CONNECT proxy, for the `lcu update` scenarios.
 
-    fixture_server.py PORT DIR
+    fixture_server.py PORT DIR TLSDIR
 
 LCU talks to hard-coded https://github.com URLs and has no override, so the harness points the client at this
-process with `https_proxy=http://127.0.0.1:PORT` and trusts tls/ca.pem (`SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS`).
-The tunnel is terminated here with a certificate for the GitHub host names (test-only CA and key, checked in).
+process with `https_proxy=http://127.0.0.1:PORT` and trusts TLSDIR/ca.pem (`SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS`).
+The tunnel is terminated here with TLSDIR/server.pem for the GitHub host names: a throwaway CA and key the harness
+generates per sandbox with /usr/bin/openssl (fixtures_mgmt.tls_dir); nothing is checked in.
 Behaviour comes from DIR/routes.json, re-read for every request, so a scenario can change the world between
 commands:
 
@@ -29,7 +30,7 @@ import time
 
 PORT = int(sys.argv[1])
 ROOT = Path(sys.argv[2])
-TLS = Path(__file__).resolve().parent / 'tls'
+TLS = Path(sys.argv[3])
 CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 CONTEXT.load_cert_chain(TLS / 'server.pem', TLS / 'server.key')
 REASONS = {200: 'OK', 301: 'Moved Permanently', 302: 'Found', 403: 'Forbidden', 404: 'Not Found',

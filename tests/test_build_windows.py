@@ -38,6 +38,7 @@ class WindowsBuildTests(unittest.TestCase):
                              'scripts/install_windows.py', 'scripts/install_windows.mjs', 'scripts/install.mjs',
                              'scripts/windows_launcher.py', 'scripts/windows_launcher.mjs', 'scripts/bundle.py',
                              'scripts/bundle_runtime.mjs', 'scripts/startup_env.mjs', 'bundle.json',
+                             'lcu/windows_host_analyze.cjs', 'lcu/vendor/acorn/acorn.js', 'lcu/vendor/acorn/LICENSE',
                              'docs/verification/codex-interactive-2026-09-24.md'):
                     self.assertIn(prefix + name, names)
                 bundled_records = {name.removeprefix(prefix + 'docs/verification/') for name in names

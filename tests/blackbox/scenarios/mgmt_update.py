@@ -24,7 +24,7 @@ from . import scenario
 
 ANY = ('darwin', 'linux')
 LINUX = ('linux',)
-NORMALISE = ('tmpdir-suffix', 'release-id')
+NORMALISE = ('tmpdir-suffix', 'release-id', 'account')
 
 
 def _note(sb, text):

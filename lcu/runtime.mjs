@@ -35,6 +35,8 @@ export const USAGE = ['Usage: lcu [--chrome] [--audio] [--mcp-discovery-compat]'
   '       lcu browser install',
   '       lcu browser status',
   '       lcu apps [list|allow APP|revoke APP] [--json]   (macOS)',
+  '       lcu origins [list [--session ID] [--json]]',
+  '       lcu origins forget ORIGIN [--session ID | --all-sessions] [--allowed | --denied]',
   '       lcu prune [--keep N] [--yes]',
   '       lcu update [--check [--json]] [--yes]',
   '       lcu doctor',
@@ -271,13 +273,22 @@ const is_os_error = isOSError;
 
 // ---------------------------------------------------------------------------------------------- environment
 
+/** The directory the original runtime uses when CODEX_HOME is not set. */
+export function default_codex_home(env, windows) {
+  const path_api = windows ? { join: nodePath.win32.join, normpath: nodePath.win32.normalize } : { join: posixJoin, normpath };
+  const home = windows ? (env.USERPROFILE || env.HOME || internals.home()) : (
+    'HOME' in env ? env.HOME : internals.home());
+  const selected = path_api.normpath(path_api.join(home, '.codex'));
+  // Node path.join collapses double leading slashes on Linux.
+  return selected.startsWith('//') ? '/' + selected.replace(/^\/+/, '') : selected;
+}
+
 /** Build the child environment. Returns a plain object (a copy of process.env with LCU's additions). */
 export function environment(root, resolved = null, { chrome = false, audio = false, platform = null } = {}) {
   resolved = resolved ?? paths(root);
   const [, resources, runtime, metadata] = resolved;
   const target = platform !== null ? platform : get(read_json(join(root, 'installation.json')), 'platform', 'linux');
   const windows = target === 'windows';
-  const path_api = windows ? { join: nodePath.win32.join, normpath: nodePath.win32.normalize } : { join: posixJoin, normpath };
   const separator = windows ? ';' : nodePath.delimiter;
   const module_dir = join(runtime, windows ? 'bin/node_modules' : 'lib/node_modules');
   const node = join(runtime, windows ? 'bin/node.exe' : 'bin/node');
@@ -287,11 +298,7 @@ export function environment(root, resolved = null, { chrome = false, audio = fal
   // Original gM/nne selects and trusts CODEX_HOME verbatim, including an
   // explicitly empty value. This changes only the launched child environment.
   if (!('CODEX_HOME' in env)) {
-    const home = windows ? (env.USERPROFILE || env.HOME || internals.home()) : (
-      'HOME' in env ? env.HOME : internals.home());
-    const selected = path_api.normpath(path_api.join(home, '.codex'));
-    // Node path.join collapses double leading slashes on Linux.
-    env.CODEX_HOME = selected.startsWith('//') ? '/' + selected.replace(/^\/+/, '') : selected;
+    env.CODEX_HOME = default_codex_home(env, windows);
   }
   // Select our verified executables, while retaining upstream caller options,
   // metadata, services, policy flags, and additional module/trust roots.
@@ -757,6 +764,11 @@ export async function main(root, argv) {
   if (argv[0] === 'apps') {
     const { main: apps } = await internals.load('./apps.mjs');
     await apps(root, argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'origins') {
+    const { main: origins } = await internals.load('./origins.mjs');
+    await origins(argv.slice(1));
     return;
   }
   if (argv[0] === 'prune') {

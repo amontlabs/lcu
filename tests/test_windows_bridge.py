@@ -97,7 +97,8 @@ class WindowsBridgeTests(unittest.TestCase):
     def test_stages_full_package_and_keeps_generations_on_invalid_copy(self):
         official, selected = _official(self.base)
         patches = self._windows(resolve_installed_windows_app={'return_value': selected},
-                                checked_prefix={'return_value': self.prefix})
+                                checked_prefix={'return_value': self.prefix},
+                                _preflight_host={'return_value': None})  # covered by test_windows_install_host.py
         with contextlib_exit(patches), mock.patch('sys.stderr', io.StringIO()) as stderr:
             generation, _ = bridge.prepare_generation(self.prefix)
             self.assertEqual(generation, self.prefix / 'apps' / selected.inventory_digest)
@@ -135,7 +136,9 @@ class WindowsBridgeTests(unittest.TestCase):
              mock.patch.object(bridge.subprocess, 'run', return_value=SimpleNamespace(returncode=3)) as run:
             status = bridge.main(['--prefix', str(self.prefix), '--agent', 'pi', '--audio'])
         self.assertEqual(status, 3)
-        prepare.assert_called_once_with(self.prefix)
+        prepare.assert_called_once()
+        self.assertEqual(prepare.call_args.args[0], self.prefix)
+        self.assertIsInstance(prepare.call_args.args[1], bridge.InstallRun)  # holds the prefix lock
         self.assertEqual(run.call_args.args[0], [
             str(generation / 'app/app/resources/cua_node/bin/node.exe'), '--disable-warning=ExperimentalWarning',
             str(bridge.SOURCE / 'scripts/install_windows.mjs'), '--app-generation', str(generation),

@@ -33,6 +33,58 @@ NORMALISERS = {
 }
 
 
+class _Account:
+    """`account`: the real OS account running the harness (name and home directory) -> <ACCOUNT>/<ACCOUNT_HOME>,
+    so snapshots, goldens and deviations name no personal account. The home is replaced as an exact path prefix.
+    The name is replaced as a whole word, except for names that are also ordinary words in LCU's output (root,
+    ubuntu, user, admin), which are replaced only in account contexts (`--user NAME`, `for NAME (`, JSON "NAME",
+    `USER=`/`LOGNAME=` values, `uid NAME`)."""
+
+    COMMON = {'root', 'ubuntu', 'user', 'admin', 'test'}
+
+    def __init__(self):
+        import pwd
+        entry = pwd.getpwuid(os.getuid())
+        self.name, self.home = entry.pw_name, entry.pw_dir.rstrip('/')
+        name = re.escape(self.name)
+        self.home_pattern = re.compile(re.escape(self.home) + r'(?=/|\b|$)') if self.home not in ('', '/') else None
+        if self.name in self.COMMON:
+            self.name_pattern = re.compile(
+                rf'(?<=--user ){name}\b|(?<=\bfor ){name}(?= \()|(?<="){name}(?=")|(?<=USER=){name}\b|'
+                rf'(?<=LOGNAME=){name}\b')
+        else:
+            self.name_pattern = re.compile(rf'(?<![\w.-]){name}(?![\w-])')
+
+    def sub(self, _replacement, text):
+        if self.home_pattern:
+            text = self.home_pattern.sub('<ACCOUNT_HOME>', text)
+        return self.name_pattern.sub('<ACCOUNT>', text)
+
+
+NORMALISERS['account'] = (_Account(), None)
+
+
+class _DiagnosticLog:
+    """`diagnostic-log`: the adapters' metadata log (LCU 0.9.5+, `<dir>/<adapter>-<UTC stamp>-<pid>.jsonl`). Its
+    name, size and hash vary with the clock and pid, and its lines carry `t`, `pid` and `ms` values; those become
+    <TIME>/<PID>/<MS>. Event names, order, fields and every other value stay compared."""
+
+    NAME = re.compile(r'\b([a-z][a-z0-9-]*)-\d{8}T\d{6}Z-\d+\.jsonl')
+    ENTRY = re.compile(r'(-<TIME>-<PID>\.jsonl  file \d{4}) \d+B sha256:[0-9a-f]{64}')
+    FIELDS = (re.compile(r'("t":)"[0-9T:.\-]+Z"'), re.compile(r'("pid":)\d+'), re.compile(r'("ms":)\d+'))
+    VALUES = ('"<TIME>"', '<PID>', '<MS>')
+
+    def sub(self, _replacement, text):
+        text = self.NAME.sub(r'\1-<TIME>-<PID>.jsonl', text)
+        text = self.ENTRY.sub(r'\1 <SIZE> sha256:<VARIES>', text)
+        for pattern, value in zip(self.FIELDS, self.VALUES):
+            text = pattern.sub(lambda match: match.group(1) + value, text)
+        return text
+
+
+NORMALISERS['diagnostic-log'] = (_DiagnosticLog(), None)
+
+
 def normalise(text, names):
     for name in names:
         pattern, replacement = NORMALISERS[name]

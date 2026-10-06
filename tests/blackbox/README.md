@@ -2,7 +2,7 @@
 
 Runs LCU entry points (`bin/lcu`, `bin/lcu-codex-sandbox`, `scripts/install.sh`, ...) as subprocesses and compares
 two implementations byte for byte. The oracle is the Python implementation at the commit in `BASE`
-(`805e7dcc0bf7...`, LCU 0.9.4); the other side is this worktree. Nothing here imports the code under test, so the harness
+(`11803629638a...`, LCU 0.9.6); the other side is this worktree. Nothing here imports the code under test, so the harness
 survives a port to another language. The harness itself is Python 3.12 stdlib only and needs `node` on PATH
 (the fake apps' `cua_node/bin/node` is a wrapper that execs the real Node, and every recorder is a Node script).
 
@@ -156,8 +156,11 @@ Stable public API (other areas' scenario files depend on it; extend, do not chan
   the tree under test), `architecture() write() recorder_script() linux_app() mac_app() agent_tools()
   agent_tools_node_link() seal() read_version()`; `npmcache.node_modules() npmcache.install()`.
 * `snapshot.NORMALISERS` (add new named entries; never change existing ones): `uuid`, `release-id`,
-  `release-id-any`, `tmpdir-suffix` (8-char Python suffixes), `lcu-ml` (`lcu-ml-<any suffix>`, Python 8 / Node 6),
-  `traceback` (an uncaught Python traceback becomes `[uncaught TYPE]`), `update-times` (`checked_at`/`at` values).
+  `release-id-any`, `account` (the real account name and home -> `<ACCOUNT>`/`<ACCOUNT_HOME>`; always applied to
+  goldens so they name no personal account), `tmpdir-suffix` (8-char Python suffixes), `lcu-ml` (`lcu-ml-<any suffix>`, Python 8 / Node 6),
+  `traceback` (an uncaught Python traceback becomes `[uncaught TYPE]`), `update-times` (`checked_at`/`at` values),
+  `diagnostic-log` (the adapters' `<adapter>-<stamp>-<pid>.jsonl` log: name, size/hash and `t`/`pid`/`ms` values;
+  default for the setup scenarios).
 * `run(..., tty='all', script=[(regex, text), ...])`: all three fds on the pty, and scripted answers typed when
   the regex appears in the output since the previous answer (pty and stderr).
 * `take_baseline()`, `compare_with(glob, reference=None)` (public forms of what mgmt scenarios did through
@@ -183,7 +186,9 @@ Stable public API (other areas' scenario files depend on it; extend, do not chan
   agent_tools_node_link() seal() read_version()`; `npmcache.node_modules() npmcache.install()`.
 * `snapshot.NORMALISERS` (add new named entries; never change existing ones): `uuid`, `release-id`,
   `release-id-any`, `tmpdir-suffix` (8-char Python suffixes), `lcu-ml` (`lcu-ml-<any suffix>`, Python 8 / Node 6),
-  `traceback` (an uncaught Python traceback becomes `[uncaught TYPE]`), `update-times` (`checked_at`/`at` values).
+  `traceback` (an uncaught Python traceback becomes `[uncaught TYPE]`), `update-times` (`checked_at`/`at` values),
+  `diagnostic-log` (the adapters' `<adapter>-<stamp>-<pid>.jsonl` log: name, size/hash and `t`/`pid`/`ms` values;
+  default for the setup scenarios).
 * `run(..., tty='all', script=[(regex, text), ...])`: all three fds on the pty, and scripted answers typed when
   the regex appears in the output since the previous answer (pty and stderr).
 * `take_baseline()`, `compare_with(glob, reference=None)` (public forms of what mgmt scenarios did through
@@ -212,12 +217,27 @@ write inside that account's real home. On the macOS host that would be the user'
 (`setup/codex*`, `setup/export`, `install/runtime-only`) refuse to run unless `LCU_BB_DISPOSABLE=1`, which only
 `docker.sh` sets; there the account is `ubuntu` and its home is emptied before every run.
 
+## Scenarios for LCU 0.9.5/0.9.6 (scenarios/u096.py)
+
+`origins/*` (arguments, list incl. JSON/session/broken files, forget incl. allowed/denied and unrewritable files,
+origin forms, CODEX_HOME), `diagnostic-log/status` and `/doctor` (the log line, LCU_DIAGNOSTIC_LOG=0, LCU_LOG_DIR,
+XDG_STATE_HOME), `doctor/mac-socket-path` (darwin: the 103-byte socket limit through
+SKY_CUA_SERVICE_NATIVE_PIPE_PATH), `browser/reconnect-message`, `update/post-install-relay` (no relay, current,
+changed plugin, manifest pointing elsewhere), `windows-host/analyzer` (the shipped lcu/windows_host_analyze.cjs on
+JSON requests; runnable off Windows).
+
 ## Scenarios (first set)
 
 See `python3 tests/blackbox/run.py --list`. `cli/*` (help, version variants, usage errors, tty guard, status,
 doctor, setup help and `--list-agents`, apps, prune, update help), `mcp/*` (launch argv/env/cwd/stdin as received
 by the fake `cua-repl.mjs`, flags, caller env, exit status, discovery compat, unusable cwd, codesign failure),
 `sandbox-shim/cases`, `install/*` (help, refusals, full runtime-only install), `setup/*`.
+
+## Test TLS
+
+The `lcu update` scenarios talk to a local HTTPS fixture (assets/mgmt/fixture_server.py). Its CA and server key are
+generated per sandbox with `/usr/bin/openssl` into `<sandbox>/.bb/tls` (fixtures_mgmt.tls_dir, RSA 2048, 30 days,
+SANs for the GitHub host names); no key material is checked in.
 
 ## Expected deviations (`--deviations FILE`)
 
@@ -226,7 +246,9 @@ A reviewed JSON allowlist; format and semantics in `deviations.py`. Each entry h
 exact `before`/`after` pair or `before_re`/`after_re` regexes, and a `justification`. Matching occurrences are
 replaced by the same token on both sides within that field only; if the snapshots are then identical the scenario
 is `EXPECTED` (never `PASS`), and the summary lists every deviation used with its justification and the scenarios it
-covered, plus `UNUSED` entries. Anything else stays `DIFF`. Nothing is applied without the file being passed.
+covered, plus `UNUSED` entries. Anything else stays `DIFF`. A file present on one side only (an
+implementation artifact) uses `"only": "a"|"b"` with a `file:<glob>` field and a full-match pattern for that side;
+see deviations.py. The `relay-implementation-stamp` entries are of that kind. Nothing is applied without the file being passed.
 
 Additions for the Node cut-over (see `deviations.py`): `"multiline": true` matches a pattern against the whole text of
 one field (a run's stdout, the recorder log, one file entry), so blocks and lines present on one side only can be
@@ -257,6 +279,12 @@ it spawned (session leader of a new session): `kill_own_session` verifies `getsi
 the unreaped child before SIGKILLing that group, else signals only the child. Nothing is ever signalled by name,
 parent pid or discovery. Signal scenarios use `assets/rt/driver.py` `send()`.
 
+## Test TLS
+
+The `lcu update` scenarios talk to a local HTTPS fixture (assets/mgmt/fixture_server.py). Its CA and server key are
+generated per sandbox with `/usr/bin/openssl` into `<sandbox>/.bb/tls` (fixtures_mgmt.tls_dir, RSA 2048, 30 days,
+SANs for the GitHub host names); no key material is checked in.
+
 ## Expected deviations (`--deviations FILE`)
 
 A reviewed JSON allowlist; format and semantics in `deviations.py`. Each entry has an `id`, a `scenario` glob, one
@@ -264,7 +292,9 @@ A reviewed JSON allowlist; format and semantics in `deviations.py`. Each entry h
 exact `before`/`after` pair or `before_re`/`after_re` regexes, and a `justification`. Matching occurrences are
 replaced by the same token on both sides within that field only; if the snapshots are then identical the scenario
 is `EXPECTED` (never `PASS`), and the summary lists every deviation used with its justification and the scenarios it
-covered, plus `UNUSED` entries. Anything else stays `DIFF`. Nothing is applied without the file being passed.
+covered, plus `UNUSED` entries. Anything else stays `DIFF`. A file present on one side only (an
+implementation artifact) uses `"only": "a"|"b"` with a `file:<glob>` field and a full-match pattern for that side;
+see deviations.py. The `relay-implementation-stamp` entries are of that kind. Nothing is applied without the file being passed.
 
 Additions for the Node cut-over (see `deviations.py`): `"multiline": true` matches a pattern against the whole text of
 one field (a run's stdout, the recorder log, one file entry), so blocks and lines present on one side only can be

@@ -53,6 +53,8 @@ describe('DoctorTests', () => {
     output = '';
     internals.write = (text) => { output += text; };
     stdin('', false);
+    // These tests are about permissions guidance, not the account's home folder length (upstream #15).
+    internals.mac_socket_path_problem = () => null;
   });
   afterEach(() => {
     Object.assign(internals, saved);

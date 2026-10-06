@@ -519,6 +519,30 @@ describe('UpstreamRuntimeTests', () => {
     assert.deepEqual(calls, [['./maintenance.mjs', root, ['--keep', '3', '--yes']]]);
   });
 
+  it('origins dispatches to lcu/origins.mjs without resolving the app (LCU 0.9.6 #21)', async () => {
+    rmSync(join(root, 'installation.json'));
+    const calls = [];
+    internals.load = async (name) => ({ main: (...args) => { calls.push([name, ...args]); } });
+    await main(root, ['origins', 'forget', 'https://example.com', '--all-sessions']);
+    assert.deepEqual(calls, [['./origins.mjs', ['forget', 'https://example.com', '--all-sessions']]]);
+  });
+
+  it('USAGE lists the origins commands (LCU 0.9.6)', () => {
+    const lines = runtime.USAGE.split('\n');
+    assert.equal(lines[5], '       lcu origins [list [--session ID] [--json]]');
+    assert.equal(lines[6], '       lcu origins forget ORIGIN [--session ID | --all-sessions] [--allowed | --denied]');
+    assert.equal(lines[7], '       lcu prune [--keep N] [--yes]');
+  });
+
+  it('default_codex_home is the CODEX_HOME environment() supplies', () => {
+    internals.home = () => '/fixture';
+    assert.equal(runtime.default_codex_home({}, false), '/fixture/.codex');
+    assert.equal(runtime.default_codex_home({ HOME: '//x/y' }, false), '/x/y/.codex');
+    assert.equal(runtime.default_codex_home({ HOME: '' }, false), '.codex');
+    assert.equal(runtime.default_codex_home({ USERPROFILE: 'C:\\u' }, true), 'C:\\u\\.codex');
+    assert.equal(runtime.default_codex_home({ USERPROFILE: '', HOME: '' }, true), '\\fixture\\.codex');
+  });
+
   it('test_doctor_help_prints_without_resolving_missing_app', async () => {
     rmSync(join(root, 'installation.json'));
     const calls = [];
