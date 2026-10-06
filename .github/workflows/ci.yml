@@ -38,14 +38,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-      - name: DIAG root account (temporary)
-        if: runner.os == 'macOS'
-        run: |
-          dscacheutil -q user -a uid 0 || true
-          dscacheutil -q user -a name root || true
-          dscl . -read /Users/root UserShell || true
-          python -c "import pwd; print(pwd.getpwuid(0)); print(pwd.getpwnam('root'))"
-          dscacheutil -q user | grep -B3 -A6 'uid: 0$' || true
       - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
       # Python 3.12.10: the whole suite, including the differentials. They pin CPython 3.12.10's argparse, tar, zip,
       # shlex and Expat behaviour (later 3.12.x patch releases change them), so they run on exactly this version.

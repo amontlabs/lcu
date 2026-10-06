@@ -79,6 +79,18 @@ emit({
             for entry in expected[key] + got[key]:
                 if 'mem' in entry:
                     entry['mem'] = sorted(entry['mem'])
+        # macOS can hold two records for one uid (the GitHub macOS runner image lists root twice: the directory's, with
+        # /bin/bash, and the legacy /etc/passwd one, with /bin/sh). libc getpwuid() answers one and dscacheutil, which
+        # Node asks, the other; only their shell differs and LCU never reads it. For such uids the other fields are
+        # still compared exactly.
+        counts = {}
+        for account in accounts:
+            counts[account.pw_uid] = counts.get(account.pw_uid, 0) + 1
+        ambiguous = {uid for uid, count in counts.items() if count > 1} if sys.platform == 'darwin' else set()
+        for index, uid in enumerate(uids):
+            if uid in ambiguous:
+                for side in (expected, got):
+                    side['pwuid'][index] = {k: v for k, v in side['pwuid'][index].items() if k != 'shell'}
         for key in expected:
             self.assertEqual(got[key], expected[key], key)
 
