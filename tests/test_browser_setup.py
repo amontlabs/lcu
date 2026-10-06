@@ -820,6 +820,14 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.chrome.read_text(), '{"path": "/chatgpt/host"}')
         self.assertFalse(self.edge.exists())
 
+    def test_a_failed_refresh_does_not_take_back_a_manifest_changed_meanwhile(self):
+        install(self.root)
+        self.during = lambda: self.chrome.write_text('{"path": "/chatgpt/host"}')
+        self.fail = 'node crashed'
+        with self.assertRaisesRegex(ValueError, 'installer failed'):
+            refresh(self.root)
+        self.assertEqual(self.chrome.read_text(), '{"path": "/chatgpt/host"}')
+
     def test_a_failed_refresh_leaves_the_working_registration_and_other_manifests_alone(self):
         destination = install(self.root)
         taken = json.dumps({'name': 'com.openai.codexextension', 'path': '/Applications/ChatGPT.app/host'})

@@ -584,8 +584,13 @@ def refresh(root):
             else:
                 _refresh_in_scratch(root, system, destination, selected_app, ours, env, saved)
         except BaseException:
-            for path, state in saved.items():
-                _restore(path, state)  # a failed refresh must leave the working relay registered
+            if system == 'Windows':
+                # Only the real manifest was written, and it may now name the original host instead of
+                # the relay. Put it back only in that state; a later change by someone else stays theirs.
+                for path, state in saved.items():
+                    directory = _launcher_dir(path)
+                    if directory is not None and directory.is_relative_to(destination / 'chrome/extension-host'):
+                        _restore(path, state)
             raise
         after = _relay_snapshot(destination, system, ours)
     return Refreshed('unchanged' if before == after else 'changed', destination, displaced)
