@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 if sys.platform == 'win32':
     raise unittest.SkipTest('macOS private host')
 
-from lcu.macos_host import (SKY_SERVICE_NAME, bundle_replaced_at, diagnose_response,
+from lcu.macos_host import (SKY_SERVICE_NAME, SingleFlight, bundle_replaced_at, diagnose_response,
                             diagnose_sky_services, parse_process_start, parse_process_table,
                             stale_service_message)
 
@@ -214,6 +214,47 @@ class DiagnoseTests(unittest.TestCase):
         kill.assert_not_called()
         killpg.assert_not_called()
         run.assert_called_once()
+
+
+class SingleFlightTests(unittest.TestCase):
+    def test_a_burst_of_callers_shares_one_run_and_the_next_burst_runs_again(self):
+        from threading import Event, Thread
+        release, started, runs = Event(), Event(), []
+
+        def work():
+            runs.append(1)
+            started.set()
+            release.wait(5)
+            return {'ok': True, 'run': len(runs)}
+
+        flight = SingleFlight(work)
+        results = []
+        threads = [Thread(target=lambda: results.append(flight())) for _ in range(8)]
+        threads[0].start()
+        self.assertTrue(started.wait(5))
+        for thread in threads[1:]:
+            thread.start()
+        time.sleep(0.2)
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(results, [{'ok': True, 'run': 1}] * 8)
+        self.assertEqual(flight()['run'], 2)
+
+    def test_a_failing_run_frees_the_flight_and_waiters_do_not_hang(self):
+        calls = []
+
+        def work():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError('boom')
+            return {'ok': True}
+
+        flight = SingleFlight(work, wait_seconds=0.1)
+        with self.assertRaises(RuntimeError):
+            flight()
+        self.assertEqual(flight(), {'ok': True})
 
 
 class HostRequestTests(unittest.TestCase):

@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 from queue import Empty, Queue
-from threading import Condition, Thread
+from threading import Condition, Event, Lock, Thread
 from uuid import uuid4
 
 
@@ -124,12 +124,41 @@ def diagnose_response():
         return {'ok': False, 'error': str(exc)[:512]}
 
 
+class SingleFlight:
+    """Run `work` once at a time; callers arriving meanwhile share the running call's result."""
+
+    def __init__(self, work, wait_seconds=5):
+        self.work, self.wait_seconds = work, wait_seconds
+        self.lock = Lock()
+        self.current = None
+
+    def __call__(self):
+        with self.lock:
+            flight = self.current
+            leader = flight is None
+            if leader:
+                flight = self.current = {'done': Event(), 'result': None}
+        if leader:
+            try:
+                flight['result'] = self.work()
+            finally:
+                with self.lock:
+                    self.current = None
+                flight['done'].set()
+        else:
+            flight['done'].wait(self.wait_seconds)
+        return flight['result'] or {'ok': False, 'error': 'The Computer Use service diagnosis did not finish.'}
+
+
+shared_diagnosis = SingleFlight(diagnose_response)
+
+
 def answer_diagnose(connection):
     """Send the diagnosis on a private duplicate of the request connection, then close it."""
     with connection:
         try:
             connection.settimeout(3)
-            connection.sendall((json.dumps(diagnose_response(), separators=(',', ':')) + '\n').encode())
+            connection.sendall((json.dumps(shared_diagnosis(), separators=(',', ':')) + '\n').encode())
         except OSError:
             pass
 
