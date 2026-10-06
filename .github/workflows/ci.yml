@@ -92,8 +92,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-      - run: tests/blackbox/docker.sh --runs 2
-      - run: tests/blackbox/docker.sh --root --runs 2
+      - run: tests/blackbox/docker.sh --runs 2 --deviations /src/tests/blackbox/deviations.json
+      - run: tests/blackbox/docker.sh --root --runs 2 --deviations /src/tests/blackbox/deviations.json
 
   windows:
     # Modules and tests for POSIX-only targets (Linux/macOS installers and

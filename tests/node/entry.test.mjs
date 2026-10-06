@@ -212,7 +212,9 @@ describe('pre-Node gate', () => {
   beforeEach(() => { temporary = tempDir(); });
   afterEach(() => temporary.cleanup());
 
-  it('macOS: a Node that is not the selected app\'s is refused before it runs', { skip: process.platform !== 'darwin' }, () => {
+  it('macOS: a Node that is not the selected app\'s is refused before it runs', {
+    skip: process.platform !== 'darwin' ? 'macOS gate' : !existsSync('/Applications/ChatGPT.app') ? 'the ChatGPT app is not installed (the selected app must be a real bundle for this refusal)' : false,
+  }, () => {
     const marker = join(temporary.path, 'ran');
     const fake = join(temporary.path, 'fake-node');
     writeFileSync(fake, `#!/bin/sh\ntouch '${marker}'\n`);
