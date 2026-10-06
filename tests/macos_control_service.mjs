@@ -308,6 +308,13 @@ try {
     session_id: 'after-slow', turn_id: 'after-slow-turn', call_id: 'after-slow-call'}};
   const rpcCountBeforeSlow = globalThis.originalRpcCount;
   let nextDispatched = false;
+  // Emulate the original worker's lifecycle race: the hook gets its registered
+  // timeoutMs, after which the host moves on while cleanup keeps running.
+  const outcome = await Promise.race([
+    abandoned.then(() => 'finished'),
+    new Promise(resolve => setTimeout(() => resolve('expired'), turnEnded.timeoutMs)),
+  ]);
+  assert.equal(outcome, 'expired', 'the gated native cleanup must outlast the hook budget');
   const next = handleRpc({type: 'execute', method: 'list_apps', args: []}).then(() => { nextDispatched = true; });
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(nextDispatched, false, 'a Sky request must wait for pending turn cleanup');

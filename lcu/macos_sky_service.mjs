@@ -317,14 +317,16 @@ function finishPendingCleanup() {
     cleanupInFlight = (async () => {
       for (const [key, item] of pendingCleanup) {
         if (item.metadata && !item.nativeNotified) {
-          const {MacComputerUseClient} = await import(pathToFileURL(
-            globalThis.nodeRepl.env.LCU_MAC_SKY_CLIENT_PATH).href);
-          controlClient ??= new MacComputerUseClient();
-          await timedCleanupStep('native IPC turn-ended', () =>
-            controlClient.request('ComputerUseIPCCodexTurnEndedRequest', {
+          await timedCleanupStep('native IPC turn-ended', async () => {
+            // Include the first, cold import of the client in the step's timing.
+            const {MacComputerUseClient} = await import(pathToFileURL(
+              globalThis.nodeRepl.env.LCU_MAC_SKY_CLIENT_PATH).href);
+            controlClient ??= new MacComputerUseClient();
+            return controlClient.request('ComputerUseIPCCodexTurnEndedRequest', {
               threadID: item.session_id,
               turnID: item.turn_id,
-            }, {codexMetadata: item.metadata, timeoutSeconds: TURN_ENDED_TIMEOUT_SECONDS}));
+            }, {codexMetadata: item.metadata, timeoutSeconds: TURN_ENDED_TIMEOUT_SECONDS});
+          });
           item.nativeNotified = true;
         }
         if (!item.cliNotified) {
