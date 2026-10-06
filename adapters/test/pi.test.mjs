@@ -453,7 +453,7 @@ test('Pi forwards only the native app approval persistence scope selected in its
   }
 });
 
-test('Pi retains failed turn cleanup, blocks ended-turn tools, and retries before a new turn', async () => {
+test('Pi retains failed turn cleanup, warns without throwing, and keeps Sky tools blocked', async () => {
   const oldCommand = process.env.LCU_MCP_COMMAND;
   const oldLog = process.env.LCU_FIXTURE_LOG;
   const directory = mkdtempSync(join(tmpdir(), 'lcu-pi-cleanup-'));
@@ -463,22 +463,29 @@ test('Pi retains failed turn cleanup, blocks ended-turn tools, and retries befor
   const handlers = new Map();
   const tools = new Map();
   const pi = { on(event, handler) { handlers.set(event, handler); }, registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {} };
-  const ctx = { sessionManager: { getSessionId: () => 'fail-session' }, hasUI: false };
+  const warnings = [];
+  const ctx = { sessionManager: { getSessionId: () => 'fail-session' }, hasUI: false,
+    ui: { notify: (message, level) => warnings.push({ message, level }) } };
   try {
     piExtension(pi);
     await handlers.get('before_agent_start')({ systemPrompt: 'Pi' }, ctx);
     await handlers.get('agent_start')({}, ctx);
-    await assert.rejects(handlers.get('agent_end')({
-      messages: [{ role: 'assistant', stopReason: 'stop' }],
-    }, ctx), /cleanup failed/);
+    await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].level, 'warning');
+    assert.match(warnings[0].message, /cleanup failed/);
     await assert.rejects(tools.get('js').execute('after-end', { code: 'late' }, undefined, undefined, ctx),
       /active Pi agent turn/);
 
-    // A new turn cannot become active until the previous cleanup succeeds.
-    await assert.rejects(handlers.get('agent_start')({}, ctx), /cleanup failed/);
+    // A new turn cannot run Sky actions until the previous cleanup succeeds.
+    await handlers.get('agent_start')({}, ctx);
+    assert.equal(warnings.length, 2);
+    await assert.rejects(tools.get('js').execute('blocked', { code: 'late' }, undefined, undefined, ctx),
+      /still finishing the previous turn/);
     let entries = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
     let cleanups = entries.filter(entry => entry.name === 'turn_ended');
-    assert.equal(cleanups.length, 2);
+    assert.equal(cleanups.length, 3);
+    assert.equal(entries.some(entry => entry.name === 'js'), false);
     assert.ok(cleanups.every(entry => entry.args.hook_event_name === 'Stop'));
     assert.ok(cleanups.every(entry => entry.args.session_id === 'fail-session'));
     assert.equal(new Set(cleanups.map(entry => entry.args.turn_id)).size, 1);
@@ -487,7 +494,7 @@ test('Pi retains failed turn cleanup, blocks ended-turn tools, and retries befor
     await assert.rejects(handlers.get('session_shutdown')(), /cleanup failed/);
     entries = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
     cleanups = entries.filter(entry => entry.name === 'turn_ended');
-    assert.equal(cleanups.length, 3);
+    assert.equal(cleanups.length, 4);
   } finally {
     await handlers.get('session_shutdown')?.().catch(() => {});
     if (oldCommand === undefined) delete process.env.LCU_MCP_COMMAND;
@@ -508,17 +515,20 @@ test('Pi can recover when a retained cleanup succeeds on retry', async () => {
   const handlers = new Map();
   const tools = new Map();
   const pi = { on(event, handler) { handlers.set(event, handler); }, registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {} };
-  const ctx = { sessionManager: { getSessionId: () => 'fail-once-session' }, hasUI: false };
+  const warnings = [];
+  const ctx = { sessionManager: { getSessionId: () => 'fail-once-session' }, hasUI: false,
+    ui: { notify: (message, level) => warnings.push({ message, level }) } };
   try {
     piExtension(pi);
     await handlers.get('before_agent_start')({ systemPrompt: 'Pi' }, ctx);
     await handlers.get('agent_start')({}, ctx);
-    await assert.rejects(handlers.get('agent_end')({
-      messages: [{ role: 'assistant', stopReason: 'stop' }],
-    }, ctx), /cleanup failed once/);
+    await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0].message, /cleanup failed once/);
 
     // Retrying cleanup succeeds before the next turn is made available.
     await handlers.get('agent_start')({}, ctx);
+    assert.equal(warnings.length, 1);
     const result = await tools.get('js').execute('new-turn', { code: 'recovered' }, undefined, undefined, ctx);
     assert.equal(result.content[0].text, 'recovered');
     await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
@@ -528,6 +538,112 @@ test('Pi can recover when a retained cleanup succeeds on retry', async () => {
     assert.equal(cleanups.length, 3);
     assert.equal(cleanups[0].args.turn_id, cleanups[1].args.turn_id);
     assert.notEqual(cleanups[1].args.turn_id, cleanups[2].args.turn_id);
+  } finally {
+    await handlers.get('session_shutdown')?.();
+    if (oldCommand === undefined) delete process.env.LCU_MCP_COMMAND;
+    else process.env.LCU_MCP_COMMAND = oldCommand;
+    if (oldLog === undefined) delete process.env.LCU_FIXTURE_LOG;
+    else process.env.LCU_FIXTURE_LOG = oldLog;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Pi warns instead of throwing when the host times out turn cleanup, and holds Sky tools until it clears', async () => {
+  const oldCommand = process.env.LCU_MCP_COMMAND;
+  const oldLog = process.env.LCU_FIXTURE_LOG;
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-pi-timeout-'));
+  const log = join(directory, 'mcp.jsonl');
+  process.env.LCU_MCP_COMMAND = JSON.stringify([process.execPath, fixture]);
+  process.env.LCU_FIXTURE_LOG = log;
+  const handlers = new Map();
+  const tools = new Map();
+  const pi = { on(event, handler) { handlers.set(event, handler); }, registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {} };
+  const warnings = [];
+  // The host times out the first three turn_ended calls: agent_end, the
+  // agent_start retry, and the first tool call of the new turn.
+  const ctx = { sessionManager: { getSessionId: () => 'timeout-3-session' }, hasUI: false,
+    ui: { notify: (message, level) => warnings.push({ message, level }) } };
+  const readEntries = () => readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  try {
+    piExtension(pi);
+    await handlers.get('before_agent_start')({ systemPrompt: 'Pi' }, ctx);
+    await handlers.get('agent_start')({}, ctx);
+    const first = await tools.get('js').execute('t1', { code: 'first' }, undefined, undefined, ctx);
+    assert.equal(first.content[0].text, 'first');
+
+    // Turn end: timeout is a warning, not an error, and cleanup stays pending.
+    await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].level, 'warning');
+    assert.match(warnings[0].message, /may still be finishing in the background/);
+    await assert.rejects(tools.get('js').execute('late', { code: 'late' }, undefined, undefined, ctx),
+      /active Pi agent turn/);
+
+    // The next turn starts without throwing, but no Sky action runs while the
+    // old cleanup is still pending.
+    await handlers.get('agent_start')({}, ctx);
+    assert.equal(warnings.length, 2);
+    // Parallel tool calls share one cleanup retry and are all held.
+    const heldCalls = await Promise.allSettled([
+      tools.get('js').execute('held-a', { code: 'held-a' }, undefined, undefined, ctx),
+      tools.get('js').execute('held-b', { code: 'held-b' }, undefined, undefined, ctx),
+    ]);
+    assert.deepEqual(heldCalls.map(call => call.status), ['rejected', 'rejected']);
+    for (const call of heldCalls) assert.match(String(call.reason), /still finishing the previous turn/);
+    assert.equal(readEntries().filter(entry => entry.name === 'js').length, 1);
+
+    // Once the retry succeeds the held turn becomes active.
+    const resumed = await tools.get('js').execute('resumed', { code: 'resumed' }, undefined, undefined, ctx);
+    assert.equal(resumed.content[0].text, 'resumed');
+    await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
+
+    const entries = readEntries();
+    const cleanups = entries.filter(entry => entry.name === 'turn_ended');
+    assert.equal(cleanups.length, 5);
+    assert.equal(new Set(cleanups.slice(0, 4).map(entry => entry.args.turn_id)).size, 1);
+    assert.notEqual(cleanups[3].args.turn_id, cleanups[4].args.turn_id);
+    const calls = entries.filter(entry => entry.name === 'js');
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].meta['x-codex-turn-metadata'].turn_id, cleanups[4].args.turn_id);
+    assert.equal(warnings.length, 2);
+  } finally {
+    await handlers.get('session_shutdown')?.();
+    if (oldCommand === undefined) delete process.env.LCU_MCP_COMMAND;
+    else process.env.LCU_MCP_COMMAND = oldCommand;
+    if (oldLog === undefined) delete process.env.LCU_FIXTURE_LOG;
+    else process.env.LCU_FIXTURE_LOG = oldLog;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Pi drops a held turn that ends while cleanup is pending and never runs its tools', async () => {
+  const oldCommand = process.env.LCU_MCP_COMMAND;
+  const oldLog = process.env.LCU_FIXTURE_LOG;
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-pi-held-end-'));
+  const log = join(directory, 'mcp.jsonl');
+  process.env.LCU_MCP_COMMAND = JSON.stringify([process.execPath, fixture]);
+  process.env.LCU_FIXTURE_LOG = log;
+  const handlers = new Map();
+  const tools = new Map();
+  const pi = { on(event, handler) { handlers.set(event, handler); }, registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {} };
+  const warnings = [];
+  const ctx = { sessionManager: { getSessionId: () => 'timeout-2-session' }, hasUI: false,
+    ui: { notify: (message, level) => warnings.push({ message, level }) } };
+  try {
+    piExtension(pi);
+    await handlers.get('before_agent_start')({ systemPrompt: 'Pi' }, ctx);
+    await handlers.get('agent_start')({}, ctx);
+    await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
+    await handlers.get('agent_start')({}, ctx);
+    assert.equal(warnings.length, 2);
+    // The held turn ends before cleanup cleared; this retry succeeds.
+    await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
+    assert.equal(warnings.length, 2);
+    await assert.rejects(tools.get('js').execute('stale', { code: 'stale' }, undefined, undefined, ctx),
+      /active Pi agent turn/);
+    const entries = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(entries.filter(entry => entry.name === 'js').length, 0);
+    assert.equal(entries.filter(entry => entry.name === 'turn_ended').length, 3);
   } finally {
     await handlers.get('session_shutdown')?.();
     if (oldCommand === undefined) delete process.env.LCU_MCP_COMMAND;

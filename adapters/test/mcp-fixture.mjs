@@ -9,6 +9,7 @@ const server = new Server({ name: 'original-cua-contract-fixture', version: '1' 
   { capabilities: { tools: {} }, instructions: 'Original CUA initialization guide.' });
 const record = value => process.env.LCU_FIXTURE_LOG && appendFileSync(process.env.LCU_FIXTURE_LOG, `${JSON.stringify(value)}\n`);
 const failedCleanupSessions = new Set();
+const cleanupTimeouts = new Map();
 let activeRequest;
 let completePending;
 const controlPath = process.env.LCU_MAC_CONTROL_SOCKET;
@@ -116,6 +117,15 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
     });
     if (resultLine === undefined) throw new Error('picker code did not write a result');
     return { content: [{ type: 'text', text: resultLine }] };
+  }
+  // 'timeout-N-session' reproduces the original host's 5 s turn-ended limit on its first N calls.
+  const timeoutSession = name === 'turn_ended' && /^timeout-(\d+)-session$/.exec(args?.session_id ?? '');
+  if (timeoutSession) {
+    const seen = cleanupTimeouts.get(args.session_id) ?? 0;
+    cleanupTimeouts.set(args.session_id, seen + 1);
+    if (seen < Number(timeoutSession[1])) {
+      return { isError: true, content: [{ type: 'text', text: 'turn-ended handlers timed out' }] };
+    }
   }
   if (name === 'turn_ended' && args?.session_id === 'fail-session') {
     return { isError: true, content: [{ type: 'text', text: 'cleanup failed' }] };

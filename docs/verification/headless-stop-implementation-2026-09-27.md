@@ -128,13 +128,17 @@ It then sends the existing CLI `turn-ended` notification. A failed native
 acknowledgment remains pending and blocks the next Sky action while LCU retries
 cleanup; a full 128-turn metadata ledger refuses new RPC dispatch rather than
 evicting cleanup identity. The original bundled Node REPL accepts any positive
-safe-integer hook timeout, so the 22-second LCU hook budget is supported by the
-installed runtime.
+safe-integer hook timeout, but the host's `turn_ended` tool waits only 5
+seconds for the worker's handlers and then returns "turn-ended handlers timed
+out". A 22-second hook budget was therefore not honored (amontlabs/lcu#14); the
+LCU hook now returns after 4 seconds and slower cleanup continues in the
+background, still blocking the next Sky action until it completes.
 
 Timeouts are bounded: native status, Stop, and turn-ended requests use 15
 seconds; the trusted-service control deadline is 40 seconds; the adapter
-client wait is 45 seconds; and the lifecycle hook budget is 22 seconds for
-native plus CLI cleanup. The host forwards only its remaining deadline to the
+client wait is 45 seconds; and the lifecycle hook returns within 4 seconds,
+under the host's 5-second wait, while native plus CLI cleanup may run longer
+in the background. The host forwards only its remaining deadline to the
 trusted service. If the optional control socket cannot bind, turn metadata is
 still captured and original turn-ended cleanup remains available.
 
