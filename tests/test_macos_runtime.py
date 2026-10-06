@@ -277,6 +277,11 @@ class MacRuntimeTests(unittest.TestCase):
         self.assertIn('e' * 512, log)
         self.assertNotIn('e' * 513, log)
 
+    def test_turn_ended_command_that_cannot_start_is_logged(self):
+        error, log, _ = self.run_turn_ended(self.root / 'missing-client')
+        self.assertIn('could not start', str(error))
+        self.assertIn('exit=launch-failed', log)
+
     def test_turn_ended_command_logs_a_slow_success_but_not_a_fast_one(self):
         from lcu import macos_host
         slow = self.fake_client('slow-ok-client', 'time.sleep(0.4)\n')

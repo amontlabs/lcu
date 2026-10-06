@@ -362,31 +362,41 @@ async function cliCleanup(item) {
   }
 }
 
-function finishPendingCleanup() {
+async function runCleanup(retryFailed) {
+  const attempted = new Set();
+  let nativeFailure;
+  for (;;) {
+    // Re-scan so a turn that ends while this runs is picked up. Only a Sky
+    // request retries a command that already failed once.
+    const item = [...pendingCleanup.values()].find(candidate =>
+      !attempted.has(candidate) && (retryFailed || candidate.cliFailures === 0));
+    if (!item) break;
+    attempted.add(item);
+    try { await nativeCleanup(item); }
+    catch (error) { nativeFailure ??= error; continue; }
+    await cliCleanup(item);
+  }
+  if (nativeFailure) throw nativeFailure;
+}
+
+// One run at a time. The turn-ended hook starts a background run; a Sky request
+// waits for it and then runs again with retryFailed to retry failed commands.
+function finishPendingCleanup({retryFailed = false} = {}) {
   // The original runtime can report MCP success after a hook fails. Retain
   // native cleanup until its host acknowledges it and retry before more actions.
-  if (!cleanupInFlight) {
-    cleanupInFlight = (async () => {
-      const attempted = new Set();
-      let nativeFailure;
-      for (;;) {
-        // Re-scan so a turn that ends while this runs is picked up.
-        const item = [...pendingCleanup.values()].find(candidate => !attempted.has(candidate));
-        if (!item) break;
-        attempted.add(item);
-        try { await nativeCleanup(item); }
-        catch (error) { nativeFailure ??= error; continue; }
-        await cliCleanup(item);
-      }
-      if (nativeFailure) throw nativeFailure;
-    })().finally(() => { cleanupInFlight = undefined; });
-  }
-  return cleanupInFlight;
+  const current = cleanupInFlight;
+  if (current && (current.retryFailed || !retryFailed)) return current.promise;
+  const run = {retryFailed};
+  run.promise = (current ? current.promise.catch(() => {}) : Promise.resolve())
+    .then(() => runCleanup(retryFailed))
+    .finally(() => { if (cleanupInFlight === run) cleanupInFlight = undefined; });
+  cleanupInFlight = run;
+  return run.promise;
 }
 
 export async function handleRpc(request) {
   register();
-  await finishPendingCleanup();
+  await finishPendingCleanup({retryFailed: true});
   original ??= import(pathToFileURL(globalThis.nodeRepl.env.LCU_MAC_SKY_SERVICE_PATH).href);
   const runtime = globalThis.nodeRepl;
   const metadata = readTurnMetadata(runtime);

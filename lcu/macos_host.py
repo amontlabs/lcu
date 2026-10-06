@@ -52,6 +52,10 @@ def run_turn_ended(client, payload, timeout=TURN_ENDED_CLI_TIMEOUT_SECONDS):
         stderr = exc.stderr or b''
         failure = RuntimeError(
             f'Original turn-ended command timed out after {timeout} seconds.')
+    except OSError as exc:
+        status = 'launch-failed'
+        stderr = str(exc).encode()
+        failure = RuntimeError(f'Original turn-ended command could not start: {exc.strerror or exc}.')
     elapsed = time.monotonic() - started
     if failure is not None or elapsed >= TURN_ENDED_CLI_SLOW_SECONDS:
         text = bytes(stderr)[:STDERR_LOG_BYTES].decode('utf-8', 'replace').strip()
