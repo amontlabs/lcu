@@ -575,7 +575,7 @@ test('Pi warns instead of throwing when the host times out turn cleanup, and hol
     await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
     assert.equal(warnings.length, 1);
     assert.equal(warnings[0].level, 'warning');
-    assert.match(warnings[0].message, /still finishing in the background/);
+    assert.match(warnings[0].message, /may still be finishing in the background/);
     await assert.rejects(tools.get('js').execute('late', { code: 'late' }, undefined, undefined, ctx),
       /active Pi agent turn/);
 
@@ -583,8 +583,13 @@ test('Pi warns instead of throwing when the host times out turn cleanup, and hol
     // old cleanup is still pending.
     await handlers.get('agent_start')({}, ctx);
     assert.equal(warnings.length, 2);
-    await assert.rejects(tools.get('js').execute('held', { code: 'held' }, undefined, undefined, ctx),
-      /still finishing the previous turn/);
+    // Parallel tool calls share one cleanup retry and are all held.
+    const heldCalls = await Promise.allSettled([
+      tools.get('js').execute('held-a', { code: 'held-a' }, undefined, undefined, ctx),
+      tools.get('js').execute('held-b', { code: 'held-b' }, undefined, undefined, ctx),
+    ]);
+    assert.deepEqual(heldCalls.map(call => call.status), ['rejected', 'rejected']);
+    for (const call of heldCalls) assert.match(String(call.reason), /still finishing the previous turn/);
     assert.equal(readEntries().filter(entry => entry.name === 'js').length, 1);
 
     // Once the retry succeeds the held turn becomes active.
@@ -601,6 +606,44 @@ test('Pi warns instead of throwing when the host times out turn cleanup, and hol
     assert.equal(calls.length, 2);
     assert.equal(calls[1].meta['x-codex-turn-metadata'].turn_id, cleanups[4].args.turn_id);
     assert.equal(warnings.length, 2);
+  } finally {
+    await handlers.get('session_shutdown')?.();
+    if (oldCommand === undefined) delete process.env.LCU_MCP_COMMAND;
+    else process.env.LCU_MCP_COMMAND = oldCommand;
+    if (oldLog === undefined) delete process.env.LCU_FIXTURE_LOG;
+    else process.env.LCU_FIXTURE_LOG = oldLog;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Pi drops a held turn that ends while cleanup is pending and never runs its tools', async () => {
+  const oldCommand = process.env.LCU_MCP_COMMAND;
+  const oldLog = process.env.LCU_FIXTURE_LOG;
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-pi-held-end-'));
+  const log = join(directory, 'mcp.jsonl');
+  process.env.LCU_MCP_COMMAND = JSON.stringify([process.execPath, fixture]);
+  process.env.LCU_FIXTURE_LOG = log;
+  const handlers = new Map();
+  const tools = new Map();
+  const pi = { on(event, handler) { handlers.set(event, handler); }, registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {} };
+  const warnings = [];
+  const ctx = { sessionManager: { getSessionId: () => 'timeout-2-session' }, hasUI: false,
+    ui: { notify: (message, level) => warnings.push({ message, level }) } };
+  try {
+    piExtension(pi);
+    await handlers.get('before_agent_start')({ systemPrompt: 'Pi' }, ctx);
+    await handlers.get('agent_start')({}, ctx);
+    await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
+    await handlers.get('agent_start')({}, ctx);
+    assert.equal(warnings.length, 2);
+    // The held turn ends before cleanup cleared; this retry succeeds.
+    await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
+    assert.equal(warnings.length, 2);
+    await assert.rejects(tools.get('js').execute('stale', { code: 'stale' }, undefined, undefined, ctx),
+      /active Pi agent turn/);
+    const entries = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(entries.filter(entry => entry.name === 'js').length, 0);
+    assert.equal(entries.filter(entry => entry.name === 'turn_ended').length, 3);
   } finally {
     await handlers.get('session_shutdown')?.();
     if (oldCommand === undefined) delete process.env.LCU_MCP_COMMAND;

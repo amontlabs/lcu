@@ -60,7 +60,7 @@ test('turnEnded reports the host turn-ended timeout as a typed, retryable error'
     await assert.rejects(bridge.turnEnded({ sessionId: 'timeout-1-session', turnId: 't1' }), error => {
       assert.equal(error.code, TURN_CLEANUP_TIMEOUT_CODE);
       assert.equal(error.code, 'LCU_TURN_CLEANUP_TIMEOUT');
-      assert.match(error.message, /still finishing in the background/);
+      assert.match(error.message, /may still be finishing in the background/);
       assert.match(error.message, /retried before the next action/);
       return true;
     });

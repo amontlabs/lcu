@@ -534,8 +534,8 @@ export function createCuaClient({
           // The original host stops waiting after about 5 s; the cleanup keeps
           // running in the worker and is retried before the next action.
           const where = log.path ? ` See the diagnostic log at ${log.path}.` : '';
-          const timeout = new Error('Original CUA turn cleanup is taking longer than the host allows and is still ' +
-            `finishing in the background; it will be retried before the next action.${where}`);
+          const timeout = new Error('Original CUA turn cleanup did not finish within the host\'s wait; it may still be ' +
+            `finishing in the background and will be retried before the next action.${where}`);
           timeout.code = TURN_CLEANUP_TIMEOUT_CODE;
           throw timeout;
         }

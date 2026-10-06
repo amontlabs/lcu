@@ -295,9 +295,14 @@ const SLOW_CLEANUP_STEP_MS = 1_000;
 // can be attributed to native IPC or the CLI helper.
 async function timedCleanupStep(step, run) {
   const started = Date.now();
+  // The host gives up on the hook at about 5 s, so name a step still running then.
+  const watchdog = setTimeout(() => {
+    console.error(`LCU macOS turn cleanup step "${step}" is still running after ${Date.now() - started} ms`);
+  }, TURN_CLEANUP_HOOK_TIMEOUT_MS);
   try {
     return await run();
   } finally {
+    clearTimeout(watchdog);
     const ms = Date.now() - started;
     if (ms >= SLOW_CLEANUP_STEP_MS) {
       console.error(`LCU macOS turn cleanup step "${step}" took ${ms} ms`);
