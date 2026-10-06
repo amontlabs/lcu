@@ -44,6 +44,7 @@ class BuildPlatformTests(unittest.TestCase):
                 (release / 'adapters/audio-files.mjs').write_text('fixture')
                 (release / 'adapters/codex.mjs').write_text('fixture')
                 (release / 'adapters/host-guard.mjs').write_text('fixture')
+                (release / 'adapters/diagnostics.mjs').write_text('fixture')
                 (release / 'adapters/pi/index.ts').write_text('fixture')
             with mock.patch.object(build_bundle, 'architecture', return_value='arm64'), \
                     mock.patch.object(build_bundle, 'resolve_mac_runtime', return_value=node.parent.parent) as resolve, \
@@ -85,6 +86,7 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertIn(prefix + 'adapters/audio-files.mjs', names)
                 self.assertIn(prefix + 'adapters/codex.mjs', names)
                 self.assertIn(prefix + 'adapters/host-guard.mjs', names)
+                self.assertIn(prefix + 'adapters/diagnostics.mjs', names)
                 self.assertNotIn(prefix + 'app/Contents/Resources/cua_node/bin/node', names)
                 manifest = json.load(bundle.extractfile(prefix + 'bundle.json'))
                 self.assertEqual((manifest['platform'], manifest['architecture']), ('darwin', 'arm64'))

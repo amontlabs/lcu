@@ -13,8 +13,21 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "adapters" / "hermes"
+
 SOURCE_ADAPTERS = ROOT / "adapters"
 INSTALLED_ADAPTERS = Path("/opt/lcu/current/adapters")
+
+
+# The bridges these tests start would otherwise write to the developer's real diagnostic log.
+_log_env = patch.dict(os.environ, {"LCU_DIAGNOSTIC_LOG": "0"})
+
+
+def setUpModule():
+    _log_env.start()
+
+
+def tearDownModule():
+    _log_env.stop()
 
 
 class FakeContext:
@@ -53,7 +66,7 @@ class HermesHarnessTests(unittest.TestCase):
         adapter_root = home / "adapter" / "adapters"
         (adapter_root / "hermes").mkdir(parents=True)
         (adapter_root / "test").mkdir()
-        for name in ("client.mjs", "audio-files.mjs", "host-guard.mjs"):
+        for name in ("client.mjs", "audio-files.mjs", "diagnostics.mjs", "host-guard.mjs"):
             shutil.copy2(installed / name, adapter_root / name)
         for name in ("bridge.mjs",):
             shutil.copy2(installed / "hermes" / name, adapter_root / "hermes" / name)

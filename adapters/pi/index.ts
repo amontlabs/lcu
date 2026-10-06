@@ -74,10 +74,19 @@ export default function (pi: ExtensionAPI, options: {
   let active: { sessionId: string; turnId: string } | undefined;
   let turnGeneration = 0;
   let pickerInFlight = false;
+  // A turn Pi started while the previous turn's cleanup was still failing. It
+  // becomes active only after that cleanup succeeds, so no Sky action runs first.
+  let awaitingTurn: { sessionId: string; turnId: string } | undefined;
   let pendingCleanup: { turn: { sessionId: string; turnId: string }; event: 'Stop' | 'Interrupt' } | undefined;
   let pendingPickerCleanup: { client: ReturnType<typeof createCuaClient>; turn: { sessionId: string; turnId: string } } | undefined;
   let cleanupInFlight: Promise<void> | undefined;
   let approvalContext: ExtensionContext | undefined;
+
+  function warnCleanup(ctx: ExtensionContext, error: unknown) {
+    const message = `LCU turn cleanup is pending: ${error instanceof Error ? error.message : String(error)}`;
+    if (typeof ctx?.ui?.notify === 'function') ctx.ui.notify(message, 'warning');
+    else console.error(message);
+  }
 
   async function cleanPickerTurn(client: ReturnType<typeof createCuaClient>, turn: { sessionId: string; turnId: string }) {
     try {
@@ -383,6 +392,16 @@ export default function (pi: ExtensionAPI, options: {
         async execute(id, args, signal, _onUpdate, ctx) {
           const current = await connected();
           if (pendingPickerCleanup) await retryPickerCleanup();
+          if (!active && awaitingTurn) {
+            const turn = awaitingTurn;
+            try {
+              await finish('Interrupt');
+            } catch (error) {
+              throw new Error('LCU is still finishing the previous turn, so Computer Use actions are paused. ' +
+                `Try again in a few seconds. ${error instanceof Error ? error.message : String(error)}`);
+            }
+            if (awaitingTurn === turn && !active) { active = turn; awaitingTurn = undefined; }
+          }
           if (!active) throw new Error('LCU requires an active Pi agent turn');
           approvalContext = ctx;
           const result = await current.call(name, args, {
@@ -401,6 +420,7 @@ export default function (pi: ExtensionAPI, options: {
         const candidate = createCuaClient({
           command: commandFromEnvironment(options.command),
           cwd: process.cwd(),
+          adapter: options.ompEssentialTools ? 'omp' : 'pi',
           allowedOrigins: originsFromEnvironment(),
           onElicitation: async (params, { signal }) => {
             const ctx = approvalContext;
@@ -456,6 +476,7 @@ export default function (pi: ExtensionAPI, options: {
   }
 
   async function leaveSession() {
+    awaitingTurn = undefined;
     try {
       await finish('Interrupt', false);
       await retryPickerCleanup();
@@ -492,17 +513,32 @@ export default function (pi: ExtensionAPI, options: {
     // A failed turn_ended must succeed before Pi starts another turn. Keep the
     // old turn's identifiers so cleanup can be retried without enabling its tools.
     turnGeneration += 1;
-    await finish('Interrupt');
-    await retryPickerCleanup();
-    active = { sessionId: ctx.sessionManager.getSessionId(), turnId: randomUUID() };
     approvalContext = ctx;
+    const next = { sessionId: ctx.sessionManager.getSessionId(), turnId: randomUUID() };
+    try {
+      await finish('Interrupt');
+      await retryPickerCleanup();
+      awaitingTurn = undefined;
+      active = next;
+    } catch (error) {
+      // Cleanup can outlast the host's wait and finish in the background. Do not
+      // fail the turn; hold the new turn's LCU tools until a retry succeeds.
+      awaitingTurn = next;
+      warnCleanup(ctx, error);
+    }
   });
   pi.on('agent_end', async (event, ctx) => {
     turnGeneration += 1;
     const lastAssistant = [...event.messages].reverse().find(message => message.role === 'assistant');
     const interrupted = !lastAssistant || ctx.signal?.aborted ||
       (lastAssistant?.role === 'assistant' && lastAssistant.stopReason === 'aborted');
-    await finish(interrupted ? 'Interrupt' : 'Stop');
+    awaitingTurn = undefined;
+    try {
+      await finish(interrupted ? 'Interrupt' : 'Stop');
+    } catch (error) {
+      // finish() keeps pendingCleanup, so the next agent_start retries it.
+      warnCleanup(ctx, error);
+    }
   });
   pi.on('session_shutdown', leaveSession);
   pi.registerCommand('lcu', {

@@ -49,6 +49,9 @@ await writeFile(clientPath, `export class MacComputerUseClient {
   async request(requestType, payload, options) {
     globalThis.calls.push({requestType, payload, metadata: options.codexMetadata,
       timeoutSeconds: options.timeoutSeconds});
+    if (requestType === 'ComputerUseIPCCodexTurnEndedRequest' && globalThis.turnEndedGate) {
+      await globalThis.turnEndedGate;
+    }
     if (requestType === 'ComputerUseIPCCodexTurnEndedRequest' && globalThis.failTurnEndedOnce) {
       globalThis.failTurnEndedOnce = false;
       throw new Error('fixture native turn-ended failure');
@@ -150,7 +153,10 @@ try {
   const action = handleRpc({type: 'execute', method: 'click',
     args: [{app: 'com.fixture.A'}], wait: true});
   await waitFor(() => Boolean(turnEnded), 'original turn-ended hook was not registered');
-  assert.ok(turnEnded.timeoutMs >= 18_000);
+  // The original host gives all turn-ended handlers 5 s, so ours must return sooner;
+  // slower cleanup stays pending and is retried before the next Sky request.
+  assert.ok(turnEnded.timeoutMs > 0 && turnEnded.timeoutMs <= 4_000);
+  assert.ok(turnEnded.timeoutMs < 5_000);
   await waitFor(() => observedContexts.some(context => context.app === 'com.fixture.A'),
     'trusted service did not publish the current app context');
   metadata.turn_id = 'mutated-after-dispatch';
@@ -288,6 +294,39 @@ try {
   ]);
   assert.deepEqual(retryNativeEnded.map(call => call.metadata), [nextMetadata, nextMetadata]);
   assert.deepEqual(lifetimeMessages.at(-1), {session_id: 'next-session', turn_id: 'next-turn'});
+
+  // The original host stops waiting for the hook after its own limit (here:
+  // we simply do not await it). Slow native cleanup must keep running, finish
+  // both steps, and hold back the next Sky request until it does.
+  const slowMetadata = {session_id: 'slow-session', turn_id: 'slow-turn', call_id: 'slow-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': slowMetadata};
+  await handleRpc({type: 'execute', method: 'list_apps', args: []});
+  globalThis.turnEndedGate = new Promise(resolve => { globalThis.releaseTurnEnded = resolve; });
+  const slowLifetimeCount = lifetimeMessages.length;
+  const abandoned = turnEnded.run({session_id: slowMetadata.session_id, turn_id: slowMetadata.turn_id});
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': {
+    session_id: 'after-slow', turn_id: 'after-slow-turn', call_id: 'after-slow-call'}};
+  const rpcCountBeforeSlow = globalThis.originalRpcCount;
+  let nextDispatched = false;
+  // Emulate the original worker's lifecycle race: the hook gets its registered
+  // timeoutMs, after which the host moves on while cleanup keeps running.
+  const outcome = await Promise.race([
+    abandoned.then(() => 'finished'),
+    new Promise(resolve => setTimeout(() => resolve('expired'), turnEnded.timeoutMs)),
+  ]);
+  assert.equal(outcome, 'expired', 'the gated native cleanup must outlast the hook budget');
+  const next = handleRpc({type: 'execute', method: 'list_apps', args: []}).then(() => { nextDispatched = true; });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(nextDispatched, false, 'a Sky request must wait for pending turn cleanup');
+  assert.equal(globalThis.originalRpcCount, rpcCountBeforeSlow);
+  assert.equal(lifetimeMessages.length, slowLifetimeCount, 'CLI cleanup must wait for native cleanup');
+  globalThis.releaseTurnEnded();
+  globalThis.turnEndedGate = undefined;
+  await abandoned;
+  await next;
+  assert.deepEqual(lifetimeMessages.at(-1), {session_id: 'slow-session', turn_id: 'slow-turn'});
+  assert.equal(globalThis.originalRpcCount, rpcCountBeforeSlow + 1);
+  await turnEnded.run({session_id: 'after-slow', turn_id: 'after-slow-turn'});
 
   globalThis.nodeRepl.env.LCU_MAC_CONTROL_SOCKET = undefined;
   const noControlMetadata = {session_id: 'no-control-session', turn_id: 'no-control-turn',

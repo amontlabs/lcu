@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { pathToFileURL } from 'node:url';
+import { openDiagnosticLog } from './diagnostics.mjs';
 import { declineAgentHostApp } from './host-guard.mjs';
 
 const MODEL_TOOLS = new Set(['js', 'js_reset']);
@@ -301,6 +302,63 @@ export function createApprovalBroker({ now = Date.now, ttlMs = APPROVAL_CHOICE_T
   };
 }
 
+/** Number this adapter process's tool calls and log each one's start and how it ended. */
+export function createCallTracker(log, now = Date.now) {
+  let sequence = 0;
+  const live = new Set();
+  return {
+    /** The call number when exactly one call is in flight. */
+    get current() { return live.size === 1 ? [...live][0] : undefined; },
+    async track(tool, { timeout_ms: timeoutMs, signal } = {}, run) {
+      const call = ++sequence;
+      live.add(call);
+      const requested = Number(timeoutMs);
+      log.event('call_start', { call, tool, ...(Number.isFinite(requested) && requested > 0 ? { timeout_ms: requested } : {}) });
+      const started = now();
+      let outcome = 'error';
+      let code;
+      try {
+        const result = await run();
+        outcome = result?.isError ? 'tool_error' : 'ok';
+        return result;
+      } catch (error) {
+        if (error instanceof McpError) code = error.code;
+        outcome = signal?.aborted ? 'aborted' : code === ErrorCode.RequestTimeout ? 'timeout' : 'error';
+        throw error;
+      } finally {
+        live.delete(call);
+        log.event('call_end', { call, tool, ms: now() - started, outcome, code });
+      }
+    },
+  };
+}
+
+/** Log one approval's lifecycle: opened, claimed by the host mod, its choice, and how it ended. */
+export function createApprovalLogger(log, calls, now = Date.now) {
+  let sequence = 0;
+  return {
+    open(kind, params) {
+      const approval = ++sequence;
+      const app = params?._meta?.tool_params?.app;
+      const scopes = nativeAppApprovalOptions(params)?.choices
+        .map(choice => choice.value).filter(value => value === 'session' || value === 'always');
+      const started = now();
+      log.event('approval_open', {
+        approval, call: calls.current, kind, app: typeof app === 'string' ? app : undefined, scopes,
+      });
+      return {
+        claimed() { log.event('approval_claimed', { approval }); },
+        choice(choice) { log.event('approval_choice', { approval, choice }); },
+        end(response) {
+          log.event('approval_end', {
+            approval, ms: now() - started, action: response?.action, persist: response?._meta?.persist,
+          });
+        },
+      };
+    },
+  };
+}
+
 function originApproval(params, allowedOrigins) {
   const meta = params?._meta ?? params?.meta;
   if (meta?.tool_name !== 'access_browser_origin' || typeof meta.origin !== 'string') return false;
@@ -315,8 +373,13 @@ function originApproval(params, allowedOrigins) {
   return allowedOrigins.has(origin);
 }
 
+/** Code of the error `turnEnded` throws when the original host gave up waiting for cleanup. */
+export const TURN_CLEANUP_TIMEOUT_CODE = 'LCU_TURN_CLEANUP_TIMEOUT';
+
 /** Transport and lifecycle bridge only. The installed original server owns CUA behavior. */
-export function createCuaClient({ command, cwd, env, onElicitation, allowedOrigins = [] }) {
+export function createCuaClient({
+  command, cwd, env, onElicitation, allowedOrigins = [], adapter = 'client', log = openDiagnosticLog({ adapter }),
+}) {
   if (!Array.isArray(command) || command.length === 0 || command.some(part => typeof part !== 'string' || !part)) {
     throw new TypeError('command must be a nonempty argv array');
   }
@@ -355,11 +418,19 @@ export function createCuaClient({ command, cwd, env, onElicitation, allowedOrigi
   let tools;
   const approvals = createApprovalGate();
   const callSignals = new Set();
+  const calls = createCallTracker(log);
+  const approvalLog = createApprovalLogger(log, calls);
   client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
     const params = request.params;
     const refused = declineAgentHostApp(params);
-    if (refused) return refused;
-    if (originApproval(params, approved)) return { action: 'accept', content: {} };
+    const origin = !refused && originApproval(params, approved);
+    const entry = approvalLog.open(refused ? 'agent_host_refused' : origin ? 'browser_origin'
+      : nativeAppApprovalOptions(params) ? 'native_app' : 'other', params);
+    const response = refused ?? (origin ? { action: 'accept', content: {} } : await answerElicitation(params, extra));
+    entry.end(response);
+    return response;
+  });
+  async function answerElicitation(params, extra) {
     if (typeof onElicitation !== 'function') return { action: 'cancel' };
     const signal = AbortSignal.any([extra.signal, ...callSignals]);
     const aborted = new Promise(resolve => {
@@ -369,20 +440,25 @@ export function createCuaClient({ command, cwd, env, onElicitation, allowedOrigi
     const answer = await approvals.track(() => Promise.race([onElicitation(params, { signal }), aborted]));
     if (answer?.action === 'accept' || answer?.action === 'decline' || answer?.action === 'cancel') return answer;
     return { action: 'cancel' };
-  });
+  }
 
   return {
     async connect() {
       if (connected) return this;
+      const started = Date.now();
+      let reported = false;
       try {
         await client.connect(transport);
         connected = true;
+        reported = true;
+        log.event('upstream_connect', { ms: Date.now() - started, ok: true });
         const listed = await client.listTools();
         tools = listed.tools.filter(tool => MODEL_TOOLS.has(tool.name));
         if (tools.length !== MODEL_TOOLS.size) throw new Error('Original CUA js/js_reset tools are missing');
         return this;
       } catch (error) {
         connected = false;
+        if (!reported) log.event('upstream_connect', { ms: Date.now() - started, ok: false });
         await client.close().catch(() => {});
         if (controlDirectory) rmSync(controlDirectory, { recursive: true, force: true });
         controlDirectory = undefined;
@@ -425,12 +501,13 @@ export function createCuaClient({ command, cwd, env, onElicitation, allowedOrigi
       });
       if (signal) callSignals.add(signal);
       try {
-        return await callWithDeadline(approvals, timeout, signal, deadlineSignal => client.callTool({
-          name, arguments: args, _meta: {
-            ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
-            'x-codex-turn-metadata': turnMetadata,
-          },
-        }, undefined, { signal: deadlineSignal, timeout: APPROVAL_TIMEOUT_MS }));
+        return await calls.track(name, { timeout_ms: args?.timeout_ms, signal }, () =>
+          callWithDeadline(approvals, timeout, signal, deadlineSignal => client.callTool({
+            name, arguments: args, _meta: {
+              ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+              'x-codex-turn-metadata': turnMetadata,
+            },
+          }, undefined, { signal: deadlineSignal, timeout: APPROVAL_TIMEOUT_MS })));
       } finally {
         if (signal) callSignals.delete(signal);
       }
@@ -440,11 +517,28 @@ export function createCuaClient({ command, cwd, env, onElicitation, allowedOrigi
       if (!sessionId || !turnId || !['Stop', 'Interrupt', 'SubagentStop'].includes(event)) {
         throw new Error('Invalid original CUA lifecycle event');
       }
-      const result = await client.callTool({ name: 'turn_ended', arguments: {
-        hook_event_name: event, session_id: sessionId, turn_id: turnId,
-      } }, undefined, { timeout: TURN_END_TIMEOUT_MS });
+      const started = Date.now();
+      let result;
+      try {
+        result = await client.callTool({ name: 'turn_ended', arguments: {
+          hook_event_name: event, session_id: sessionId, turn_id: turnId,
+        } }, undefined, { timeout: TURN_END_TIMEOUT_MS });
+      } catch (error) {
+        log.event('turn_end', { hook_event: event, ms: Date.now() - started, outcome: 'error' });
+        throw error;
+      }
+      log.event('turn_end', { hook_event: event, ms: Date.now() - started, outcome: result.isError ? 'error' : 'ok' });
       if (result.isError) {
         const detail = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+        if (/turn-ended handlers timed out/i.test(detail)) {
+          // The original host stops waiting after about 5 s; the cleanup keeps
+          // running in the worker and is retried before the next action.
+          const where = log.path ? ` See the diagnostic log at ${log.path}.` : '';
+          const timeout = new Error('Original CUA turn cleanup did not finish within the host\'s wait; it may still be ' +
+            `finishing in the background and will be retried before the next action.${where}`);
+          timeout.code = TURN_CLEANUP_TIMEOUT_CODE;
+          throw timeout;
+        }
         throw new Error(`Original CUA turn cleanup failed: ${detail || 'unknown error'}`);
       }
       return result;
@@ -476,9 +570,11 @@ export function createCuaClient({ command, cwd, env, onElicitation, allowedOrigi
       return result;
     },
     async close() {
+      const wasConnected = connected;
       connected = false;
       try { await client.close(); }
       finally {
+        if (wasConnected) log.event('upstream_close');
         if (controlDirectory) {
           rmSync(controlDirectory, { recursive: true, force: true });
           controlDirectory = undefined;

@@ -1,15 +1,8 @@
 // Thin lifetime entry point for the original Windows native-pipe host.
-// The installer replaces both markers with exact source bytes from app.asar.
+// The installer replaces the marker with a require of the module it generated from app.asar.
 const cryptoForEntry = require('node:crypto');
-const c = require('node:url');
-const T = {default: require('node:net')};
-const p = require('node:os');
-const v = require('node:fs');
-const _ = require('node:crypto');
-const R = require('node:perf_hooks');
 const {startLifetimeSignal} = require('./windows-lifetime-host.cjs');
-// ORIGINAL_WINDOWS_HOST_IMPORTS
-// ORIGINAL_WINDOWS_PIPE_HOST
+// ORIGINAL_WINDOWS_PIPE_HOST_MODULE
 
 async function start() {
   const helper = process.env.LCU_WRE_HELPER_PATH;
@@ -17,7 +10,7 @@ async function start() {
   const cli = process.env.CODEX_CLI_PATH;
   if (!helper || !transport || !cli) throw Error('Windows helper, transport, and Codex CLI paths are required');
   const pipe = `\\\\.\\pipe\\lcu-wre-${cryptoForEntry.randomUUID()}`;
-  const host = await Wre({
+  const host = await createPipeHost({
     codexCliPath: cli,
     nativePipeDirectory: pipe,
     windowsHelperPath: helper,

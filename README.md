@@ -20,6 +20,13 @@ Follow https://raw.githubusercontent.com/amontlabs/lcu/main/docs/INSTALLATION.md
 Check my OS, architecture, and prerequisites, then guide me through any required permissions.
 ```
 
+In Claude Code on an Apple Silicon Mac, two commands do the same through its plugin manager; see [Claude Code plugin](docs/INSTALLATION.md#claude-code-plugin):
+
+```sh
+claude plugin marketplace add amontlabs/lcu
+claude plugin install lcu@lcu
+```
+
 ## Features
 
 - **Desktop apps:** read windows, click, type, and take screenshots.
@@ -99,7 +106,7 @@ Enable Chrome control in my LCU setup using the installation guide:
 https://raw.githubusercontent.com/amontlabs/lcu/main/docs/INSTALLATION.md#desktop-and-browser
 ```
 
-Enable the official extension in your Chrome profile and restart your harness. Then ask it to use LCU to list Chrome tabs. Sites still require approval. Claude Code's Chrome support remains experimental because some interruptions do not trigger tab cleanup; see [adapter limitations](docs/ADAPTERS.md).
+Enable the official extension in your Chrome profile and restart your harness. Then restart Chrome, or turn the ChatGPT extension off and on in `chrome://extensions`; an extension that was already connected keeps the original native host until it reconnects. Then ask your agent to use LCU to list Chrome tabs. Sites still require approval. Claude Code's Chrome support remains experimental because some interruptions do not trigger tab cleanup; see [adapter limitations](docs/ADAPTERS.md). If Chrome calls fail with `requires caller identity`, see [Chrome troubleshooting](docs/INSTALLATION.md#chrome-extension-fails-with-requires-caller-identity).
 
 ## Enable computer-audio recording
 

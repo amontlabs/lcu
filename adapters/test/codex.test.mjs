@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,6 +60,7 @@ async function connectCodexRelay(relayPath = relay, { delayProgress = false } = 
     HOME: directory,
     TMPDIR: directory,
     LCU_CODEX_FIXTURE_LOG: logPath,
+    LCU_LOG_DIR: join(directory, 'diagnostics'),
   };
   if (delayProgress) {
     // --import takes a URL; a Windows drive path would read as a 'd:' scheme.
@@ -117,6 +118,12 @@ async function connectCodexRelay(relayPath = relay, { delayProgress = false } = 
   }
 
   const logs = () => readRecords(logPath);
+  const diagnosticText = () => {
+    const diagnostics = env.LCU_LOG_DIR;
+    return existsSync(diagnostics)
+      ? readdirSync(diagnostics).map(name => readFileSync(join(diagnostics, name), 'utf8')).join('') : '';
+  };
+  const diagnostics = () => diagnosticText().split('\n').filter(Boolean).map(line => JSON.parse(line));
   let closePromise;
   async function close() {
     if (closePromise) return closePromise;
@@ -140,6 +147,8 @@ async function connectCodexRelay(relayPath = relay, { delayProgress = false } = 
   return {
     client,
     logs,
+    diagnostics,
+    diagnosticText,
     elicitationRequests,
     elicitationResponses,
     listChanged,
@@ -161,6 +170,7 @@ test('Codex relay starts through the installed current symlink', { timeout: 10_0
   copyFileSync(fileURLToPath(new URL('../audio-files.mjs', import.meta.url)), join(adapters, 'audio-files.mjs'));
   copyFileSync(fileURLToPath(new URL('../client.mjs', import.meta.url)), join(adapters, 'client.mjs'));
   copyFileSync(fileURLToPath(new URL('../host-guard.mjs', import.meta.url)), join(adapters, 'host-guard.mjs'));
+  copyFileSync(fileURLToPath(new URL('../diagnostics.mjs', import.meta.url)), join(adapters, 'diagnostics.mjs'));
   symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), join(adapters, 'node_modules'),
     process.platform === 'win32' ? 'junction' : 'dir');
   symlinkSync(release, join(install, 'current'), process.platform === 'win32' ? 'junction' : 'dir');
@@ -324,6 +334,40 @@ test('Codex relay preserves MCP contracts and changes only returned audio blocks
 
     const gracefulClose = await bridge.close();
     assert.equal(gracefulClose, true, `Codex relay did not gracefully close the upstream fixture: ${bridge.stderr}`);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Codex relay logs calls and approvals as metadata only', { timeout: 20_000 }, async () => {
+  const bridge = await connectCodexRelay();
+  try {
+    const codeMarker = 'codex-diag-code-marker-5521';
+    const ok = await bridge.client.callTool({ name: 'js', arguments: { code: codeMarker, timeout_ms: 777 } });
+    assert.equal(ok.content[0].text, `Synthetic result: ${codeMarker}`);
+    const failed = await bridge.client.callTool({ name: 'js', arguments: { code: 'tool-error' } });
+    assert.equal(failed.isError, true);
+    bridge.elicitationResponses.push({ action: 'accept', content: {}, _meta: { persist: 'session' } });
+    await bridge.client.callTool({ name: 'js', arguments: { code: 'approval' } });
+    await bridge.client.callTool({ name: 'turn_ended', arguments: {
+      hook_event_name: 'Stop', session_id: 'diag-session-1', turn_id: 'diag-turn-1',
+    } });
+
+    const events = bridge.diagnostics();
+    assert.ok(events.some(entry => entry.event === 'upstream_connect' && entry.ok === true));
+    assert.deepEqual(events.filter(entry => entry.event === 'call_end').map(entry => [entry.call, entry.outcome]),
+      [[1, 'ok'], [2, 'tool_error'], [3, 'ok']]);
+    assert.equal(events.find(entry => entry.event === 'call_start').timeout_ms, 777);
+    const open = events.find(entry => entry.event === 'approval_open');
+    assert.deepEqual([open.approval, open.call, open.kind], [1, 3, 'other']);
+    const end = events.find(entry => entry.event === 'approval_end');
+    assert.deepEqual([end.approval, end.action, end.persist], [1, 'accept', 'session']);
+
+    const text = bridge.diagnosticText();
+    for (const secret of [codeMarker, 'Synthetic tool-level failure', 'Approve the synthetic fixture operation',
+      'diag-session-1', 'diag-turn-1']) {
+      assert.equal(text.includes(secret), false, secret);
+    }
   } finally {
     await bridge.close();
   }
