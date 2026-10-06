@@ -808,6 +808,18 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(brave.read_text(), '{"path": "/other/host"}')
         self.assertEqual(self.edge.read_text(), '{"path": "/other/edge-host"}')
 
+    def test_a_manifest_of_the_relay_that_someone_else_changes_during_the_refresh_is_not_overwritten(self):
+        destination = install(self.root)
+        self.edge.unlink()  # only Chrome is ours here; it is taken over while the installer runs
+
+        def chatgpt_takes_over():
+            self.chrome.write_text('{"path": "/chatgpt/host"}')
+
+        self.during = chatgpt_takes_over
+        self.assertEqual(refresh(self.root).destination, destination)
+        self.assertEqual(self.chrome.read_text(), '{"path": "/chatgpt/host"}')
+        self.assertFalse(self.edge.exists())
+
     def test_a_failed_refresh_leaves_the_working_registration_and_other_manifests_alone(self):
         destination = install(self.root)
         taken = json.dumps({'name': 'com.openai.codexextension', 'path': '/Applications/ChatGPT.app/host'})

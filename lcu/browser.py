@@ -491,7 +491,7 @@ def _write_manifest(path, data):
         staged_path.unlink(missing_ok=True)
 
 
-def _refresh_in_scratch(root, system, destination, selected_app, ours, env):
+def _refresh_in_scratch(root, system, destination, selected_app, ours, env, saved):
     """Run the install path with the original installer's manifests going to a scratch home, then publish ours.
 
     The original installer writes a manifest for every browser. Run against the real ones it would, for a
@@ -512,7 +512,8 @@ def _refresh_in_scratch(root, system, destination, selected_app, ours, env):
                 raise ValueError(f'The original Chrome installer produced no manifest for {path}.')
             staged[path] = twin.read_bytes()
         for path, data in staged.items():
-            _write_manifest(path, data)
+            if _file_state(path) == saved[path]:  # changed or removed meanwhile by someone else: theirs now
+                _write_manifest(path, data)
 
 
 def refresh(root):
@@ -581,7 +582,7 @@ def refresh(root):
                 # records the manifest path in HKCU, so it has to write the real one.
                 _install_locked(root, system, destination, selected_app)
             else:
-                _refresh_in_scratch(root, system, destination, selected_app, ours, env)
+                _refresh_in_scratch(root, system, destination, selected_app, ours, env, saved)
         except BaseException:
             for path, state in saved.items():
                 _restore(path, state)  # a failed refresh must leave the working relay registered
