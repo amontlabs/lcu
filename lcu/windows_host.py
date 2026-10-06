@@ -1,12 +1,17 @@
 """Extract the unchanged original Windows pipe host into a private generation.
 
-Only the tiny launch entry is LCU code. The native host and its dependencies
-come unchanged from the installed application's verified app.asar.
+Only the tiny launch entry and the structural analyzer are LCU code. The native
+host and its dependencies come unchanged from the installed application's
+app.asar. The host factory is located by structure (a parsed top-level function
+whose options are the native-pipe settings), never by a minified name, and the
+declarations it needs are copied verbatim into one generated module.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
+import os
 import posixpath
 from pathlib import Path
 from queue import Empty, Queue
@@ -17,254 +22,188 @@ from threading import Thread
 from .asar import list_asar_members, read_asar_members
 
 _MAIN_PATH = re.compile(r'^\.vite/build/main(?:-[^/]+)?\.js$')
-_BINDING = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*=\s*require\s*\(\s*(['\"])([^'\"]+)\2\s*\)")
+_ANALYZER = Path(__file__).with_name('windows_host_analyze.cjs')
+_GENERATED = 'lcu-original-pipe-host.cjs'
+_RESOLVED_SUFFIXES = ('', '.js', '.json', '.node', '/package.json', '/index.js', '/index.json', '/index.node')
+_MAX_CHUNKS = 400
+_NODE_MEMBER = 'app/resources/cua_node/bin/node.exe'
 
 
 def _required_layout(detail: str):
     raise ValueError(f'Required Windows host layout is unavailable: {detail}')
 
 
-def _skip_quoted(source: str, index: int, quote: str) -> int:
-    index += 1
-    while index < len(source):
-        if source[index] == '\\':
-            index += 2
-        elif source[index] == quote:
-            return index + 1
-        else:
-            index += 1
-    _required_layout('unterminated source string')
+@dataclass(frozen=True)
+class HostPlan:
+    """The read-only result of analysing an app.asar; nothing here is written yet."""
+    main: str
+    factory: str
+    module: str
+    contents: dict[str, bytes]
+    uncarried: int = 0  # top-level calls that only touch imported modules; see windows_host_analyze.cjs
 
 
-def _function_body_end(source: str, opening: int) -> int:
-    """Find the Wre factory's end; skip strings, comments, and regex literals."""
-    depth = 1
-    index = opening + 1
-    modes = ['code']
-    interpolation_depths = []
-    while index < len(source):
-        mode = modes[-1]
-        char = source[index]
-        if mode == 'template':
-            if char == '\\':
-                index += 2
-            elif char == '`':
-                modes.pop()
-                index += 1
-            elif source.startswith('${', index):
-                depth += 1
-                interpolation_depths.append(depth)
-                modes.append('code')
-                index += 2
-            else:
-                index += 1
-            continue
-        if char in "'\"":
-            index = _skip_quoted(source, index, char)
-        elif char == '`':
-            modes.append('template')
-            index += 1
-        elif source.startswith('//', index):
-            newline = source.find('\n', index + 2)
-            index = len(source) if newline < 0 else newline + 1
-        elif source.startswith('/*', index):
-            end = source.find('*/', index + 2)
-            if end < 0:
-                _required_layout('unterminated source comment')
-            index = end + 2
-        elif char == '/' and _starts_regex(source, index):
-            index = _regex_end(source, index)
-        elif char == '{':
-            depth += 1
-            index += 1
-        elif char == '}':
-            prior = depth
-            depth -= 1
-            index += 1
-            if interpolation_depths and prior == interpolation_depths[-1]:
-                interpolation_depths.pop()
-                modes.pop()
-            elif depth == 0:
-                return index
-        else:
-            index += 1
-    _required_layout('unterminated Wre function')
+def _analyzer_env() -> dict[str, str]:
+    env = {'PATH': os.environ.get('PATH', '')}
+    if 'SYSTEMROOT' in os.environ:  # Node aborts at startup on Windows without it
+        env['SYSTEMROOT'] = os.environ['SYSTEMROOT']
+    return env
 
 
-def _starts_regex(source: str, index: int) -> bool:
-    previous = index - 1
-    while previous >= 0 and source[previous].isspace():
-        previous -= 1
-    if previous >= 0 and source[previous] in '=(:,[!&|?;{}+-*%^~<>':
-        return True
-    word = re.search(r'([A-Za-z_$][\w$]*)\s*$', source[:index])
-    return bool(word and word.group(1) in ('return', 'throw', 'case', 'delete', 'void', 'typeof'))
-
-
-def _regex_end(source: str, index: int) -> int:
-    index += 1
-    in_class = False
-    escaped = False
-    while index < len(source) and source[index] not in '\r\n':
-        char = source[index]
-        if escaped:
-            escaped = False
-        elif char == '\\':
-            escaped = True
-        elif char == '[':
-            in_class = True
-        elif char == ']':
-            in_class = False
-        elif char == '/' and not in_class:
-            index += 1
-            while index < len(source) and source[index].isalpha():
-                index += 1
-            return index
-        index += 1
-    _required_layout('unterminated Wre regular expression')
-
-
-def _wre_source(source: bytes) -> bytes:
+def _analyze(node: Path, request: dict) -> dict:
+    if not Path(node).is_file():
+        _required_layout('the original Node needed to read the host layout is missing')
     try:
-        text = source.decode('utf-8')
-    except UnicodeDecodeError as exc:
-        raise ValueError('Required Windows host layout is unavailable: main source is not UTF-8.') from exc
-    matches = list(re.finditer(r'\bfunction\s+Wre\s*\(', text))
-    if len(matches) != 1:
-        _required_layout('expected one named Wre host factory')
-    match = matches[0]
-    index = match.end()
-    parens = 1
-    while index < len(text) and parens:
-        char = text[index]
-        if char in "'\"`":
-            index = _skip_quoted(text, index, char)
-        elif text.startswith('//', index):
-            newline = text.find('\n', index + 2)
-            index = len(text) if newline < 0 else newline + 1
-        elif text.startswith('/*', index):
-            end = text.find('*/', index + 2)
-            if end < 0:
-                _required_layout('unterminated function parameter comment')
-            index = end + 2
-        elif char == '(':
-            parens += 1
-            index += 1
-        elif char == ')':
-            parens -= 1
-            index += 1
-        else:
-            index += 1
-    while index < len(text) and text[index].isspace():
-        index += 1
-    if parens or index >= len(text) or text[index] != '{':
-        _required_layout('Wre is not a function declaration')
-    end = _function_body_end(text, index)
-    result = text[match.start():end].encode('utf-8')
-    if b'closeActiveTurn' not in result or b'nativePipeDirectory' not in result:
-        _required_layout('Wre no longer exposes the expected native-pipe and turn-cleanup interface')
-    return result
-
-
-def _referenced(name: str, source: bytes) -> bool:
+        result = subprocess.run(
+            [str(node), '--max-old-space-size=2048', str(_ANALYZER)],
+            input=json.dumps(request).encode('utf-8'),
+            capture_output=True, env=_analyzer_env(), timeout=180, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _required_layout(f'the structural analyzer could not run ({exc.__class__.__name__})')
     try:
-        text = source.decode('utf-8')
+        response = json.loads(result.stdout)
+    except ValueError:
+        response = None
+    if result.returncode != 0 or not isinstance(response, dict):
+        detail = result.stderr.decode('utf-8', 'replace').strip().splitlines()[:1]
+        _required_layout('the structural analyzer failed to read the main bundle' +
+                         (f' ({detail[0][:160]})' if detail else ''))
+    if response.get('ok') is not True:
+        _required_layout(str(response.get('error') or 'the structural analyzer rejected the main bundle'))
+    return response
+
+
+def _decode(source: bytes, name: str) -> str:
+    try:
+        return source.decode('utf-8')
     except UnicodeDecodeError:
-        return False
-    return re.search(r'(?<![\w$])' + re.escape(name) + r'(?![\w$])', text) is not None
+        _required_layout(f'{name} is not UTF-8')
 
 
-def _direct_member(current: str, specifier: str, members: set[str]):
-    if specifier.startswith('node:'):
-        return None
-    if not specifier.startswith('.'):
-        _required_layout(f'unsupported non-relative original dependency {specifier!r}')
-    target = posixpath.normpath(posixpath.join(posixpath.dirname(current), specifier))
-    if target not in members:
-        _required_layout(f'original dependency is missing: {target}')
-    return target
-
-
-def _host_imports(main: bytes, host: bytes) -> list[tuple[str, str]]:
-    bindings = {}
-    for match in _BINDING.finditer(main.decode('utf-8')):
-        name, specifier = match.group(1), match.group(3)
-        if not _referenced(name, host):
+def _member_for(current: str, specifier: str, members: set[str]) -> str:
+    base = posixpath.normpath(posixpath.join(posixpath.dirname(current), specifier))
+    if base == '..' or base.startswith('../') or posixpath.isabs(base):
+        _required_layout(f'original dependency {specifier!r} leaves the application archive')
+    # Node's own order for a relative specifier: the exact file, then .js, .json, .node,
+    # then a directory's package.json "main" (not supported here) or index file.
+    # A trailing slash (or `/.`, `/..`) names a directory only; Node then skips file candidates.
+    directory_only = specifier.endswith(('/', '/.', '/..')) or specifier in ('.', '..')
+    for suffix in _RESOLVED_SUFFIXES:
+        if directory_only and not suffix.startswith('/'):
             continue
-        if name in ('c', 'T', 'p', 'v', '_', 'R'):
+        if base + suffix in members:
+            if suffix == '/package.json':
+                _required_layout(f'original dependency {base} is a package directory, which is not supported')
+            return base + suffix
+    _required_layout(f'original dependency is missing: {base}')
+
+
+def _local_dependencies(current: str, requires: list[dict], imports: list[dict],
+                        members: set[str]) -> list[str]:
+    """Resolve one module's static dependencies; fail closed on anything not plain and local."""
+    for item in imports:
+        if not item['builtin']:
+            _required_layout(f'{current} imports {item["spec"]!r} statically, which is not supported')
+    found = []
+    for item in requires:
+        spec = item['spec']
+        if item['builtin']:
             continue
-        if name not in ('n', 'r'):
-            _required_layout(f'unsupported original import binding {name}')
-        previous = bindings.setdefault(name, specifier)
-        if previous != specifier:
-            _required_layout(f'ambiguous imported binding {name}')
-    for name in ('n', 'r'):
-        if _referenced(name, host) and name not in bindings:
-            _required_layout(f'original Wre import {name} is missing')
-    if not bindings:
-        _required_layout('no supported original module import supplies Wre')
-    return sorted(bindings.items())
+        if spec == 'electron' or spec.startswith('electron/'):
+            _required_layout(f'the native-pipe host depends on Electron through {current}')
+        if not spec.startswith('.'):
+            _required_layout(f'unsupported non-relative original dependency {spec!r} in {current}')
+        found.append(_member_for(current, spec, members))
+    return found
 
 
-def _original_members(archive: Path) -> tuple[bytes, list[tuple[str, str]], dict[str, bytes]]:
-    members = set(list_asar_members(archive))
-    mains = sorted(name for name in members if _MAIN_PATH.fullmatch(name))
-    matches = []
-    for name in mains:
-        source = read_asar_members(archive, (name,))[name]
-        try:
-            host = _wre_source(source)
-        except ValueError as exc:
-            if str(exc).endswith('expected one named Wre host factory'):
-                continue
-            raise
-        matches.append((name, source, host))
-    if len(matches) != 1:
-        _required_layout('expected one main bundle with a unique Wre host factory')
-    name, main, host = matches[0]
-    bound_imports = _host_imports(main, host)
-    imports = []
-    names = []
-    for alias, specifier in bound_imports:
-        member = _direct_member(name, specifier, members)
-        if member is None:
-            imports.append((alias, specifier))
-        else:
-            imports.append((alias, './' + member))
-            names.append(member)
-    # Preserve the original host's small dependency families. Chunk hashes are
-    # discovered from this app; no transitive module graph or package resolver
-    # is inferred here.
-    names.extend(sorted(member for member in members
-                        if re.fullmatch(r'\.vite/build/(?:rolldown-runtime|src|logger)-[^/]+\.js', member)))
-    names.extend(('node_modules/tslib/package.json', 'node_modules/tslib/tslib.js'))
-    missing = [member for member in names if member not in members]
-    if missing:
-        _required_layout(f'original host dependency is missing: {missing[0]}')
-    contents = read_asar_members(archive, tuple(dict.fromkeys(names)))
-    return host, imports, contents
+def plan_original_host(app: Path, *, node: Path | None = None) -> HostPlan:
+    """Read the selected app's app.asar and plan the host extraction without writing anything.
 
-
-def materialize_original_host(app: Path, destination: Path) -> Path:
-    """Extract the unique structurally compatible Wre host and exact dependencies."""
+    `node` runs the structural analyzer; it defaults to the app's own Node, which
+    the protected Store directory does not let LCU execute (the installer passes a
+    private copy).
+    """
+    from .windows import _component
     archive = app / 'app/resources/app.asar'
     if archive.is_symlink() or not archive.is_file():
         _required_layout('app/resources/app.asar is missing or redirected')
-    fragment, imports, contents = _original_members(archive)
+    return plan_original_asar(archive, node=node or _component(app, _NODE_MEMBER))
+
+
+def plan_original_asar(archive: Path, *, node: Path) -> HostPlan:
+    """The same read-only plan for a bare app.asar (the development check uses this)."""
+    members = set(list_asar_members(archive))
+    results = []
+    for name in sorted(member for member in members if _MAIN_PATH.fullmatch(member)):
+        source = read_asar_members(archive, (name,))[name]
+        response = _analyze(node, {'op': 'host', 'source': _decode(source, name)})
+        if response.get('matches', 0) != 0:
+            results.append((name, response))
+    if not results:
+        _required_layout('no main bundle has a top-level native-pipe host factory (a function taking '
+                         'codexCliPath, nativePipeDirectory, windowsHelperPath and '
+                         'windowsHelperTransportModulePath options)')
+    if len(results) != 1 or results[0][1]['matches'] != 1:
+        _required_layout('more than one top-level native-pipe host factory matches')
+    main, response = results[0]
+    # Walk the relative-require graph from the generated module's own requirements.
+    queue = list(dict.fromkeys(
+        _local_dependencies(main, response['requires'], response['imports'], members)))
+    chunks: dict[str, bytes] = {}
+    while queue:
+        batch = [name for name in queue if name not in chunks]
+        if not batch:
+            break
+        if len(chunks) + len(batch) > _MAX_CHUNKS:
+            _required_layout('original dependency graph is unexpectedly large')
+        sources = read_asar_members(archive, tuple(batch))
+        scripts = {}
+        for name in batch:
+            if _MAIN_PATH.fullmatch(name):
+                _required_layout(f'original dependency graph reaches the main bundle through {name}')
+            if name.endswith('.node'):
+                _required_layout(f'original dependency {name} is a native module')
+            chunks[name] = sources[name]
+            if name.endswith('.json'):
+                continue
+            if not name.endswith(('.js', '.cjs')):
+                _required_layout(f'original dependency {name} is not a CommonJS module')
+            scripts[name] = _decode(sources[name], name)
+        queue = []
+        if scripts:
+            listed = _analyze(node, {'op': 'requires', 'files': scripts})['files']
+            for name in scripts:
+                queue.extend(_local_dependencies(
+                    name, listed[name]['requires'], listed[name]['imports'], members))
+        queue = list(dict.fromkeys(queue))
+    return HostPlan(main, response['factory'], response['module'], chunks, response.get('uncarried', 0))
+
+
+def materialize_original_host(app: Path, destination: Path, *, node: Path | None = None) -> Path:
+    """Extract the structurally selected host factory and its exact dependencies."""
+    return write_original_host(plan_original_host(app, node=node), destination)
+
+
+def write_original_host(plan: HostPlan, destination: Path) -> Path:
+    """Write a planned host (generated module, chunks, thin entry) into a new directory."""
     template = Path(__file__).with_name('windows_host_entry.cjs').read_bytes()
-    imports_marker = b'// ORIGINAL_WINDOWS_HOST_IMPORTS'
-    host_marker = b'// ORIGINAL_WINDOWS_PIPE_HOST'
-    if template.count(imports_marker) != 1 or template.count(host_marker) != 1:
-        raise ValueError('Windows host entry markers are missing or ambiguous.')
-    import_source = '\n'.join(
-        f'const {name} = require({json.dumps(specifier)});' for name, specifier in imports
-    ).encode('utf-8')
-    entry = template.replace(imports_marker, import_source).replace(host_marker, fragment)
+    marker = b'// ORIGINAL_WINDOWS_PIPE_HOST_MODULE'
+    if template.count(marker) != 1:
+        raise ValueError('Windows host entry marker is missing or ambiguous.')
+    # The generated module sits beside the original main bundle, so every original
+    # relative require inside it keeps resolving as written.
+    generated = posixpath.join(posixpath.dirname(plan.main), _GENERATED)
+    entry = template.replace(
+        marker, f'const createPipeHost = require({json.dumps("./" + generated)});'.encode('utf-8'))
     destination.mkdir(parents=True, exist_ok=False)
-    for name, content in contents.items():
+    for name, content in plan.contents.items():
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
+    module = destination / generated
+    module.parent.mkdir(parents=True, exist_ok=True)
+    module.write_bytes(plan.module.encode('utf-8'))
     launcher = destination / 'windows-pipe-host.cjs'
     launcher.write_bytes(entry)
     for source, target in (

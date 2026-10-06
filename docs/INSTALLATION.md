@@ -110,7 +110,7 @@ OMP setup calls `omp plugin link` on a generated local package containing the sh
 
 Interactive `lcu setup` runs a guided desktop-readiness check after agent registration. On macOS, the guide reads the selected app and signed helper names and paths and shows the relevant **Accessibility** and **Screen & System Audio Recording** (or **Screen Recording**) panes, opening a pane only after you choose it. The original runtime remains responsible for its normal approval and macOS prompts. See [Desktop and browser](#desktop-and-browser) for what `doctor` verifies per platform, its exit codes, and how first-call readiness is confirmed.
 
-Chrome mode also requires the official browser extension and site approval. For unattended use, a harness can pass exact origins the user already authorized via `LCU_APPROVED_ORIGINS`; this is an explicit grant, not a blanket bypass. The original provider chooses the platform instructions automatically.
+Chrome mode also requires the official browser extension and site approval. The original runtime asks before it first uses each site and remembers the answer for that agent session; see [Chrome site decisions](#chrome-site-decisions) for where and how to undo one. Only the Pi and Oh My Pi extension reads `LCU_APPROVED_ORIGINS`, a JSON array of exact origins the user already authorized, such as `["http://localhost:3000"]`. It accepts a site prompt the runtime actually sends for those origins, never widens access beyond them and cannot lift a saved denial; other harnesses ignore it. The original provider chooses the platform instructions automatically.
 
 ## Linux
 
@@ -311,7 +311,7 @@ By default each harness keeps its own approval behavior for LCU's tools. Claude 
 
 The mode applies to the harnesses and scope selected in that run. It is remembered per account, and a later setup that does not name `--approval` keeps `auto` and applies it to whatever it registers; only an explicit `--approval ask` removes entries. Without `--approval` a setup whose remembered mode is `ask` leaves your harness settings alone; Codex setup rewrites the `[mcp_servers.lcu]` table but carries a `default_tools_approval_mode` or tool `approval_mode` you set through it. Only recorded additions are removed: an OMP `js: deny`, `js: prompt` or pre-existing `js: allow` you set is kept, reported, and not removed by `ask`. `--approval` cannot be combined with `--export` or the installer's `--runtime-only`.
 
-This removes only the harness's own prompt about calling LCU. Separately, LCU never approves the app that hosts the agent (Claude desktop, an editor running the agent extension, the terminal running a CLI agent) for computer use, whatever the approval mode; see [agent host apps](ADAPTERS.md#agent-host-apps-are-never-approved). Claude Code's host-only tools stay denied (deny rules win over allow). Native-app permission requests, the original runtime's own approvals and Chrome site approvals come from the original runtime and are unchanged; Chrome stays exact-origin only and nothing here widens `LCU_APPROVED_ORIGINS`. Choose `auto` only for a machine you control, such as a disposable VM. `tests/codex_approval_mode.py` shows the Codex difference with a scripted local provider, and the other harnesses' entries are covered by `tests/test_approval.py`. See the [approval boundary](ADAPTERS.md#approval-boundary).
+This removes only the harness's own prompt about calling LCU. Separately, LCU never approves the app that hosts the agent (Claude desktop, an editor running the agent extension, the terminal running a CLI agent) for computer use, whatever the approval mode; see [agent host apps](ADAPTERS.md#agent-host-apps-are-never-approved). Claude Code's host-only tools stay denied (deny rules win over allow). Native-app permission requests, the original runtime's own approvals and Chrome site approvals come from the original runtime and are unchanged; Chrome stays exact-origin only and nothing here approves a site for you. Choose `auto` only for a machine you control, such as a disposable VM. `tests/codex_approval_mode.py` shows the Codex difference with a scripted local provider, and the other harnesses' entries are covered by `tests/test_approval.py`. See the [approval boundary](ADAPTERS.md#approval-boundary).
 
 ## Manage approved apps
 
@@ -335,6 +335,28 @@ On macOS, Computer Use asks before it first uses each app and offers **Always al
 - On Linux the original runtime has no per-app approval, so `lcu apps` says so; Windows is unsupported.
 
 See the [verification record](verification/apps-command-2026-10-04.md).
+
+## Chrome site decisions
+
+When Chrome mode asks `Allow Browser use to access <origin>?`, the original runtime saves your answer for that agent session in `$CODEX_HOME/browser/sessions/<session-id>.toml` (`~/.codex/browser/sessions/` unless `CODEX_HOME` is set) as `[origins]` `allowed` and `denied` lists, and checks it before asking again. The file format is the original runtime's private storage and can change between releases; the [source record](verification/origin-decisions-2026-10-06.md) lists what was checked.
+
+- A site you declined is refused for the rest of that session ("A saved user permission setting blocks this action") without a new prompt.
+- The scope is one session. A new session asks again, so Deny is not a lasting block. Subagents have their own session, and their decisions are separate.
+- A running agent may keep what it read for up to 5 minutes.
+
+`lcu origins` shows and forgets these decisions without hand-editing the files:
+
+~~~sh
+~/.local/share/lcu/current/bin/lcu origins                        # list allowed and denied origins per session
+~/.local/share/lcu/current/bin/lcu origins forget https://example.com   # ask about this site again
+~~~
+
+- `lcu origins [list] [--session ID] [--json]` prints each session's `allowed` and `denied` origins. `--json` prints `{"codexHome", "sessions": [{"session", "file", "allowed", "denied"}], "problems": [...]}`. A session file that is not valid TOML or does not have the expected `[origins]` lists is skipped, named in `problems` (or on stderr) and makes the command exit 1, so it is never reported as empty.
+- `lcu origins forget <origin>` removes a saved decision so the next request for that site asks again. It never allows a site; only the original prompt can. By default it removes the origin from the `denied` list of every saved session. `--session ID` limits it to one session, `--allowed` removes it from the `allowed` list instead (`--allowed --denied` both), and `--all-sessions` states the default. `<origin>` is `scheme://host[:port]`; case, a default port and IPv6 notation are normalized. Pass an internationalized host in its `xn--` form, as the browser reports it.
+- After a change, restart the agent or wait up to 5 minutes; then the next request for the site prompts again.
+- It edits only simple session files (tables of strings, booleans, integers and string lists), replaces them atomically and keeps their other keys and origins. Concurrent `lcu origins` commands take turns through a lock file (`.lcu-origins.lock`) in the sessions folder. The runtime does not use that lock, so `forget` also re-reads the file before and after the replace and retries or reports a runtime write it sees; a runtime write in the microseconds between the last read and the replace is overwritten unnoticed. That loses a saved answer, so the site is asked about again; it never grants access. A file with comments, nested tables, other value types or invalid TOML is reported and left untouched; a symbolic link is refused. It never writes `browser/config.toml` or the `browser_use` settings in `config.toml`.
+
+Two other places can also block or allow a site, and `lcu origins` does not read or change them: `$CODEX_HOME/browser/config.toml` holds approvals the runtime saves globally when a request is answered with an "always" choice, and `browser_use.origins."<origin>".access = "deny"` in `$CODEX_HOME/config.toml` is the per-site setting that blocks a site in every session. Use that setting, not Deny, when a site should stay blocked.
 
 ## Tested app versions
 
