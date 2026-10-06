@@ -337,7 +337,8 @@ def main(root: Path, argv=None, *, resolved=None, env=None) -> int:
         print(update_line)
     from .diagnostic_log import summary as diagnostic_log_summary
     print(diagnostic_log_summary())
-    if target == 'mac':
+    if target == 'mac' and sys.platform == 'darwin':
+        # The helper runs on this host; a test or tool inspecting a macOS install elsewhere has no home to check.
         from .platforms import mac_socket_path_problem
         problem = mac_socket_path_problem()
         if problem:

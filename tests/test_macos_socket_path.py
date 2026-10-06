@@ -108,6 +108,7 @@ class DoctorSocketTests(unittest.TestCase):
         (self.root / 'installation.json').write_text(json.dumps({'platform': platform_name}))
         output = io.StringIO()
         with real_home(home), patch.dict(os.environ, clear=False), \
+             patch.object(sys, 'platform', 'darwin'), \
              patch('lcu.doctor._probe', return_value=self.probe) as probe, \
              patch('lcu.doctor._mac_instructions'), \
              patch('lcu.doctor.print_linux_sandbox_status'), \
@@ -132,6 +133,16 @@ class DoctorSocketTests(unittest.TestCase):
         self.assertNotIn('socket path', output)
         probe.assert_called_once()
 
+    def test_a_macos_install_inspected_on_another_host_is_not_checked(self):
+        with patch('lcu.platforms.mac_socket_path_problem') as problem, \
+             patch('lcu.doctor._probe', return_value=self.probe), \
+             patch('lcu.doctor._mac_instructions'), patch('sys.platform', 'linux'), \
+             patch('sys.stdout', io.StringIO()):
+            (self.root / 'installation.json').write_text(json.dumps({'platform': 'darwin'}))
+            status = doctor.main(self.root, ['--non-interactive'], resolved=self.resolved, env=self.env)
+        self.assertEqual(status, 0)
+        problem.assert_not_called()
+
     def test_other_platforms_never_check_the_socket(self):
         self.probe = {'target': 'windows', 'windows': {'ok': True, 'count': 1}}
         with patch('lcu.platforms.mac_socket_path_problem') as problem:
@@ -152,6 +163,15 @@ class SetupSocketTests(pending.Fixture):
         warning = out.index('Warning: Computer Use cannot start for this macOS account')
         self.assertGreater(warning, out.index('Configuration prepared.'))
         self.assertEqual(self.registered[0]['names'], ['codex'])
+
+    def test_export_setup_warns_too(self):
+        self.platform = 'darwin'
+        with real_home(home_of_length(104)), patch.object(pending.setup, 'export_bundle'), \
+             patch.dict(os.environ, clear=False):
+            os.environ.pop(platforms.MAC_SOCKET_ENV, None)
+            code, out, err = self.run_main('--export', str(self.root / 'plugin'), agents=())
+        self.assertEqual(code, 0, err)
+        self.assertIn('Warning: Computer Use cannot start for this macOS account', out)
 
     def test_short_home_prints_no_warning(self):
         code, out, err = self.run_darwin(home_of_length(103))
