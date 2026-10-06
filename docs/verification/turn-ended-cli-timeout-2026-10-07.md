@@ -103,3 +103,39 @@ Conclusion: #23 still does not reproduce here. With the app running, the Sky nat
 so this condition cannot show whether the fix keeps later requests working. The condition with the app
 quit, on the updated build, was not run: the user left the app open and it was not quit for this test.
 Before the update with the app not running, the earlier runs passed.
+
+## Toggle check on 26.930.61225 and the cause of the pipe failure
+
+The user approved quitting and relaunching ChatGPT for this check. Fresh scratch roots were used,
+built the same way as before.
+
+| Condition | Code | `turn_ended` (turns 1–4) | Next turn's first `list_apps` | Sky actions |
+| --- | --- | --- | --- | --- |
+| App quit, no CUA service running | origin/main | 37, 14, 16, 13 ms | 9, 8, 10 ms | 8/8 ok |
+| App quit | branch | 23, 2, 3, 1 ms | 29, 28, 27 ms | 8/8 ok |
+| App quit | branch, instrumented | 22, 2, 1, 1 ms; CLI step 19, 23, 18, 20 ms, `notified: true` | 27, 29, 27 ms | 8/8 ok |
+| App relaunched; its own service (`~/.codex/computer-use/…`) holds the socket | origin/main | 38, 14, 15, 15 ms | 9, 9, 10 ms | 8/8 ok |
+| App launched while an LCU-started bundled service already held the socket (both services running) | origin/main | n/a | n/a | 13/13 actions in the open process ok; a new LCU process was ok too |
+
+With the app quit, the signed command took 30–33 ms over 4 runs, exit 0.
+
+So the app running is not the trigger. The earlier failure was a temporary state, and os_log
+from `SkyComputerUseService` shows how it arose:
+
+- 00:20:23: a LaunchServices launch started the **bundled** service (pid 18916, ppid 1) from
+  `/Applications/ChatGPT.app/…/@oai/sky/Codex Computer Use.app`. That is the path LCU passes as
+  `SKY_CUA_SERVICE_PATH`. It took the socket lock.
+- 00:21:03–00:21:08: the app update replaced `/Applications/ChatGPT.app` while that service kept
+  running.
+- 00:21:19: the relaunched app spawned its own service from `~/.codex/computer-use/…` (pid 20169).
+  That service logged `socket lock is unavailable errno=35` 54 times until 00:25:37. This suggests
+  the app's own computer use was also blocked; it was not checked in the app UI.
+- 00:22:13–00:24:55, the time of the failing runs: the stale service rejected 1,338 client
+  connections with `SlimCore.SkyIPCRequirement.Error.teamNotFound`. The Sky client then reported
+  `native pipe startup failed`.
+- 00:25:41: the stale service exited through AppKit automatic termination, about 45 s after its last
+  connection attempt. The app's service then took the socket, and later runs passed.
+
+A fresh service from the same binary accepts the same clients. So the rejection is most likely tied
+to that process outliving the replacement of its bundle on disk. This is inferred from the logs
+above; it was not reproduced, because that would require another app update.
