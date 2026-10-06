@@ -105,7 +105,6 @@ class Scan {
     this.requires = new Set();
     this.imports = new Set();
     this.problems = new Set();
-    this.directEval = false;
   }
 
   bound(name) {
@@ -115,7 +114,9 @@ class Scan {
 
   ref(name, write) {
     if (this.bound(name)) return;
-    if (name === 'eval') this.directEval = true;
+    // Dynamic code and an escaping `require` hide dependencies from this static analysis.
+    if (name === 'eval') this.problems.add('eval, which makes name resolution dynamic');
+    if (name === 'require') this.problems.add('a reference to require other than a require("literal") call');
     this.free.add(name);
     if (write) this.written.add(name);
   }
@@ -227,6 +228,8 @@ class Scan {
       this.free.add('require');
       const spec = node.arguments.length === 1 ? staticString(node.arguments[0]) : null;
       if (spec !== null) this.requires.add(spec); else this.problems.add('require() with a non-literal argument');
+      for (const argument of node.arguments) this.visit(argument);
+      return;
     }
     this.children(node);
   }
@@ -275,7 +278,15 @@ class Scan {
   onForInStatement(node) {
     const lexical = node.left.type === 'VariableDeclaration' ? lexicalNames([node.left]) : [];
     this.scoped(lexical, () => {
-      if (node.left.type === 'VariableDeclaration') this.visit(node.left); else this.assignPattern(node.left);
+      if (node.left.type === 'VariableDeclaration') {
+        this.visit(node.left);
+        // `for (var x of ...)` outside any function writes the top-level x.
+        if (node.left.kind === 'var') for (const d of node.left.declarations) {
+          for (const name of patternNames(d.id, [])) this.ref(name, true);
+        }
+      } else {
+        this.assignPattern(node.left);
+      }
       this.visit(node.right); this.visit(node.body);
     });
   }
@@ -327,12 +338,24 @@ function isFactory(node) {
   return FACTORY_OPTIONS.every(name => keys.has(name));
 }
 
+// A top-level statement that only assigns to (or updates) one binding or a property
+// path rooted at it, such as `v = interop(v);` or `state.value = 1;`. Such a statement
+// finishes initialising that binding, so it travels with the binding's declaration.
+function initializerRoot(statement) {
+  if (statement.type !== 'ExpressionStatement') return null;
+  const expression = statement.expression;
+  let target = null;
+  if (expression.type === 'AssignmentExpression') target = expression.left;
+  else if (expression.type === 'UpdateExpression') target = expression.argument;
+  while (target && target.type === 'MemberExpression') target = target.object;
+  return target && target.type === 'Identifier' ? target.name : null;
+}
+
 function entriesOf(program) {
   const entries = [];
   const add = (entry, scan) => {
     entry.free = scan.free; entry.written = scan.written;
-    entry.requires = scan.requires; entry.imports = scan.imports; entry.problems = new Set(scan.problems);
-    if (scan.directEval) entry.problems.add('eval, which makes name resolution dynamic');
+    entry.requires = scan.requires; entry.imports = scan.imports; entry.problems = scan.problems;
     entry.index = entries.length;
     entries.push(entry);
   };
@@ -351,11 +374,8 @@ function entriesOf(program) {
       }
     } else {
       scan.visit(statement);
-      const expression = statement.type === 'ExpressionStatement' ? statement.expression : null;
-      const isAssignment = expression && expression.type === 'AssignmentExpression' &&
-        expression.operator === '=' && expression.left.type === 'Identifier';
-      add({kind: isAssignment ? 'assign' : 'other', names: isAssignment ? [expression.left.name] : [],
-        node: statement}, scan);
+      const root = initializerRoot(statement);
+      add({kind: root ? 'assign' : 'other', names: root ? [root] : [], node: statement}, scan);
     }
   }
   return entries;

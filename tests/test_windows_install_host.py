@@ -90,6 +90,32 @@ class InstallHostTests(unittest.TestCase):
         self.assertEqual(list((self.prefix / 'releases').iterdir()), [])
         self.assertFalse((self.prefix / 'current.json').exists())
 
+    def test_failure_before_the_release_copy_still_removes_the_new_copy(self):
+        redirected = install_windows._redirected
+        with mock.patch.object(install_windows, '_redirected',
+                               side_effect=lambda path: Path(path).name == 'releases' or redirected(path)):
+            with self.assertRaisesRegex(ValueError, 'redirected Windows release directory'):
+                self.install()
+        self.assertEqual(list((self.prefix / 'apps').iterdir()), [])
+        self.assertFalse((self.prefix / 'current.json').exists())
+
+    def test_failed_launcher_restore_still_removes_the_new_copy(self):
+        self.prefix.mkdir(parents=True)
+        (self.prefix / 'windows_launcher.py').write_bytes(b'previous launcher')
+        calls = []
+        def write(path, data):
+            calls.append(Path(path).name)
+            if len(calls) == 2:
+                raise OSError('command locked')
+            if len(calls) == 3:
+                raise OSError('restore locked')
+        with mock.patch.object(install_windows, '_atomic_bytes', side_effect=write):
+            with self.assertRaisesRegex(OSError, 'restore locked'):
+                self.install()
+        self.assertEqual(calls, ['windows_launcher.py', 'lcu.cmd', 'windows_launcher.py'])
+        self.assertEqual(list((self.prefix / 'apps').iterdir()), [])
+        self.assertEqual(list((self.prefix / 'releases').iterdir()), [])
+
     def test_failure_never_removes_a_generation_that_already_existed(self):
         self.install()
         generation = next((self.prefix / 'apps').iterdir())

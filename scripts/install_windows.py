@@ -179,16 +179,19 @@ def install(prefix):
         except BaseException:
             shutil.rmtree(_copy_path(stage), ignore_errors=True)
             raise
-    releases = prefix / 'releases'
-    if _redirected(releases):
-        raise ValueError(f'Refusing a redirected Windows release directory: {releases}')
-    releases.mkdir(exist_ok=True)
-    release = releases / (VERSION + '-' + uuid.uuid4().hex[:12])
+    release = None
     previous_launchers = {}
     replaced_launchers = []
     temporary = None
     committed = False
+    # Everything from here on is inside the cleanup boundary, including the
+    # release directory checks, so a failure never leaves a new app copy behind.
     try:
+        releases = prefix / 'releases'
+        if _redirected(releases):
+            raise ValueError(f'Refusing a redirected Windows release directory: {releases}')
+        releases.mkdir(exist_ok=True)
+        release = releases / (VERSION + '-' + uuid.uuid4().hex[:12])
         shutil.copytree(SOURCE, release)
         verify(release, arch, 'windows')
         materialize_original_host(generation / 'app', release / 'lcu-host')
@@ -218,19 +221,22 @@ def install(prefix):
     except BaseException:
         if committed:
             raise
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-        for path in reversed(replaced_launchers):
-            content = previous_launchers[path]
-            if content is None:
-                path.unlink(missing_ok=True)
-            else:
-                _atomic_bytes(path, content)
-        shutil.rmtree(_copy_path(release), ignore_errors=True)
-        # Remove only a copy this run created; a generation that already existed
-        # (or that a committed release uses) is never touched.
-        if created_generation:
-            shutil.rmtree(_copy_path(generation), ignore_errors=True)
+        try:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            for path in reversed(replaced_launchers):
+                content = previous_launchers[path]
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _atomic_bytes(path, content)
+        finally:
+            if release is not None:
+                shutil.rmtree(_copy_path(release), ignore_errors=True)
+            # Remove only a copy this run created; a generation that already existed
+            # (or that a committed release uses) is never touched.
+            if created_generation:
+                shutil.rmtree(_copy_path(generation), ignore_errors=True)
         raise
     return release
 

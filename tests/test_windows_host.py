@@ -223,6 +223,51 @@ class WindowsHostTests(unittest.TestCase):
         main = factory('const u=c.app', prelude='const c=require("electron");')
         self.assertLayoutError(self.members(main), 'depends on Electron')
 
+    def test_property_initialisation_of_a_dependency_travels_with_it(self):
+        prelude = 'const state={};state.value=42;const tally={n:1};tally.n+=2;tally.n++;'
+        main = factory('const u=state.value+tally.n', prelude=prelude)
+        module = self.plan(self.members(main)).module
+        self.assertIn('state.value=42;', module)
+        self.assertIn('tally.n+=2;', module)
+        self.assertIn('tally.n++;', module)
+        # The statement drags its own dependencies along, so Electron is refused rather than dropped.
+        main = factory('const u=state.value', prelude=prelude + 'state.unused=require("electron");')
+        self.assertLayoutError(self.members(main), 'depends on Electron')
+
+    def test_fails_closed_on_loop_writes_outside_the_dependencies(self):
+        for source in ('var state=1;for(var state of [42]){}', 'var state=1;for(var state in {a:1}){}',
+                       'var state=1;if(1){var state=2}'):
+            with self.subTest(source=source):
+                self.assertLayoutError(self.members(factory('const u=state', prelude=source)),
+                                       'binding state is reassigned')
+
+    def test_fails_closed_on_requires_the_analysis_cannot_see(self):
+        for prelude in ('const load=require;const state=load("electron");',
+                        'const state=require.resolve("electron");', 'const state=typeof require;',
+                        'const state=[require][0]("electron");'):
+            with self.subTest(prelude=prelude):
+                self.assertLayoutError(self.members(factory('const u=state', prelude=prelude)),
+                                       'unsupported a reference to require')
+        main = factory('const u=a.x', prelude='const a=require("./src-h.js");').encode()
+        for chunk in (b'eval("require(\\"electron\\")");', b'const load=require;load("electron");'):
+            with self.subTest(chunk=chunk):
+                self.assertLayoutError(self.members(main, {'src-h.js': chunk}), 'unsupported')
+
+    def test_relative_requires_resolve_like_node(self):
+        main = factory('const u=a.x+b.x', prelude='const a=require("./cfg"),b=require("./dir");').encode()
+        members = self.members(main, {'cfg.cjs': b'module.exports={x:1};', 'cfg.json': b'{"x":2}',
+                                      LOCATION + 'dir/index.js': b'module.exports={x:3};'})
+        plan = self.plan(members)
+        self.assertEqual(set(plan.contents), {LOCATION + 'cfg.json', LOCATION + 'dir/index.js'})
+        # Node does not try .cjs for an extensionless specifier.
+        self.assertLayoutError(self.members(main, {'cfg.cjs': b'module.exports={x:1};',
+                                                   LOCATION + 'dir/index.js': b'module.exports={x:3};'}),
+                               'original dependency is missing')
+        # A package directory needs main-field resolution, which is not supported.
+        members = self.members(main, {'cfg.json': b'{}', LOCATION + 'dir/package.json': b'{"main":"x.js"}',
+                                      LOCATION + 'dir/x.js': b'module.exports={};'})
+        self.assertLayoutError(members, 'package directory')
+
     def test_plan_is_read_only_and_needs_no_repository_hash(self):
         plan = self.plan(self.split())
         self.assertEqual((plan.main, plan.factory), (self.main_name, 'Kne'))

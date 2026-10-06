@@ -24,7 +24,7 @@ from .asar import list_asar_members, read_asar_members
 _MAIN_PATH = re.compile(r'^\.vite/build/main(?:-[^/]+)?\.js$')
 _ANALYZER = Path(__file__).with_name('windows_host_analyze.cjs')
 _GENERATED = 'lcu-original-pipe-host.cjs'
-_RESOLVED_SUFFIXES = ('', '.js', '.cjs', '.json', '/index.js', '/index.cjs')
+_RESOLVED_SUFFIXES = ('', '.js', '.json', '.node', '/package.json', '/index.js', '/index.json', '/index.node')
 _MAX_CHUNKS = 400
 _NODE_MEMBER = 'app/resources/cua_node/bin/node.exe'
 
@@ -83,8 +83,12 @@ def _member_for(current: str, specifier: str, members: set[str]) -> str:
     base = posixpath.normpath(posixpath.join(posixpath.dirname(current), specifier))
     if base == '..' or base.startswith('../') or posixpath.isabs(base):
         _required_layout(f'original dependency {specifier!r} leaves the application archive')
+    # Node's own order for a relative specifier: the exact file, then .js, .json, .node,
+    # then a directory's package.json "main" (not supported here) or index file.
     for suffix in _RESOLVED_SUFFIXES:
         if base + suffix in members:
+            if suffix == '/package.json':
+                _required_layout(f'original dependency {base} is a package directory, which is not supported')
             return base + suffix
     _required_layout(f'original dependency is missing: {base}')
 
