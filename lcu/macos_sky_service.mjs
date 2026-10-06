@@ -24,6 +24,11 @@ const TURN_METADATA_LIMIT = 128;
 // fails the turn. Return before that; slower cleanup continues in the
 // background and finishPendingCleanup() gates the next Sky request on it.
 const TURN_CLEANUP_HOOK_TIMEOUT_MS = 4_000;
+// How long to wait for the private lifetime host: its TURN_ENDED_CLI_TIMEOUT_SECONDS
+// (10 s, lcu/macos_host.py) plus 2 s for the socket round trip. Keep it above the host.
+export const LIFETIME_SIGNAL_TIMEOUT_MS = 12_000;
+// The original command is retried once, at the next Sky request, then dropped.
+const CLI_CLEANUP_ATTEMPTS = 2;
 const TURN_ENDED_TIMEOUT_SECONDS = 15;
 const turnMetadata = new Map();
 
@@ -35,7 +40,7 @@ function lifetimeSignal(runtime, session_id, turn_id) {
   return runtime.nativePipe.createConnection(address).then(socket => new Promise((resolve, reject) => {
     let data = Buffer.alloc(0);
     let finished = false;
-    const timer = setTimeout(() => finish(Error('macOS native turn cleanup timed out')), 4000);
+    const timer = setTimeout(() => finish(Error('macOS native turn cleanup timed out')), LIFETIME_SIGNAL_TIMEOUT_MS);
     function finish(error, result) {
       if (finished) return;
       finished = true;
@@ -75,15 +80,18 @@ function register() {
     }
     endControlTurn(session_id, turn_id);
     const key = JSON.stringify([session_id, turn_id]);
-    const prior = pendingCleanup.get(key);
-    pendingCleanup.set(key, prior ?? {
-      session_id, turn_id,
+    const item = pendingCleanup.get(key) ?? {
+      key, session_id, turn_id,
       metadata: turnMetadata.get(key),
       nativeNotified: false,
-      cliNotified: false,
-    });
+      cliFailures: 0,
+    };
+    pendingCleanup.set(key, item);
     turnMetadata.delete(key);
-    await finishPendingCleanup();
+    // Wait only for the native step. The original command takes about 5 s, so it
+    // finishes in the background; the next Sky request waits for it.
+    await nativeCleanup(item);
+    finishPendingCleanup().catch(() => {});
   }});
   registered = true;
 }
@@ -292,13 +300,14 @@ function startControlChannel(runtime) {
 const SLOW_CLEANUP_STEP_MS = 1_000;
 
 // Report which cleanup step is slow so a host "turn-ended handlers timed out"
-// can be attributed to native IPC or the CLI helper.
-async function timedCleanupStep(step, run) {
+// can be attributed to native IPC or the CLI helper. Only a step the hook waits
+// for needs the watchdog.
+async function timedCleanupStep(step, run, {hookWaits = false} = {}) {
   const started = Date.now();
   // The host gives up on the hook at about 5 s, so name a step still running then.
-  const watchdog = setTimeout(() => {
+  const watchdog = hookWaits ? setTimeout(() => {
     console.error(`LCU macOS turn cleanup step "${step}" is still running after ${Date.now() - started} ms`);
-  }, TURN_CLEANUP_HOOK_TIMEOUT_MS);
+  }, TURN_CLEANUP_HOOK_TIMEOUT_MS) : undefined;
   try {
     return await run();
   } finally {
@@ -310,32 +319,66 @@ async function timedCleanupStep(step, run) {
   }
 }
 
+// Acknowledge the turn end through the original native IPC. Concurrent callers
+// (the hook and the next Sky request) share one attempt per item.
+function nativeCleanup(item) {
+  if (!item.metadata || item.nativeNotified) return Promise.resolve();
+  item.nativeAttempt ??= timedCleanupStep('native IPC turn-ended', async () => {
+    // Include the first, cold import of the client in the step's timing.
+    const {MacComputerUseClient} = await import(pathToFileURL(
+      globalThis.nodeRepl.env.LCU_MAC_SKY_CLIENT_PATH).href);
+    controlClient ??= new MacComputerUseClient();
+    return controlClient.request('ComputerUseIPCCodexTurnEndedRequest', {
+      threadID: item.session_id,
+      turnID: item.turn_id,
+    }, {codexMetadata: item.metadata, timeoutSeconds: TURN_ENDED_TIMEOUT_SECONDS});
+  }, {hookWaits: true}).then(() => { item.nativeNotified = true; })
+    .finally(() => { item.nativeAttempt = undefined; });
+  return item.nativeAttempt;
+}
+
+// Run the original CLI command once. A failure never throws: the item is kept
+// for one retry, then dropped, because the native step was already acknowledged
+// and a broken helper must not block computer use.
+async function cliCleanup(item) {
+  const started = Date.now();
+  try {
+    await timedCleanupStep('CLI turn-ended', () =>
+      lifetimeSignal(globalThis.nodeRepl, item.session_id, item.turn_id));
+    pendingCleanup.delete(item.key);
+  } catch (error) {
+    item.cliFailures += 1;
+    const ms = Date.now() - started;
+    const where = `${item.session_id}/${item.turn_id}`;
+    const reason = String(error?.message ?? error).slice(0, 256);
+    if (item.cliFailures < CLI_CLEANUP_ATTEMPTS) {
+      console.error(`LCU macOS turn cleanup: original turn-ended command failed for ${where} after ${ms} ms (${reason}); retrying once at the next Sky request`);
+      return;
+    }
+    pendingCleanup.delete(item.key);
+    const native = item.metadata ? 'native turn-ended was acknowledged'
+      : 'no native turn-ended was needed';
+    console.error(`LCU macOS turn cleanup: original turn-ended command failed for ${where} after ${ms} ms; ${native}; continuing`);
+  }
+}
+
 function finishPendingCleanup() {
   // The original runtime can report MCP success after a hook fails. Retain
   // native cleanup until its host acknowledges it and retry before more actions.
   if (!cleanupInFlight) {
     cleanupInFlight = (async () => {
-      for (const [key, item] of pendingCleanup) {
-        if (item.metadata && !item.nativeNotified) {
-          await timedCleanupStep('native IPC turn-ended', async () => {
-            // Include the first, cold import of the client in the step's timing.
-            const {MacComputerUseClient} = await import(pathToFileURL(
-              globalThis.nodeRepl.env.LCU_MAC_SKY_CLIENT_PATH).href);
-            controlClient ??= new MacComputerUseClient();
-            return controlClient.request('ComputerUseIPCCodexTurnEndedRequest', {
-              threadID: item.session_id,
-              turnID: item.turn_id,
-            }, {codexMetadata: item.metadata, timeoutSeconds: TURN_ENDED_TIMEOUT_SECONDS});
-          });
-          item.nativeNotified = true;
-        }
-        if (!item.cliNotified) {
-          await timedCleanupStep('CLI turn-ended', () =>
-            lifetimeSignal(globalThis.nodeRepl, item.session_id, item.turn_id));
-          item.cliNotified = true;
-        }
-        pendingCleanup.delete(key);
+      const attempted = new Set();
+      let nativeFailure;
+      for (;;) {
+        // Re-scan so a turn that ends while this runs is picked up.
+        const item = [...pendingCleanup.values()].find(candidate => !attempted.has(candidate));
+        if (!item) break;
+        attempted.add(item);
+        try { await nativeCleanup(item); }
+        catch (error) { nativeFailure ??= error; continue; }
+        await cliCleanup(item);
       }
+      if (nativeFailure) throw nativeFailure;
     })().finally(() => { cleanupInFlight = undefined; });
   }
   return cleanupInFlight;

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtemp, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createConnection, createServer} from 'node:net';
@@ -24,6 +24,9 @@ let failTurnEndedOnce = false;
 const pending = new Map();
 const observedContexts = [];
 const lifetimeMessages = [];
+let lifetimeReplies = 0;
+// Decides how the private lifetime host answers: {notified, error?, delay?}.
+let lifetimeBehavior = () => ({notified: true});
 
 await writeFile(servicePath, `export async function handleRpc(request) {
   globalThis.originalRpcCount = (globalThis.originalRpcCount || 0) + 1;
@@ -100,7 +103,11 @@ const controlServer = createServer(socket => consumeLines(socket, message => {
 }));
 const lifetimeServer = createServer(socket => consumeLines(socket, message => {
   lifetimeMessages.push(message);
-  socket.end('{"notified":true}\n');
+  const {delay = 0, ...reply} = lifetimeBehavior(message);
+  setTimeout(() => {
+    lifetimeReplies += 1;
+    socket.end(`${JSON.stringify(reply)}\n`);
+  }, delay);
 }));
 
 function listen(server, path) {
@@ -149,7 +156,8 @@ try {
     nativePipe: {createConnection: connect},
     addTurnEndedHandler: handler => { turnEnded = handler; },
   };
-  const {handleRpc} = await import(pathToFileURL(new URL(wrapperPath).pathname).href);
+  const {handleRpc, LIFETIME_SIGNAL_TIMEOUT_MS} = await import(
+    pathToFileURL(new URL(wrapperPath).pathname).href);
   const action = handleRpc({type: 'execute', method: 'click',
     args: [{app: 'com.fixture.A'}], wait: true});
   await waitFor(() => Boolean(turnEnded), 'original turn-ended hook was not registered');
@@ -157,6 +165,12 @@ try {
   // slower cleanup stays pending and is retried before the next Sky request.
   assert.ok(turnEnded.timeoutMs > 0 && turnEnded.timeoutMs <= 4_000);
   assert.ok(turnEnded.timeoutMs < 5_000);
+  // The JS wait for the private lifetime host must outlast the host's own limit.
+  const hostSource = await readFile(new URL('../lcu/macos_host.py', import.meta.url), 'utf8');
+  const hostTimeoutSeconds = Number(
+    hostSource.match(/^TURN_ENDED_CLI_TIMEOUT_SECONDS = (\d+)$/m)?.[1]);
+  assert.ok(hostTimeoutSeconds >= 6, 'the host must outlast the helper\'s ~5.2 s run');
+  assert.equal(LIFETIME_SIGNAL_TIMEOUT_MS, hostTimeoutSeconds * 1000 + 2000);
   await waitFor(() => observedContexts.some(context => context.app === 'com.fixture.A'),
     'trusted service did not publish the current app context');
   metadata.turn_id = 'mutated-after-dispatch';
@@ -327,6 +341,79 @@ try {
   assert.deepEqual(lifetimeMessages.at(-1), {session_id: 'slow-session', turn_id: 'slow-turn'});
   assert.equal(globalThis.originalRpcCount, rpcCountBeforeSlow + 1);
   await turnEnded.run({session_id: 'after-slow', turn_id: 'after-slow-turn'});
+
+  // The original CLI command is not the gate for native cleanup: a failing or
+  // slow one must never fail a Sky request or stop another turn's cleanup.
+  const originalConsoleError = console.error;
+  const stderr = [];
+  console.error = (...args) => { stderr.push(args.join(' ')); };
+  try {
+    const withoutMetadata = () => { globalThis.nodeRepl.requestMeta = {}; };
+    const countFor = session => lifetimeMessages.filter(message => message.session_id === session).length;
+    const cliTurns = ['cli-fail', 'cli-ok'].map(name => ({
+      session_id: `${name}-session`, turn_id: `${name}-turn`, call_id: `${name}-call`}));
+    lifetimeBehavior = message => message.session_id === 'cli-fail-session'
+      ? {notified: false, error: 'fixture CLI failure'} : {notified: true};
+    for (const turn of cliTurns) {
+      globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': turn};
+      await handleRpc({type: 'execute', method: 'list_apps', args: []});
+    }
+    const cliLifetimeStart = lifetimeMessages.length;
+    globalThis.turnEndedGate = new Promise(resolve => { globalThis.releaseTurnEnded = resolve; });
+    const cliHooks = cliTurns.map(turn =>
+      turnEnded.run({session_id: turn.session_id, turn_id: turn.turn_id}));
+    globalThis.releaseTurnEnded();
+    globalThis.turnEndedGate = undefined;
+    // A CLI failure is not a hook failure: the native step was acknowledged.
+    await Promise.all(cliHooks);
+    await waitFor(() => lifetimeMessages.length >= cliLifetimeStart + 2,
+      'the failing turn must not stop cleanup of the next one');
+    await waitFor(() => stderr.some(line => /failed for cli-fail-session\/cli-fail-turn after \d+ ms.*retrying once/.test(line)),
+      'the first CLI failure was not recorded');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(countFor('cli-fail-session'), 1);
+    assert.equal(countFor('cli-ok-session'), 1);
+    // The next Sky request retries once; the failure drops the item without failing it.
+    withoutMetadata();
+    const rpcBeforeRetry = globalThis.originalRpcCount;
+    assert.deepEqual(await handleRpc({type: 'execute', method: 'list_apps', args: []}), {ok: true});
+    assert.equal(globalThis.originalRpcCount, rpcBeforeRetry + 1);
+    assert.equal(countFor('cli-fail-session'), 2);
+    assert.equal(countFor('cli-ok-session'), 1);
+    assert.equal(stderr.filter(line => /failed for cli-fail-session\/cli-fail-turn after \d+ ms; native turn-ended was acknowledged; continuing$/.test(line)).length, 1);
+    // The following request dispatches without retrying again.
+    const lifetimeAfterDrop = lifetimeMessages.length;
+    assert.deepEqual(await handleRpc({type: 'execute', method: 'list_apps', args: []}), {ok: true});
+    assert.equal(lifetimeMessages.length, lifetimeAfterDrop);
+    assert.equal(globalThis.originalRpcCount, rpcBeforeRetry + 2);
+
+    // The hook only waits for native cleanup. A slow CLI command finishes in the
+    // background and holds back the next Sky request until it is done.
+    lifetimeBehavior = () => ({notified: true, delay: 600});
+    const lateTurn = {session_id: 'cli-late-session', turn_id: 'cli-late-turn', call_id: 'cli-late-call'};
+    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': lateTurn};
+    await handleRpc({type: 'execute', method: 'list_apps', args: []});
+    const repliesBeforeLate = lifetimeReplies;
+    const hookStarted = Date.now();
+    await turnEnded.run({session_id: lateTurn.session_id, turn_id: lateTurn.turn_id});
+    assert.ok(Date.now() - hookStarted < turnEnded.timeoutMs);
+    assert.equal(lifetimeReplies, repliesBeforeLate, 'the hook must not wait for the CLI command');
+    await waitFor(() => countFor('cli-late-session') === 1, 'the CLI command was not started in the background');
+    withoutMetadata();
+    const rpcBeforeLate = globalThis.originalRpcCount;
+    let lateDispatched = false;
+    const afterLate = handleRpc({type: 'execute', method: 'list_apps', args: []})
+      .then(() => { lateDispatched = true; });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(lateDispatched, false, 'a Sky request must wait for the running CLI command');
+    await afterLate;
+    assert.equal(lifetimeReplies, repliesBeforeLate + 1);
+    assert.equal(globalThis.originalRpcCount, rpcBeforeLate + 1);
+    assert.equal(countFor('cli-late-session'), 1);
+    lifetimeBehavior = () => ({notified: true});
+  } finally {
+    console.error = originalConsoleError;
+  }
 
   globalThis.nodeRepl.env.LCU_MAC_CONTROL_SOCKET = undefined;
   const noControlMetadata = {session_id: 'no-control-session', turn_id: 'no-control-turn',

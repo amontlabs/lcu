@@ -13,12 +13,52 @@ from threading import Condition, Thread
 from uuid import uuid4
 
 
+# The original helper starts the CUAService app and its XPC transport waits up
+# to 5 s to connect, so a healthy run takes about 5.2 s. Allow for a slower launch.
+# lcu/macos_sky_service.mjs derives its own wait from this value.
+TURN_ENDED_CLI_TIMEOUT_SECONDS = 10
+# Log successful runs only when they are close to the helper's own 5 s deadline.
+TURN_ENDED_CLI_SLOW_SECONDS = 4.5
+STDERR_LOG_BYTES = 512
+
+
 def turn_ended_payload(session_id, turn_id):
     return json.dumps({
         'type': 'agent-turn-complete',
         'thread-id': session_id,
         'turn-id': turn_id,
     }, separators=(',', ':'))
+
+
+def run_turn_ended(client, payload, timeout=TURN_ENDED_CLI_TIMEOUT_SECONDS):
+    """Run the original turn-ended command; report slow or failed runs on stderr.
+
+    The helper exits 0 even when it cannot reach the service (it only writes to
+    os_log), so a zero status does not prove delivery.
+    """
+    started = time.monotonic()
+    status = 'timeout'
+    stderr = b''
+    failure = None
+    try:
+        result = subprocess.run([client, 'turn-ended', payload], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=timeout, check=False)
+        status = result.returncode
+        stderr = result.stderr or b''
+        if status != 0:
+            failure = RuntimeError(f'Original turn-ended command exited with status {status}.')
+    except subprocess.TimeoutExpired as exc:
+        stderr = exc.stderr or b''
+        failure = RuntimeError(
+            f'Original turn-ended command timed out after {timeout} seconds.')
+    elapsed = time.monotonic() - started
+    if failure is not None or elapsed >= TURN_ENDED_CLI_SLOW_SECONDS:
+        text = bytes(stderr)[:STDERR_LOG_BYTES].decode('utf-8', 'replace').strip()
+        print(f'LCU macOS turn-ended command: exit={status} elapsed={round(elapsed * 1000)} ms'
+              f'{" stderr=" + repr(text) if text else ""}', file=sys.stderr, flush=True)
+    if failure is not None:
+        raise failure
 
 
 def start_original_host(*, python, client: Path, entry: Path, env: dict[str, str],
@@ -280,12 +320,7 @@ def serve(address, client, control_address=None):
                             not isinstance(turn_id, str) or not turn_id.strip()):
                         raise ValueError('Original macOS turn IDs are missing.')
                     payload = turn_ended_payload(session_id, turn_id)
-                    result = subprocess.run([client, 'turn-ended', payload],
-                                            stdin=subprocess.DEVNULL,
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                            timeout=3, check=False)
-                    if result.returncode != 0:
-                        raise RuntimeError(f'Original turn-ended command exited with status {result.returncode}.')
+                    run_turn_ended(client, payload)
                     response = {'notified': True}
                 except Exception as exc:
                     response = {'notified': False, 'error': str(exc)[:512]}
