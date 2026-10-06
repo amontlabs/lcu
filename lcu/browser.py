@@ -343,10 +343,7 @@ def _install_locked(root, system, destination, selected_app):
     if changed == 0:
         raise ValueError('The original Chrome installer produced no manifest for the selected host.')
     if system == 'Windows':
-        key = r'HKCU\Software\Google\Chrome\NativeMessagingHosts\com.openai.codexextension'
-        registered = subprocess.run(['reg.exe', 'query', key, '/ve'],
-                                    capture_output=True, text=True, timeout=20)
-        if registered.returncode or str(next(iter(manifest_paths))) not in registered.stdout:
+        if not _windows_registered(next(iter(manifest_paths))):
             raise ValueError('The original Chrome installer did not register the selected manifest for this account.')
     return destination
 
@@ -405,29 +402,45 @@ def _relay_snapshot(destination, system, manifest_paths):
 Refreshed = collections.namedtuple('Refreshed', 'status destination displaced')
 
 
-def _owned_relay_dirs(manifests, expected_app, apps):
-    """Relay directories named by `manifests` that this installation made, keyed to their marker's app path.
+def _owned_marker(directory, expected_app, apps):
+    """The app a relay directory's marker records when this installation made it, else None.
 
     A directory is ours when its `.lcu-browser-host` marker names the selected app, or (Windows) a
     private app generation under this prefix: the Store app changed since `lcu browser install` ran.
     """
+    marker = directory / '.lcu-browser-host'
+    try:
+        if directory.is_symlink() or marker.is_symlink() or not marker.is_file():
+            return None
+        recorded = marker.read_text()
+    except OSError:
+        return None
+    app = os.path.normcase(recorded.strip())
+    if recorded == expected_app or (apps and app.startswith(os.path.normcase(str(apps)) + os.sep)):
+        return recorded
+    return None
+
+
+def _owned_relay_dirs(manifests, data_root, expected_app, apps):
+    """{directory: recorded app} of this installation's relays: those the manifests name and those kept under `data_root`."""
+    directories = {directory for directory in map(_launcher_dir, manifests) if directory is not None}
+    try:
+        directories.update(path for path in data_root.iterdir() if path.is_dir())
+    except OSError:
+        pass
     owned = {}
-    for path in manifests:
-        try:
-            if path.is_symlink() or not path.is_file():
-                continue
-            launcher = Path(json.loads(path.read_text()).get('path', ''))
-            marker = launcher.parent / '.lcu-browser-host'
-            if (launcher.name not in ('lcu-native-host', 'lcu-native-host.cmd') or launcher.parent.is_symlink()
-                    or marker.is_symlink() or not marker.is_file()):
-                continue
-            recorded = marker.read_text()
-        except (OSError, ValueError, AttributeError):
-            continue
-        app = os.path.normcase(recorded.strip())
-        if recorded == expected_app or (apps and app.startswith(os.path.normcase(str(apps)) + os.sep)):
-            owned[launcher.parent] = recorded
+    for directory in directories:
+        recorded = _owned_marker(directory, expected_app, apps)
+        if recorded is not None:
+            owned[directory] = recorded
     return owned
+
+
+def _windows_registered(manifest_path):
+    """True when the account's Chrome native-host registration names `manifest_path`."""
+    key = r'HKCU\Software\Google\Chrome\NativeMessagingHosts\com.openai.codexextension'
+    registered = subprocess.run(['reg.exe', 'query', key, '/ve'], capture_output=True, text=True, timeout=20)
+    return not registered.returncode and str(manifest_path) in registered.stdout
 
 
 def refresh(root):
@@ -455,25 +468,30 @@ def refresh(root):
     system, default, selected_app = _host_location(root)
     expected = str(selected_app) + '\n'
     prefix = Path(root).resolve().parent.parent
-    owned = _owned_relay_dirs(existing, expected, prefix / 'apps' if system == 'Windows' else None)
-    marker = default / '.lcu-browser-host'
+    owned = _owned_relay_dirs(existing, _data_root(system), expected, prefix / 'apps' if system == 'Windows' else None)
     if not owned:
-        valid = (default.is_dir() and not default.is_symlink() and marker.is_file() and not marker.is_symlink()
-                 and marker.read_text() == expected)
-        if not valid or not existing:
-            return Refreshed('absent', default if valid else None, [])
+        return Refreshed('absent', None, [])
+    ours = sorted(path for path in existing if _points_into(path, owned))
+    if not ours:
+        if not existing:
+            return Refreshed('absent', None, [])
         # The ChatGPT app (or the user) took the manifest back. Re-pointing it is what the explicit
         # `lcu browser install` is for; an update must not take the connector from another owner.
         return Refreshed('elsewhere', default, [])
     # Reinstall where the relay is. A replaced app generation moves to the directory of the selected one.
     current = [path for path, recorded in owned.items() if recorded == expected]
     destination = default if default in owned else (sorted(current)[0] if current else default)
-    ours = sorted(path for path in existing if _points_into(path, owned))
+    if system == 'Windows' and not _windows_registered(ours[0]):
+        # The original installer would replace the registration; another owner holds it, so only report.
+        return Refreshed('elsewhere', default, [])
     if hasattr(os, 'geteuid') and os.geteuid() == 0:
         # `sudo lcu update` must not write root-owned files into the desktop account's browser setup.
         return Refreshed('root', destination, [])
     # The original installer writes every browser's manifest. Only those already pointing at a relay of
     # this installation are ours; the others are put back as they were (or removed again if they were new).
+    for path in existing:
+        if path.is_symlink():  # the original installer would write through it, and nothing here could undo that
+            raise ValueError(f'Native-host manifest must be a regular file: {path}')
     others = {path: _read_or_none(path) for path in manifests if path not in ours}
     with _destination_lock(destination):
         before = _relay_snapshot(destination, system, ours)

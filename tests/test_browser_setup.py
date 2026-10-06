@@ -811,6 +811,19 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual((custom / 'lcu-native-host.py').read_bytes(), self.relay_source.read_bytes())
         self.assertFalse((self.support / 'lcu/browser').exists() and any((self.support / 'lcu/browser').iterdir()))
 
+    @unittest.skipIf(os.name == 'nt', 'creating symlinks needs a privilege on Windows')
+    def test_a_symlinked_manifest_is_refused_before_the_installer_can_write_through_it(self):
+        install(self.root)
+        self.calls = 0
+        target = Path(self.temporary.name) / 'someone-elses-file'
+        target.write_text('theirs')
+        self.edge.unlink()
+        self.edge.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, 'regular file'):
+            refresh(self.root)
+        self.assertEqual(self.calls, 0)
+        self.assertEqual(target.read_text(), 'theirs')
+
     def test_linux_does_not_recreate_a_removed_registration(self):
         config = self.home / '.config'
         chrome = config / 'google-chrome/NativeMessagingHosts/com.openai.codexextension.json'
@@ -865,13 +878,15 @@ class RefreshTests(unittest.TestCase):
 
         def installer(command, **_options):
             if command[0] == 'reg.exe':
-                return subprocess.CompletedProcess(command, 0, stdout=f'{manifest} REG_SZ {manifest}')
+                return subprocess.CompletedProcess(command, 0, stdout=f'{registered["value"] or manifest} REG_SZ')
+            installs.append(command)
             manifest.parent.mkdir(parents=True, exist_ok=True)
             manifest.write_text(json.dumps({'name': 'com.openai.codexextension', 'path': str(
                 _plugin_of(command) / 'extension-host/windows/x64/extension-host.exe')}))
             return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
 
         selected = mock.Mock(return_value=generations['gen1'])
+        registered, installs = {'value': None}, []
         with mock.patch('lcu.browser.platform.system', return_value='Windows'), \
                 mock.patch.dict(os.environ, {'USERPROFILE': str(home), 'LOCALAPPDATA': str(local)}), \
                 mock.patch('lcu.runtime.paths', selected), \
@@ -887,6 +902,10 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(json.loads(manifest.read_text())['path'], str(destination / 'lcu-native-host.cmd'))
             # The Store app changed: the update's installer made a new private generation.
             selected.return_value = generations['gen2']
+            ours = manifest.read_text()
+            manifest.write_text(json.dumps({'path': 'C:\\ChatGPT\\extension-host.exe'}))
+            self.assertEqual(refresh(root).status, 'elsewhere')  # reclaimed; the old generation's relay is still known
+            manifest.write_text(ours)
             moved = refresh(root)
             self.assertEqual(moved.status, 'changed')
             self.assertNotEqual(moved.destination, destination)
@@ -895,6 +914,11 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(refresh(root), ('unchanged', moved.destination, []))
             manifest.write_text(json.dumps({'path': 'C:\\ChatGPT\\extension-host.exe'}))
             self.assertEqual(refresh(root), ('elsewhere', moved.destination, []))
+            manifest.write_text(json.dumps({'path': str(moved.destination / 'lcu-native-host.cmd')}))
+            registered['value'] = 'C:\\ChatGPT\\manifest.json'  # another owner holds the registry key
+            calls = len(installs)
+            self.assertEqual(refresh(root), ('elsewhere', moved.destination, []))
+            self.assertEqual(len(installs), calls)
 
 
 class RelaySourceCompatibilityTests(unittest.TestCase):
