@@ -14,7 +14,7 @@ import path from 'node:path';
 import { spawn as nodeSpawn } from './compat/spawn.mjs';
 import tty from 'node:tty';
 
-import { ArgumentParser, SUPPRESS } from './compat/argparse.mjs';
+import { ArgumentParser, OPTIONAL, SUPPRESS } from './compat/argparse.mjs';
 import { stderr_write, stdout_write } from './compat/pyio.mjs';
 import * as errors from './compat/errors.mjs';
 import * as http from './compat/http.mjs';
@@ -36,6 +36,8 @@ export const INTERVAL = 600;
 export const RETRY = 3600;
 export const STAMP_TTL = 120;
 export const ANNOUNCE_TTL = 7 * 24 * 3600;
+export const ANNOUNCE_COOLDOWN = 24 * 3600;
+export const ANNOUNCE_ACCOUNT = '*';
 export const TIMEOUT = 5;
 export const SEVERITIES = ['security', 'breaking'];
 
@@ -507,10 +509,17 @@ export function hook_session_id() {
   }
 }
 
-/** True when this session should be told about `version`; records it. Never raises. */
+/**
+ * True when an agent session should be told about `version` now; records it. Never raises.
+ *
+ * A release is announced at most once per ANNOUNCE_COOLDOWN across every session on the account (the `*`
+ * entry of `announced.json`, beside the per-session entries), whatever its severity; a session is never told
+ * twice about the same release, and a different release is announced at once. A session that was not told
+ * during the cooldown may be told at its next prompt after it. Without a session id only the account-wide
+ * cooldown applies.
+ */
 export function announce(session_id, version, now = null) {
   try {
-    if (!session_id) return true;
     if (now === null) now = pyfloat(_inject.now()); // time.time() is a float; an explicit `now` keeps its type
     const file = sibling(cache_path(), 'announced.json');
     let data;
@@ -528,9 +537,11 @@ export function announce(session_id, version, now = null) {
       if (age >= 0 && age < ANNOUNCE_TTL) kept.set(k, v);
     }
     data = kept;
-    const previous = data.get(session_id);
-    if (equal(get(previous ?? new Map(), 'version'), version)) return false;
-    data.set(session_id, new Map([['version', version], ['at', now]]));
+    if (session_id && equal(get(data.get(session_id) ?? new Map(), 'version'), version)) return false;
+    const last = data.get(ANNOUNCE_ACCOUNT) ?? new Map();
+    if (equal(get(last, 'version'), version) && pySub(now, last.get('at')) < ANNOUNCE_COOLDOWN) return false;
+    data.set(ANNOUNCE_ACCOUNT, new Map([['version', version], ['at', now]]));
+    if (session_id) data.set(session_id, new Map([['version', version], ['at', now]]));
     try {
       atomicJson(file, '.announced-', data);
     } catch (err) {
@@ -883,14 +894,16 @@ export async function main(root, argv = null) {
   mode.add_argument('--post-install', { action: 'store_true', help: SUPPRESS });
   parser.add_argument('--json', { action: 'store_true', help: 'Print JSON (with --check or --notice)' });
   parser.add_argument('--hook', { choices: ['SessionStart', 'UserPromptSubmit'], help: SUPPRESS });
+  parser.add_argument('--announce', { nargs: OPTIONAL, const: '', metavar: 'SESSION_ID', help: SUPPRESS });
   parser.add_argument('--yes', { action: 'store_true', help: 'Do not ask before installing' });
   const args = parser.parse_args(argv);
   root = P(root);
   if (args.notice) {
     try {
-      const found = notice(root);
+      let found = notice(root);
       if (args.hook) {
-        // A hook's documented way to add model context: once per session and release, else silent.
+        // A hook's documented way to add model context: once per session and release, and at most once
+        // a day per release across the account, else silent.
         if (found) {
           const session = hook_session_id();
           if ((session || args.hook === 'SessionStart') && announce(session, found.latest)) {
@@ -898,6 +911,10 @@ export async function main(root, argv = null) {
           }
         }
       } else {
+        if (found && args.announce !== null && !announce(args.announce || null, found.latest)) {
+          // An agent integration (the Claude Code mod) under the same cooldown as the hooks.
+          found = null;
+        }
         print(args.json ? dumps(found || {}) : (found ? found.message : ''), args.json || found ? '\n' : '');
       }
     } catch { /* hooks never fail the agent */ }

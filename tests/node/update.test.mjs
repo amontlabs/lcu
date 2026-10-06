@@ -13,6 +13,7 @@ import { after, afterEach, beforeEach, describe, test } from 'node:test';
 
 import * as update from '../../lcu/update.mjs';
 import * as claude_mod from '../../lcu/claude_mod.mjs';
+import { NOTICE_EVENTS, notice_hook } from '../../lcu/codex_hooks.mjs';
 import * as browser from '../../lcu/browser.mjs';
 import { io as argparseIo } from '../../lcu/compat/argparse.mjs';
 import { PlainOSError } from '../../lcu/compat/http.mjs';
@@ -633,6 +634,15 @@ describe('update', () => {
     return text ? JSON.parse(text).hookSpecificOutput : null;
   }
 
+  const announcedFile = (data = null) => {
+    const file = siblingFile('announced.json');
+    if (data !== null) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(data));
+    }
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  };
+
   test('hook announces once per session and version', async () => {
     cache();
     const first = await hook('SessionStart');
@@ -640,11 +650,130 @@ describe('update', () => {
     assert.ok(first.additionalContext.startsWith('LCU 0.9.2 is available'));
     assert.equal(await hook('SessionStart'), null);
     assert.equal(await hook('UserPromptSubmit'), null);
-    const other = await hook('UserPromptSubmit', '{"session_id": "s2"}');
-    assert.equal(other.hookEventName, 'UserPromptSubmit');
+    // Another session within the cooldown is told nothing about the same release.
+    assert.equal(await hook('UserPromptSubmit', '{"session_id": "s2"}'), null);
+    // A newer release is announced at once, to the session that asks, then cooled down too.
     cache({ ...INFO, version: '0.9.3', tag: 'v0.9.3' });
     assert.ok((await hook('UserPromptSubmit')).additionalContext.includes('0.9.3'));
     assert.equal(await hook('SessionStart'), null);
+    assert.equal(await hook('SessionStart', '{"session_id": "s2"}'), null);
+  });
+
+  test('announce cooldown is account-wide and per release', () => {
+    const day = update.ANNOUNCE_COOLDOWN;
+    assert.equal(day, 24 * 3600);
+    const t = 1_000_000_000;
+    assert.equal(update.announce('a', '0.9.2', t), true);
+    assert.equal(update.announce('a', '0.9.2', t + 1), false);
+    assert.equal(update.announce('b', '0.9.2', t + 3600), false);
+    assert.equal(update.announce('c', '0.9.2', t + day - 1), false);
+    assert.equal(update.announce(null, '0.9.2', t + day - 1), false);
+    // After the cooldown the next session (or prompt of one not told yet) is told, once.
+    assert.equal(update.announce('b', '0.9.2', t + day), true);
+    assert.equal(update.announce('c', '0.9.2', t + day + 1), false);
+    assert.equal(update.announce('b', '0.9.2', t + day + 1), false);
+    // A session is never told twice about the same release, even after the cooldown.
+    assert.equal(update.announce('a', '0.9.2', t + 3 * day), false);
+    // A newer release bypasses the cooldown, then has its own.
+    assert.equal(update.announce('c', '0.9.3', t + day + 2), true);
+    assert.equal(update.announce('d', '0.9.3', t + day + 3), false);
+    assert.equal(update.announce('a', '0.9.3', t + 2 * day + 2), true);
+    const data = announcedFile();
+    assert.deepEqual(data[update.ANNOUNCE_ACCOUNT], { version: '0.9.3', at: t + 2 * day + 2 });
+    assert.deepEqual(data.b, { version: '0.9.2', at: t + day });
+    assert.equal('d' in data, false);
+  });
+
+  test('announce without a session follows the cooldown', () => {
+    const t = 1_000_000_000;
+    assert.equal(update.announce(null, '0.9.2', t), true);
+    assert.equal(update.announce(null, '0.9.2', t + 60), false);
+    assert.equal(update.announce('s', '0.9.2', t + 60), false);
+    assert.equal(update.announce(null, '0.9.2', t + update.ANNOUNCE_COOLDOWN), true);
+    assert.deepEqual(Object.keys(announcedFile()), [update.ANNOUNCE_ACCOUNT]);
+  });
+
+  test('security notices follow the cooldown but status shows them', async () => {
+    cache({ ...INFO, severity: 'security' });
+    assert.notEqual(await hook('SessionStart'), null);
+    assert.equal(await hook('SessionStart', '{"session_id": "s2"}'), null);
+    assert.ok(update.status_line(root).includes('0.9.2'));
+    assert.equal(JSON.parse((await runMain('--notice', '--json'))[1]).severity, 'security');
+  });
+
+  test('cooldown expiry through the hook', async () => {
+    cache();
+    assert.notEqual(await hook('SessionStart'), null);
+    assert.equal(await hook('SessionStart', '{"session_id": "s2"}'), null);
+    const later = Date.now() / 1000 + update.ANNOUNCE_COOLDOWN + 1;
+    cache(INFO, null, -update.ANNOUNCE_COOLDOWN - 1); // keep the cache fresh at the later time
+    update._inject.now = () => later;
+    assert.notEqual(await hook('UserPromptSubmit', '{"session_id": "s2"}'), null);
+    assert.equal(await hook('UserPromptSubmit', '{"session_id": "s3"}'), null);
+    assert.equal(await hook('UserPromptSubmit', '{"session_id": "s2"}'), null);
+    assert.equal(await hook('UserPromptSubmit'), null);
+  });
+
+  test('legacy per-session file still loads', async () => {
+    cache();
+    const now = Date.now() / 1000;
+    announcedFile({ s1: { version: '0.9.2', at: now - 3600 }, s2: { version: '0.9.1', at: now - 7200 } });
+    assert.equal(await hook('UserPromptSubmit'), null);
+    // No account-wide record yet: the first other session is told, and starts the cooldown.
+    assert.notEqual(await hook('UserPromptSubmit', '{"session_id": "s2"}'), null);
+    assert.equal(await hook('UserPromptSubmit', '{"session_id": "s3"}'), null);
+    const data = announcedFile();
+    assert.deepEqual(Object.keys(data).sort(), ['s1', 's2', update.ANNOUNCE_ACCOUNT].sort());
+    assert.ok(Math.abs(data.s1.at - (now - 3600)) < 1e-6);
+  });
+
+  test('notice --json --announce for agent integrations', async () => {
+    cache();
+    let [, text] = await runMain('--notice', '--json', '--announce=s1');
+    assert.equal(JSON.parse(text).latest, '0.9.2');
+    assert.deepEqual(await runMain('--notice', '--json', '--announce=s1'), [0, '{}\n']);
+    assert.deepEqual(await runMain('--notice', '--json', '--announce=s2'), [0, '{}\n']);
+    assert.deepEqual(await runMain('--notice', '--json', '--announce'), [0, '{}\n']);
+    assert.deepEqual(await runMain('--notice', '--announce', 's3'), [0, '']);
+    // Without --announce (a person, status-like use) the cached notice is printed unconditionally.
+    assert.equal(JSON.parse((await runMain('--notice', '--json'))[1]).latest, '0.9.2');
+    assert.ok((await runMain('--notice'))[1].startsWith('LCU 0.9.2 is available'));
+    assert.ok(update.status_line(root).includes('0.9.2'));
+  });
+
+  // tests/test_codex_update_notice.py NoticeCooldownTests: the hooks' own command lines, as Codex runs them for
+  // several sessions on one account.
+  async function runCodexHook(event, session) {
+    const command = toPlain(notice_hook('/p/current/bin/lcu', event), { allowReorder: true }).hooks[0].command;
+    const argv = command.split(' update ')[1].split(' '); // drop the quoted lcu path and `update`
+    update._inject.stdin = JSON.stringify({ session_id: session });
+    out = '';
+    assert.equal(await update.main(root, argv), 0);
+    return out ? JSON.parse(out).hookSpecificOutput.additionalContext : null;
+  }
+
+  test('a release is announced once a day across codex sessions', async () => {
+    cache();
+    assert.ok((await runCodexHook('SessionStart', 'a')).includes('0.9.2'));
+    for (const event of NOTICE_EVENTS) {
+      assert.equal(await runCodexHook(event, 'a'), null);
+      assert.equal(await runCodexHook(event, 'b'), null);
+    }
+    const later = Date.now() / 1000 + update.ANNOUNCE_COOLDOWN + 1;
+    cache(INFO, null, -update.ANNOUNCE_COOLDOWN - 1);
+    update._inject.now = () => later;
+    assert.equal(await runCodexHook('UserPromptSubmit', 'a'), null);
+    assert.ok((await runCodexHook('UserPromptSubmit', 'b')).includes('0.9.2'));
+    assert.equal(await runCodexHook('SessionStart', 'c'), null);
+  });
+
+  test('a newer release is announced at once to codex sessions', async () => {
+    cache();
+    assert.ok((await runCodexHook('SessionStart', 'a')).includes('0.9.2'));
+    assert.equal(await runCodexHook('SessionStart', 'b'), null);
+    cache({ ...INFO, version: '0.9.3', tag: 'v0.9.3' });
+    assert.ok((await runCodexHook('SessionStart', 'b')).includes('0.9.3'));
+    assert.equal(await runCodexHook('UserPromptSubmit', 'a'), null);
   });
 
   test('hook output bytes', async () => {
@@ -654,7 +783,7 @@ describe('update', () => {
     assert.ok(text.startsWith('{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "LCU 0.9.2 is available'));
     assert.ok(text.endsWith('"}}\n'));
     const announced = siblingFile('announced.json');
-    assert.match(fs.readFileSync(announced, 'utf8'), /^\{"s1": \{"version": "0\.9\.2", "at": \d+\.\d+\}\}$/);
+    assert.match(fs.readFileSync(announced, 'utf8'), /^\{"\*": \{"version": "0\.9\.2", "at": \d+\.\d+\}, "s1": \{"version": "0\.9\.2", "at": \d+\.\d+\}\}$/);
     assert.equal(fs.statSync(announced).mode & 0o777, 0o600);
   });
 
@@ -667,10 +796,13 @@ describe('update', () => {
   test('hook missing or garbage session id', async () => {
     cache();
     for (const stdin of ['', 'garbage{', '[]', '{"session_id": 5}', '{}']) {
+      fs.rmSync(siblingFile('announced.json'), { force: true });
+      // Without a session id SessionStart is still announced, under the account-wide cooldown only.
       assert.notEqual(await hook('SessionStart', stdin), null);
+      assert.equal(await hook('SessionStart', stdin), null);
       assert.equal(await hook('UserPromptSubmit', stdin), null);
+      assert.deepEqual(Object.keys(announcedFile()), [update.ANNOUNCE_ACCOUNT]);
     }
-    assert.equal(fs.existsSync(siblingFile('announced.json')), false);
   });
 
   test('F16: hook stdin is bounded by code points, strict UTF-8', () => {
@@ -688,12 +820,14 @@ describe('update', () => {
     fs.writeFileSync(file, dumps(new Map([
       ['old', new Map([['version', '0.9.2'], ['at', now - 8 * 86400]])],
       ['recent', new Map([['version', '0.9.2'], ['at', now - 86400]])], ['bad', 3],
+      [update.ANNOUNCE_ACCOUNT, new Map([['version', '0.9.2'], ['at', now - 2 * 86400]])],
     ])));
     assert.equal(await hook('UserPromptSubmit', '{"session_id": "recent"}'), null);
     assert.notEqual(await hook('UserPromptSubmit', '{"session_id": "old"}'), null);
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    assert.deepEqual(Object.keys(data).sort(), ['old', 'recent']);
+    assert.deepEqual(Object.keys(data).sort(), ['old', 'recent', update.ANNOUNCE_ACCOUNT].sort());
     assert.ok(data.old.at > now - 5);
+    assert.ok(data[update.ANNOUNCE_ACCOUNT].at > now - 5);
     fs.writeFileSync(file, '{broken');
     assert.notEqual(await hook('UserPromptSubmit'), null);
   });
@@ -710,7 +844,7 @@ describe('update', () => {
 
   test('F30: an explicit int `now` is recorded as an int', () => {
     assert.equal(update.announce('s', '0.9.2', 1000), true);
-    assert.equal(fs.readFileSync(siblingFile('announced.json'), 'utf8'), '{"s": {"version": "0.9.2", "at": 1000}}');
+    assert.equal(fs.readFileSync(siblingFile('announced.json'), 'utf8'), '{"*": {"version": "0.9.2", "at": 1000}, "s": {"version": "0.9.2", "at": 1000}}');
   });
 
   test('refresh stamp guards stampede', () => {

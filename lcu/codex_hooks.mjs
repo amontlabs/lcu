@@ -100,7 +100,7 @@ export const NOTICE_MATCHER = 'startup|resume';
  * LCU's own command hook for `event` (harness integration, not an original lifecycle hook).
  *
  * `update --notice --hook EVENT` prints Codex's `hookSpecificOutput.additionalContext` for the model once per
- * session and release; it is cache-only, exits 0 and prints nothing otherwise. SessionStart runs on startup and
+ * session and release, and at most once a day per release across the account; it is cache-only, exits 0 and prints nothing otherwise. SessionStart runs on startup and
  * resume, UserPromptSubmit on every prompt (no matcher, no status message: it must stay quiet). Hook trust
  * applies as for any other hook; this is never part of the upstream lifecycle contract.
  *

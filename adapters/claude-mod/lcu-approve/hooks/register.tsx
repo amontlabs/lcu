@@ -32,11 +32,11 @@ const textOf = (result: McpResult) =>
   (result.content ?? []).map(item => item.text ?? '').join('')
 
 // Update notices: per session (the classic event's session_id), what was last announced and when the cache
-// was last asked; one toast per version per process.
+// was last asked. Whether to announce at all is `lcu update --notice --announce`'s decision (once per session
+// and release, at most once a day per release across the account), so the toast follows it.
 const NOTICE_RECHECK_MS = 600000
 const DEFAULT_SESSION = 'default'
 const noticeSessions = new Map<string, { announced?: string; lastCheck?: number }>()
-const toastedVersions = new Set<string>()
 
 const paneId = (approval: Approval) => `lcu-approval-${approval.id}`
 
@@ -138,15 +138,16 @@ export const register: Register = on => {
     const result = await next(e)
     const state = sessionState(e)
     state.lastCheck = await now($)
-    const notice = await updateNotice($)
+    const notice = await updateNotice($, sessionId(e))
     if (!notice) return result
     state.announced = notice.latest ?? notice.message
-    await toastOnce($, notice)
+    await toast($, notice)
     return { ...result, additionalContext: [...(result.additionalContext ?? []), notice.message] }
   })
 
   // A release published while the session is open: the cache refreshes in the background, so the first
-  // prompt and then at most one check per NOTICE_RECHECK_MS reads it; each version is announced once.
+  // prompt and then at most one check per NOTICE_RECHECK_MS reads it; each version is announced once per
+  // session, and once a day across the account.
   on('classic.UserPromptSubmit', async ($, e, next) => {
     const result = await next(e)
     try {
@@ -154,12 +155,12 @@ export const register: Register = on => {
       const at = await now($)
       if (state.lastCheck !== undefined && at - state.lastCheck < NOTICE_RECHECK_MS) return result
       state.lastCheck = at
-      const notice = await updateNotice($)
+      const notice = await updateNotice($, sessionId(e))
       if (!notice) return result
       const version = notice.latest ?? notice.message
       if (version === state.announced) return result
       state.announced = version
-      await toastOnce($, notice)
+      await toast($, notice)
       return { ...result, additionalContext: [...(result.additionalContext ?? []), notice.message] }
     } catch {
       return result
@@ -198,27 +199,30 @@ const now = async ($: any): Promise<number> => {
   }
 }
 
+const sessionId = (e: any): string | undefined =>
+  typeof e?.session_id === 'string' && e.session_id ? e.session_id : undefined
+
 const sessionState = (e: any) => {
-  const id = typeof e?.session_id === 'string' && e.session_id ? e.session_id : DEFAULT_SESSION
+  const id = sessionId(e) ?? DEFAULT_SESSION
   let state = noticeSessions.get(id)
   if (!state) noticeSessions.set(id, (state = {}))
   return state
 }
 
-async function toastOnce($: any, notice: UpdateNotice) {
-  const version = notice.latest ?? notice.message
-  if (toastedVersions.has(version)) return
+async function toast($: any, notice: UpdateNotice) {
   if ((await $.session.surfaces().catch(() => [])).length === 0) return
-  toastedVersions.add(version)
   $.ui.toast(noticeToast(notice))
 }
 
-// `lcu update --notice --json`: cache only, never blocks on the network. Any failure means no notice.
-export async function updateNotice($: any): Promise<UpdateNotice | undefined> {
+// `lcu update --notice --json --announce[=SESSION_ID]`: cache only, never blocks on the network, and prints
+// `{}` when this session was already told or the release was announced on the account within a day. Any
+// failure means no notice.
+export async function updateNotice($: any, session?: string): Promise<UpdateNotice | undefined> {
   try {
     const { path } = await findLcu($)
     if (!path) return undefined
-    const run = await $.process.run([path, 'update', '--notice', '--json'], { timeoutMs: NOTICE_TIMEOUT_MS })
+    const argv = [path, 'update', '--notice', '--json', session ? `--announce=${session}` : '--announce']
+    const run = await $.process.run(argv, { timeoutMs: NOTICE_TIMEOUT_MS })
     if (!ok(run)) return undefined
     return parseNotice(run.stdout)
   } catch {

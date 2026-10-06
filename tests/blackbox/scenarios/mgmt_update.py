@@ -247,20 +247,32 @@ def _(sb):
     hook('SessionStart', b'{"session_id": "s-1"}', 'SessionStart s-1: announced')
     hook('SessionStart', b'{"session_id": "s-1"}', 'SessionStart s-1 again: silent')
     hook('UserPromptSubmit', b'{"session_id": "s-1"}', 'UserPromptSubmit s-1: silent (already told)')
-    hook('UserPromptSubmit', b'{"session_id": "s-2", "other": 1}', 'UserPromptSubmit s-2: announced')
+    hook('UserPromptSubmit', b'{"session_id": "s-2", "other": 1}', 'UserPromptSubmit s-2: silent (announced to s-1 within the cooldown)')
     hook('UserPromptSubmit', b'', 'UserPromptSubmit without input: silent')
     hook('UserPromptSubmit', b'not json', 'UserPromptSubmit with garbage: silent')
     hook('UserPromptSubmit', b'{"session_id": 5}', 'UserPromptSubmit with a numeric id: silent')
     hook('UserPromptSubmit', b'{"session_id": ""}', 'UserPromptSubmit with an empty id: silent')
-    hook('SessionStart', b'', 'SessionStart without input: announced (no session to remember)')
-    hook('SessionStart', b'[1]', 'SessionStart with a list: announced')
+    hook('SessionStart', b'', 'SessionStart without input: silent (account-wide cooldown, no session to remember)')
+    hook('SessionStart', b'[1]', 'SessionStart with a list: silent (cooldown)')
     sb.lcu('update', '--notice', '--hook', 'SessionStart', '--json', stdin=b'{"session_id": "s-3"}', env=env,
            label='--json with --hook: hook output wins')
     sb.lcu('update', '--notice', '--hook', 'SessionStart', stdin=None, env=env, label='stdin closed (/dev/null)')
     _show_cache(sb)
-    _note(sb, '--- a newer release is announced again to the same session')
+    _note(sb, '--- a newer release is announced at once, bypassing the cooldown')
     fm.write_update_cache(sb, fm.latest_info(_bump(newer)))
     hook('SessionStart', b'{"session_id": "s-1"}', 's-1 told about the next release')
+    _show_cache(sb)
+    _note(sb, '--- agent integrations (--announce) share the cooldown; a plain --notice is unthrottled')
+    announce = lambda *args, label: sb.lcu('update', '--notice', *args, env=env, label=label)  # noqa: E731
+    announce('--json', '--announce=s-20', label='--announce s-20: already announced to s-1, so nothing')
+    fm.write_update_cache(sb, fm.latest_info(_bump(_bump(newer))))
+    announce('--json', '--announce=s-20', label='--announce s-20: next release, announced')
+    announce('--json', '--announce=s-20', label='--announce s-20 again: nothing')
+    announce('--json', '--announce=s-21', label='--announce s-21: nothing (cooldown)')
+    announce('--json', '--announce', label='--announce without a session id: nothing (cooldown)')
+    announce('--announce', 's-22', label='--announce s-22 as text: nothing')
+    announce('--json', label='no --announce: the notice is printed unconditionally')
+    announce(label='no --announce, text')
     _show_cache(sb)
     _note(sb, '--- old and malformed announcement records are dropped')
     fixtures.write(fm.cache_dir(sb) / 'announced.json', json.dumps({
@@ -279,7 +291,7 @@ def _(sb):
     fm.pty(sb, [], [sb.release / 'bin/lcu', 'update', '--notice', '--hook', 'UserPromptSubmit'], env=env,
            label='UserPromptSubmit on a terminal: no session id, silent')
     fm.pty(sb, [], [sb.release / 'bin/lcu', 'update', '--notice', '--hook', 'SessionStart'], env=env,
-           label='SessionStart on a terminal: announced')
+           label='SessionStart on a terminal')
     fm.scrub_times(sb)
 
 

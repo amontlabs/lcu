@@ -371,9 +371,24 @@ const noticeRun = (stdout: string) => (argv: string[]) => (argv[1] === 'update' 
 test('an update notice becomes session context and one toast', async ($, on) => {
   const { ran, toasts } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)))
   const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
-  expect(ran.find(argv => argv[1] === 'update')).toEqual([LCU, 'update', '--notice', '--json'])
+  expect(ran.find(argv => argv[1] === 'update')).toEqual([LCU, 'update', '--notice', '--json', '--announce'])
   expect(result.additionalContext).toEqual([NOTICE.message])
   expect(toasts).toEqual(['LCU 0.9.2 is available \u2014 ask Claude to update it, or run lcu update'])
+})
+
+test('the session id goes to lcu, which applies the account-wide cooldown', async ($, on) => {
+  const { ran } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)))
+  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  expect(ran.find(argv => argv[1] === 'update')).toEqual([LCU, 'update', '--notice', '--json', '--announce=s1'])
+})
+
+test('a release lcu already announced on the account today: no context, no toast', async ($, on) => {
+  const { toasts } = noticeHost(on, argv => (argv[1] === 'update' ? { stdout: argv[4] === '--announce=s2' ? '{}' : JSON.stringify(NOTICE) } : undefined))
+  const first: any = await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  const second: any = await $.classic.SessionStart({ source: 'startup', session_id: 's2' } as any)
+  expect(first.additionalContext).toEqual([NOTICE.message])
+  expect(second.additionalContext).toBeUndefined()
+  expect(toasts.length).toBe(1)
 })
 
 test('a headless run gets the context without a toast', async ($, on) => {
@@ -449,6 +464,20 @@ test('a version announced at session start is not repeated', async ($, on) => {
   const result: any = await prompt($)
   expect(checks(ran)).toBe(2)
   expect(result.additionalContext).toBeUndefined()
+})
+
+test('after the cooldown lcu announces again: a session told nothing yet gets it once', async ($, on) => {
+  const clock = mock.clock(on)
+  let out = '{}'
+  const { toasts } = promptHost(on, argv => (argv[1] === 'update' ? { stdout: out } : undefined))
+  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  out = JSON.stringify(NOTICE)
+  await clock.advance(11 * MIN)
+  expect(((await prompt($)) as any).additionalContext).toEqual([NOTICE.message])
+  expect(toasts.length).toBe(1)
+  await clock.advance(11 * MIN)
+  expect(((await prompt($)) as any).additionalContext).toBeUndefined()
+  expect(toasts.length).toBe(1)
 })
 
 test('a newer version is announced once', async ($, on) => {
