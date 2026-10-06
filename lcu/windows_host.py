@@ -40,6 +40,7 @@ class HostPlan:
     factory: str
     module: str
     contents: dict[str, bytes]
+    uncarried: int = 0  # top-level calls that only touch imported modules; see windows_host_analyze.cjs
 
 
 def _analyzer_env() -> dict[str, str]:
@@ -176,7 +177,7 @@ def plan_original_asar(archive: Path, *, node: Path) -> HostPlan:
                 queue.extend(_local_dependencies(
                     name, listed[name]['requires'], listed[name]['imports'], members))
         queue = list(dict.fromkeys(queue))
-    return HostPlan(main, response['factory'], response['module'], chunks)
+    return HostPlan(main, response['factory'], response['module'], chunks, response.get('uncarried', 0))
 
 
 def materialize_original_host(app: Path, destination: Path, *, node: Path | None = None) -> Path:

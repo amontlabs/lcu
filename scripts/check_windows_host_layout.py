@@ -50,6 +50,7 @@ def main(argv=None):
     plan = plan_original_asar(args.asar, node=args.node)
     print(f'main bundle: {plan.main}')
     print(f'factory: {plan.factory} ({len(plan.module)} generated characters)')
+    print(f'top-level calls on imported modules not carried: {plan.uncarried}')
     print(f'chunk files: {len(plan.contents)}')
     for name in sorted(plan.contents):
         print(f'  {name}')

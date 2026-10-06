@@ -239,18 +239,47 @@ class WindowsHostTests(unittest.TestCase):
         module = self.plan(self.members(factory('const u=state.value', prelude=prelude))).module
         self.assertIn('state.value=41,state.value++,tally.n+=2;', module)
         self.assertIn('const tally={n:0};', module)  # the sequence also needs tally's declaration
-        # A sequence that mixes initialisation with another call cannot be carried, so it must refuse.
-        for prelude in ('const state={};state.value=41,register(state);function register(){}',
-                        'const state={};register(),state.value=41;function register(){}',
-                        'const state={};delete state.value;',
-                        'const state={};({a:state.value}={a:1});',
-                        'const state={};[state.value]=[1];'):
+        # Mixed sequences, deletes and destructuring writes are other top-level statements: carried too.
+        for prelude, expected in (
+                ('const state={};state.value=41,register(state);function register(){}', 'register(state);'),
+                ('const state={};register(),state.value=41;function register(){}', 'register(),state.value=41;'),
+                ('const state={};delete state.value;', 'delete state.value;'),
+                ('const state={};({a:state.value}={a:1});', '({a:state.value}={a:1});'),
+                ('const state={};[state.value]=[1];', '[state.value]=[1];')):
             with self.subTest(prelude=prelude):
-                self.assertLayoutError(self.members(factory('const u=state', prelude=prelude)),
-                                       'property of state is assigned by top-level code')
+                module = self.plan(self.members(factory('const u=state', prelude=prelude))).module
+                self.assertIn(expected, module)
         # Writes inside a function that is not part of the dependencies run later, not at load.
         prelude = 'const state={};function later(){state.value=1}'
         self.assertIn('const state={};', self.plan(self.members(factory('const u=state', prelude=prelude))).module)
+
+    def test_call_based_initialisation_of_app_state_is_carried_with_its_dependencies(self):
+        prelude = ('const registry=new Map();function handler(){return 7}'
+                   'const unrelated=new Map();unrelated.set("x",1);'
+                   'registry.set("h",handler);if(registry.size){registry.set("g",handler)}')
+        module = self.plan(self.members(factory('const u=registry', prelude=prelude))).module
+        self.assertIn('registry.set("h",handler);', module)
+        self.assertIn('if(registry.size){registry.set("g",handler)}', module)
+        self.assertIn('function handler(){return 7}', module)
+        self.assertNotIn('unrelated', module)
+        # The carried statement is checked like any dependency and refused when it cannot be carried.
+        for prelude, pattern in (
+                ('const registry=new Map();registry.set("h",mystery);', 'unresolved identifiers'),
+                ('const registry=new Map(),gui=require("electron");registry.set("h",gui);', 'depends on Electron'),
+                ('const registry=new Map();registry.set("h",eval("1"));', 'unsupported eval')):
+            with self.subTest(prelude=prelude):
+                self.assertLayoutError(self.members(factory('const u=registry', prelude=prelude)), pattern)
+
+    def test_calls_that_only_touch_imported_modules_are_left_out_and_counted(self):
+        prelude = ('const lib=require("./src-h.js"),fs=require("node:fs");const schema=lib.build({lead:1});'
+                   'lib.build({lead:2});fs.existsSync("x");')
+        members = self.members(factory('const u=[schema,fs]', prelude=prelude), SPLIT_MEMBERS)
+        members['node_modules/dep/index.js'] = b'module.exports={suffix:""};'
+        plan = self.plan(members)
+        self.assertEqual(plan.uncarried, 2)  # lib.build({lead:2}) and fs.existsSync("x")
+        self.assertIn('2 top-level statement(s) that only call into imported modules were not carried',
+                      plan.module)
+        self.assertNotIn('lead:2', plan.module)
 
     def test_fails_closed_on_hidden_require_bindings(self):
         for prelude in ('var require;const state=require("electron");',
@@ -275,12 +304,16 @@ class WindowsHostTests(unittest.TestCase):
         self.assertLayoutError(self.members(main, {'dir.js': b'module.exports={x:1};'}),
                                'original dependency is missing')
 
-    def test_fails_closed_on_loop_writes_outside_the_dependencies(self):
+    def test_loop_and_block_writes_to_a_dependency_are_carried(self):
         for source in ('var state=1;for(var state of [42]){}', 'var state=1;for(var state in {a:1}){}',
                        'var state=1;if(1){var state=2}'):
             with self.subTest(source=source):
-                self.assertLayoutError(self.members(factory('const u=state', prelude=source)),
-                                       'binding state is reassigned')
+                module = self.plan(self.members(factory('const u=state', prelude=source))).module
+                self.assertIn(source.split(';', 1)[1], module)
+
+    def test_fails_closed_on_state_written_by_a_function_that_is_not_a_dependency(self):
+        main = factory('const u=mode', prelude='let mode=1;function setMode(v){mode=v}')
+        self.assertLayoutError(self.members(main), 'binding mode is reassigned')
 
     def test_fails_closed_on_requires_the_analysis_cannot_see(self):
         for prelude in ('const load=require;const state=load("electron");',

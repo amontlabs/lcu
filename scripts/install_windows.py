@@ -2,6 +2,7 @@
 """Install thin LCU beside the current user's official Windows Store app."""
 
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -64,6 +65,41 @@ def _validated_copy(app, selected):
     return validate_windows_app_tree(app, expected_version=selected.version,
         expected_runtime=selected.runtime_version,
         expected_inventory=selected.inventory)
+
+
+@contextlib.contextmanager
+def _install_lock(prefix):
+    """Hold an exclusive, process-lifetime lock on the prefix while installing."""
+    path = prefix / '.lcu-install.lock'
+    if _redirected(path):
+        raise ValueError(f'Refusing a redirected Windows install lock: {path}')
+    with open(path, 'ab') as handle:
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ValueError('Another LCU install is already running for this prefix; '
+                             'wait for it to finish and run this install again.') from exc
+        yield
+
+
+def _generation_in_use(prefix, generation):
+    """True when any release under the prefix records this app generation."""
+    releases = prefix / 'releases'
+    if not releases.is_dir():
+        return False
+    for descriptor in releases.glob('*/installation.json'):
+        try:
+            recorded = json.loads(descriptor.read_text())['app']
+        except (OSError, ValueError, KeyError, TypeError):
+            return True  # unreadable record: assume it may use the generation
+        if Path(recorded).parent == generation:
+            return True
+    return False
 
 
 def _preflight_host(selected):
@@ -144,6 +180,13 @@ def install(prefix):
     # not permit direct execution, so run an unchanged private copy instead.
     prefix.mkdir(parents=True, exist_ok=True)
     (prefix / '.lcu-install').touch(exist_ok=True)
+    # One install at a time per prefix: a generation another run is creating or
+    # reusing must never be removed by this run's failure handling.
+    with _install_lock(prefix):
+        return _publish(prefix, arch, selected, inventory, digest)
+
+
+def _publish(prefix, arch, selected, inventory, digest):
     apps = prefix / 'apps'
     if _redirected(apps):
         raise ValueError(f'Refusing a redirected Windows app generation directory: {apps}')
@@ -235,7 +278,7 @@ def install(prefix):
                 shutil.rmtree(_copy_path(release), ignore_errors=True)
             # Remove only a copy this run created; a generation that already existed
             # (or that a committed release uses) is never touched.
-            if created_generation:
+            if created_generation and not _generation_in_use(prefix, generation):
                 shutil.rmtree(_copy_path(generation), ignore_errors=True)
         raise
     return release

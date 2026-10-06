@@ -116,6 +116,35 @@ class InstallHostTests(unittest.TestCase):
         self.assertEqual(list((self.prefix / 'apps').iterdir()), [])
         self.assertEqual(list((self.prefix / 'releases').iterdir()), [])
 
+    def test_a_second_install_for_the_same_prefix_is_refused_while_one_runs(self):
+        self.prefix.mkdir(parents=True)
+        with install_windows._install_lock(self.prefix):
+            with self.assertRaisesRegex(ValueError, 'Another LCU install is already running'):
+                self.install()
+        self.assertFalse((self.prefix / 'apps').exists())  # nothing was copied or removed
+        self.install()  # the lock is free again once the holder finishes
+
+    def test_failure_keeps_a_generation_a_committed_release_records(self):
+        def other_install_commits_then_this_one_fails(app, destination, **options):
+            # Stands in for a release that came to reference the new generation meanwhile.
+            other = self.prefix / 'releases' / 'other-release'
+            other.mkdir(parents=True)
+            (other / 'installation.json').write_text(json.dumps({'app': str(app)}))
+            raise OSError('host extraction failed')
+        with self.assertRaisesRegex(OSError, 'host extraction failed'):
+            self.install(materialize=other_install_commits_then_this_one_fails)
+        generations = list((self.prefix / 'apps').iterdir())
+        self.assertEqual(len(generations), 1)
+        self.assertTrue((generations[0] / 'app').is_dir())
+        # A release this run itself created is removed, but an unreadable record keeps the copy.
+        self.assertTrue(install_windows._generation_in_use(self.prefix, generations[0]))
+
+    def test_unreadable_release_record_counts_as_in_use(self):
+        generation = self.prefix / 'apps' / 'digest'
+        (self.prefix / 'releases' / 'broken').mkdir(parents=True)
+        (self.prefix / 'releases' / 'broken' / 'installation.json').write_text('not json')
+        self.assertTrue(install_windows._generation_in_use(self.prefix, generation))
+
     def test_failure_never_removes_a_generation_that_already_existed(self):
         self.install()
         generation = next((self.prefix / 'apps').iterdir())
