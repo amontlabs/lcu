@@ -468,9 +468,17 @@ class BrowserStatusTests(unittest.TestCase):
         self.manifest.write_text(json.dumps({'path': '/original/ChatGPT for Chrome'}))
         self.assertFalse(self.run_status())
         text = self.output.getvalue()
-        self.assertIn("points to /original/ChatGPT for Chrome, not LCU's relay", text)
+        original = str(Path('/original/ChatGPT for Chrome'))
+        self.assertIn(f"points to {original}, not this LCU installation's relay", text)
         self.assertIn('Run `lcu browser install`, then restart Chrome, or turn the ChatGPT extension off and on '
                       'at chrome://extensions', text)
+
+    def test_relay_of_another_lcu_installation_is_reported_with_its_path(self):
+        (self.host_dir / '.lcu-browser-host').write_text('/other/installation/app\n')
+        self.assertFalse(self.run_status())
+        text = self.output.getvalue()
+        self.assertIn(f"points to {self.relay}, not this LCU installation's relay", text)
+        self.assertIn('Run `lcu browser install`, then restart Chrome', text)
 
     def test_install_command_prints_reconnect_step(self):
         from lcu import browser

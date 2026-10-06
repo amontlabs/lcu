@@ -326,7 +326,13 @@ def status(root, family='chrome'):
                             'Windows': ('windows', 'extension-host.exe')}[platform.system()]
             host = directory / 'chrome/extension-host' / system / arch / name
             relay_name = 'lcu-native-host.cmd' if system == 'windows' else 'lcu-native-host'
-            if relay.name != relay_name or not (directory / '.lcu-browser-host').is_file():
+            expected_app = str(selected[0] if system == 'windows' else (root / 'app').resolve()) + '\n'
+            try:
+                own_relay = (relay.name == relay_name
+                             and (directory / '.lcu-browser-host').read_text() == expected_app)
+            except OSError:
+                own_relay = False
+            if not own_relay:
                 foreign_host = str(relay)
             source_matches = ((directory / 'lcu-native-host.py').read_bytes() ==
                               (root / 'lcu/native_host.py').read_bytes()) if system == 'windows' else (
@@ -334,8 +340,7 @@ def status(root, family='chrome'):
             connected_host = (
                 relay.name == relay_name and relay.is_file() and os.access(relay, os.X_OK)
                 and source_matches
-                and (directory / '.lcu-browser-host').read_text() == str(
-                    selected[0] if system == 'windows' else (root / 'app').resolve()) + '\n'
+                and own_relay
                 and (directory / _PLUGIN_DIGEST).read_text().strip() == _plugin_digest(plugin)
                 and host.is_file() and os.access(host, os.X_OK))
         except (KeyError, OSError, ValueError):
@@ -343,7 +348,7 @@ def status(root, family='chrome'):
     if connected_host:
         print(f'{label} connector: configured for this LCU installation.')
     elif foreign_host:
-        print(f'{label} connector: the native-host manifest points to {foreign_host}, not LCU\'s relay. '
+        print(f'{label} connector: the native-host manifest points to {foreign_host}, not this LCU installation\'s relay. '
               f'Run `lcu browser install`, then {_reconnect_step(browser)}')
     else:
         print(f'{label} connector: missing or outdated. Run `lcu browser install`.')
