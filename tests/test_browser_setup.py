@@ -868,6 +868,26 @@ class RefreshTests(unittest.TestCase):
             refresh(self.root)
         self.assertEqual(self.calls, 0)
 
+    def test_the_active_custom_directory_wins_over_a_leftover_default_relay(self):
+        default = install(self.root)
+        custom = Path(self.temporary.name) / 'custom-relay'
+        install(self.root, custom)
+        self.assertEqual(json.loads(self.chrome.read_text())['path'], str(custom / 'lcu-native-host'))
+        self.assertEqual(refresh(self.root), ('unchanged', custom, []))
+        self.assertEqual(json.loads(self.chrome.read_text())['path'], str(custom / 'lcu-native-host'))
+        self.assertTrue(default.is_dir())
+
+    @unittest.skipIf(os.name == 'nt' or (hasattr(os, 'geteuid') and os.geteuid() == 0), 'needs an unprivileged POSIX user')
+    def test_a_manifest_that_cannot_be_put_back_stops_the_refresh_before_the_installer_runs(self):
+        install(self.root)
+        self.calls = 0
+        self.edge.write_text(json.dumps({'path': '/Applications/ChatGPT.app/host'}))
+        self.edge.parent.chmod(0o555)
+        self.addCleanup(self.edge.parent.chmod, 0o755)
+        with self.assertRaisesRegex(ValueError, 'Cannot restore'):
+            refresh(self.root)
+        self.assertEqual(self.calls, 0)
+
     @unittest.skipIf(os.name == 'nt', 'POSIX effective user ids')
     def test_root_leaves_the_account_alone(self):
         destination = install(self.root)

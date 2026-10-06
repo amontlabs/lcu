@@ -496,8 +496,9 @@ def refresh(root):
         # `lcu browser install` is for; an update must not take the connector from another owner.
         return Refreshed('elsewhere', default, [])
     # Reinstall where the relay is. A replaced app generation moves to the directory of the selected one.
-    current = [path for path, recorded in owned.items() if recorded == expected]
-    destination = default if default in owned else (sorted(current)[0] if current else default)
+    active = {directory for directory in map(_launcher_dir, ours)}
+    current = sorted(directory for directory in active if owned.get(directory) == expected)
+    destination = default if default in active else (current[0] if current else default)
     if system == 'Windows' and not _windows_registered(ours[0]):
         # The original installer would replace the registration; another owner holds it, so only report.
         return Refreshed('elsewhere', default, [])
@@ -510,14 +511,23 @@ def refresh(root):
         if path.is_symlink():  # the original installer would write through it, and nothing here could undo that
             raise ValueError(f'Native-host manifest must be a regular file: {path}')
     others = {path: _file_state(path) for path in manifests if path not in ours}  # unreadable: stop before any write
+    for path, saved in others.items():
+        if saved is not None and not os.access(path.parent, os.W_OK | os.X_OK):
+            raise ValueError(f'Cannot restore {path} if the original installer changes it; nothing was changed.')
     with _destination_lock(destination):
         before = _relay_snapshot(destination, system, ours)
         try:
             _install_locked(root, system, destination, selected_app)
         finally:
-            for path in set(others) | set(_manifest_paths(os.environ, system)):
+            failed = []
+            for path in sorted(set(others) | set(_manifest_paths(os.environ, system))):
                 if path not in ours:
-                    _restore(path, others.get(path))
+                    try:
+                        _restore(path, others.get(path))
+                    except OSError as exc:  # keep restoring the others
+                        failed.append(f'{path}: {exc}')
+            if failed:
+                raise ValueError('Could not put back manifests of other owners: ' + '; '.join(failed))
         after = _relay_snapshot(destination, system, ours)
     displaced = [path for path, saved in sorted(others.items()) if saved is not None and 'chrome' in str(path).lower()]
     return Refreshed('unchanged' if before == after else 'changed', destination, displaced)
