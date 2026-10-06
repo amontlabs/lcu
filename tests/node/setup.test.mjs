@@ -19,13 +19,16 @@ import * as platforms from '../../lcu/platforms.mjs';
 import * as tested from '../../lcu/tested.mjs';
 import { ALIASES, CLIENTS } from '../../lcu/setup_clients.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
+import { python312 } from './runtime_support.mjs';
 
 const REPO = path.resolve(import.meta.dirname, '../..');
 const PYTHON_SOURCE = path.join(ORACLE_ROOT, 'lcu/setup.py');
 // The differential oracle is CPython 3.12.10 exactly (argparse diagnostics changed within 3.12.x: 3.12.3 quotes
 // choice labels). Any other interpreter skips with that reason instead of producing false differences.
 const ORACLE = '3.12.10';
-const pythonVersion = spawnSync('python3', ['-c', 'import platform; print(platform.python_version())'], { encoding: 'utf8' }).stdout?.trim();
+// LCU_TEST_PYTHON or a fixed 3.12.10 location first (PATH's python3 may be another version), then PATH's python3.
+const PYTHON = python312() ?? 'python3';
+const pythonVersion = spawnSync(PYTHON, ['-c', 'import platform; print(platform.python_version())'], { encoding: 'utf8' }).stdout?.trim();
 const havePython = fs.existsSync(PYTHON_SOURCE) && pythonVersion === ORACLE;
 const pythonSkip = `differential oracle is CPython ${ORACLE}; python3 is ${pythonVersion || 'missing'}`;
 const ALL = ['pi', 'codex', 'claude-code', 'omp', 'hermes'];
@@ -1965,7 +1968,7 @@ describe('round-2 review regressions (round2-config.md)', () => {
 // ------------------------------------------------------------------------------------------- Python differentials
 describe('Python differential (lcu/setup.py still present)', { skip: !havePython && pythonSkip }, () => {
   const pythonSource = havePython ? fs.readFileSync(PYTHON_SOURCE, 'utf8') : '';
-  const pyRun = (code, env = {}) => spawnSync('python3', ['-c', code], { cwd: ORACLE_ROOT, env: { ...process.env, ...env }, encoding: 'utf8' });
+  const pyRun = (code, env = {}) => spawnSync(PYTHON, ['-c', code], { cwd: ORACLE_ROOT, env: { ...process.env, ...env }, encoding: 'utf8' });
 
   test('embedded Node sources are byte-identical', async () => {
     const r = pyRun('import sys; from lcu import setup; sys.stdout.write(setup.MCP_PREFLIGHT + "\\0" + setup.MCP_REGISTER)');
@@ -1994,7 +1997,7 @@ describe('Python differential (lcu/setup.py still present)', { skip: !havePython
     const env = { HOME: home, COLUMNS: '80', CLAUDE_CONFIG_DIR: '' };
     for (const argv of cases) {
       const full = IS_ROOT ? [...argv, '--user', 'root'] : argv;
-      const py = pyRun(`import sys; sys.argv[0] = 'lcu'; from lcu import setup; await setup.main(${JSON.stringify(full)})`, env);
+      const py = pyRun(`import sys; sys.argv[0] = 'lcu'; from lcu import setup; setup.main(${JSON.stringify(full)})`, env);
       const js = spawnSync(process.execPath, ['--input-type=module', '-e',
         `process.argv[1] = 'lcu'; const s = await import(${JSON.stringify(setupUrl)}); await s.main(${JSON.stringify(full)});`],
       { env: { ...process.env, ...env }, encoding: 'utf8' });
@@ -2014,7 +2017,7 @@ describe('Python differential (lcu/setup.py still present)', { skip: !havePython
       const r = pyRun(`from unittest.mock import patch
 from lcu import setup
 with patch('lcu.codex_hooks.export_files', return_value={}):
-    await setup.export_bundle(${JSON.stringify(py)}, ['/usr/bin/lcu'], ${JSON.stringify(t.release)}, chrome=${chrome ? 'True' : 'False'}, audio=${audio ? 'True' : 'False'})`);
+    setup.export_bundle(${JSON.stringify(py)}, ['/usr/bin/lcu'], ${JSON.stringify(t.release)}, chrome=${chrome ? 'True' : 'False'}, audio=${audio ? 'True' : 'False'})`);
       assert.equal(r.status, 0, r.stderr);
       setup.impl.export_files = () => ({});
       await setup.export_bundle(js, ['/usr/bin/lcu'], t.release, { chrome, audio });

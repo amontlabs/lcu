@@ -21,6 +21,11 @@ import { DISPOSITION_SCRIPT, python312, tempDir } from './runtime_support.mjs';
 
 const PYTHON = python312();
 
+// The gate refuses a Node whose directories or file are group/other-writable. Fixtures must not inherit the caller's
+// umask (Ubuntu users, CI runners: 0002 makes every created directory group-writable) nor the mode of the Node they
+// copy (hosted toolcache Nodes are 0775).
+process.umask(0o022);
+
 const REPO = fileURLToPath(new URL('../..', import.meta.url));
 const SHIMS = ['lcu', 'lcu-session', 'lcu-codex-sandbox'];
 const APP_NODE = '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node';
@@ -47,6 +52,7 @@ function trustedNode() {
     linuxApp = join(base, 'chatgpt');
     mkdirSync(join(linuxApp, 'resources/cua_node/bin'), { recursive: true });
     cpSync(process.execPath, join(linuxApp, NODE_IN_APP));
+    chmodSync(join(linuxApp, NODE_IN_APP), 0o755);
   }
   return join(linuxApp, NODE_IN_APP);
 }
@@ -661,6 +667,7 @@ printf '%s' "$__LCU_LN" ; printf '|'; printf '%s' "$__LCU_L1"; printf '|'; print
       const bin = join(base, 'app/resources/cua_node/bin');
       mkdirSync(join(bin, 'a\nb'), { recursive: true });
       cpSync(process.execPath, join(bin, 'nodereal'));
+      chmodSync(join(bin, 'nodereal'), 0o755);
       symlinkSync('../nodereal', join(bin, 'a\nb/node'));
       symlinkSync('a\nb/node', join(bin, 'node'));
       const result = walk(`__lcu_gate ${JSON.stringify(join(bin, 'node'))} ${JSON.stringify(join(base, 'app'))} 0 || { printf 'FAIL %s' "$__LCU_REASON"; exit 1; }

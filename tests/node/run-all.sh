@@ -20,6 +20,9 @@
 #     tests (3 s lifecycle-host client windows) become flaky, so the default concurrency is 4 (about 40 s here).
 # Nothing in this script (or the suite) signals a process it did not start.
 set -u
+# Fixture trees (fake apps the launch gate inspects) must not be group-writable: a 0002 umask (Ubuntu users, the CI
+# runner) would make every directory a test creates fail the gate's writable-by-group check.
+umask 022
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)

@@ -14,6 +14,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SCRIPT = path.join(ROOT, 'scripts/install.sh');
+// Fixture apps must pass the gate (no group/other-writable directory): do not inherit a 0002 umask (CI runners).
+process.umask(0o022);
 const HOST = process.platform === 'darwin' ? 'Darwin' : 'Linux';
 
 const MARKERS = {
