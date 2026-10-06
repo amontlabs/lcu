@@ -28,6 +28,11 @@ function parse(source) {
   }
 }
 
+function memberRoot(node) {
+  while (node && node.type === 'MemberExpression') node = node.object;
+  return node && node.type === 'Identifier' ? node.name : null;
+}
+
 function patternNames(node, out) {
   switch (node.type) {
     case 'Identifier': out.push(node.name); break;
@@ -105,6 +110,8 @@ class Scan {
     this.requires = new Set();
     this.imports = new Set();
     this.problems = new Set();
+    this.memberWritten = new Set();
+    this.depth = 0;
   }
 
   bound(name) {
@@ -121,7 +128,18 @@ class Scan {
     if (write) this.written.add(name);
   }
 
+  // Code that runs while the module loads (not inside a function) and assigns to a property
+  // path rooted at a free name: the carried closure must either contain it or refuse.
+  noteMemberWrite(target) {
+    if (target.type !== 'MemberExpression' || this.depth > 0) return;
+    const root = memberRoot(target);
+    if (root !== null && !this.bound(root)) this.memberWritten.add(root);
+  }
+
   scoped(names, body) {
+    if (names.includes('require') || names.includes('eval')) {
+      this.problems.add('a binding named require or eval, which hides dependencies');
+    }
     this.scopes.push(new Set(names));
     try { body(); } finally { this.scopes.pop(); }
   }
@@ -175,7 +193,7 @@ class Scan {
       case 'ArrayPattern': for (const e of node.elements) if (e) this.assignPattern(e); break;
       case 'RestElement': this.assignPattern(node.argument); break;
       case 'AssignmentPattern': this.assignPattern(node.left); this.visit(node.right); break;
-      default: this.visit(node); break;
+      default: this.noteMemberWrite(node); this.visit(node); break;
     }
   }
 
@@ -211,7 +229,8 @@ class Scan {
 
   onAssignmentExpression(node) {
     if (node.left.type === 'Identifier' || node.operator !== '=') {
-      if (node.left.type === 'Identifier') this.ref(node.left.name, true); else this.visit(node.left);
+      if (node.left.type === 'Identifier') this.ref(node.left.name, true);
+      else { this.noteMemberWrite(node.left); this.visit(node.left); }
     } else {
       this.assignPattern(node.left);
     }
@@ -220,7 +239,12 @@ class Scan {
 
   onUpdateExpression(node) {
     if (node.argument.type === 'Identifier') this.ref(node.argument.name, true);
-    else this.visit(node.argument);
+    else { this.noteMemberWrite(node.argument); this.visit(node.argument); }
+  }
+
+  onUnaryExpression(node) {
+    if (node.operator === 'delete') this.noteMemberWrite(node.argument);
+    this.visit(node.argument);
   }
 
   onCallExpression(node) {
@@ -240,11 +264,16 @@ class Scan {
     const names = [];
     for (const p of node.params) patternNames(p, names);
     if (!arrow) names.push('arguments');
-    this.scoped(expressionName, () => this.scoped(names, () => {
-      for (const p of node.params) this.declPattern(p);
-      if (node.body.type !== 'BlockStatement') { this.visit(node.body); return; }
-      this.scoped(hoistedNames(node.body.body), () => { for (const s of node.body.body) this.visit(s); });
-    }));
+    this.depth++;
+    try {
+      this.scoped(expressionName, () => this.scoped(names, () => {
+        for (const p of node.params) this.declPattern(p);
+        if (node.body.type !== 'BlockStatement') { this.visit(node.body); return; }
+        this.scoped(hoistedNames(node.body.body), () => { for (const s of node.body.body) this.visit(s); });
+      }));
+    } finally {
+      this.depth--;
+    }
   }
   onFunctionDeclaration(node) { this.onFunction(node); }
   onFunctionExpression(node) { this.onFunction(node); }
@@ -338,17 +367,24 @@ function isFactory(node) {
   return FACTORY_OPTIONS.every(name => keys.has(name));
 }
 
-// A top-level statement that only assigns to (or updates) one binding or a property
-// path rooted at it, such as `v = interop(v);` or `state.value = 1;`. Such a statement
-// finishes initialising that binding, so it travels with the binding's declaration.
-function initializerRoot(statement) {
+// A top-level statement made only of assignments to (or updates of) bindings or property
+// paths rooted at them, such as `v = interop(v);` or `state.value = 1, state.n++;`. Such a
+// statement finishes initialising those bindings, so it travels with their declarations.
+function initializerRoots(statement) {
   if (statement.type !== 'ExpressionStatement') return null;
   const expression = statement.expression;
-  let target = null;
-  if (expression.type === 'AssignmentExpression') target = expression.left;
-  else if (expression.type === 'UpdateExpression') target = expression.argument;
-  while (target && target.type === 'MemberExpression') target = target.object;
-  return target && target.type === 'Identifier' ? target.name : null;
+  const parts = expression.type === 'SequenceExpression' ? expression.expressions : [expression];
+  const roots = [];
+  for (const part of parts) {
+    let target;
+    if (part.type === 'AssignmentExpression') target = part.left;
+    else if (part.type === 'UpdateExpression') target = part.argument;
+    else return null;
+    const root = memberRoot(target);
+    if (root === null) return null;
+    roots.push(root);
+  }
+  return [...new Set(roots)];
 }
 
 function entriesOf(program) {
@@ -356,6 +392,10 @@ function entriesOf(program) {
   const add = (entry, scan) => {
     entry.free = scan.free; entry.written = scan.written;
     entry.requires = scan.requires; entry.imports = scan.imports; entry.problems = scan.problems;
+    entry.memberWritten = scan.memberWritten;
+    if (entry.names.includes('require') || entry.names.includes('eval')) {
+      scan.problems.add('a binding named require or eval, which hides dependencies');
+    }
     entry.index = entries.length;
     entries.push(entry);
   };
@@ -374,8 +414,8 @@ function entriesOf(program) {
       }
     } else {
       scan.visit(statement);
-      const root = initializerRoot(statement);
-      add({kind: root ? 'assign' : 'other', names: root ? [root] : [], node: statement}, scan);
+      const roots = initializerRoots(statement);
+      add({kind: roots ? 'assign' : 'other', names: roots || [], node: statement}, scan);
     }
   }
   return entries;
@@ -404,8 +444,10 @@ function hostModule(source) {
   const assignments = new Map();
   for (const entry of entries) {
     if (entry.kind !== 'assign') continue;
-    if (!assignments.has(entry.names[0])) assignments.set(entry.names[0], []);
-    assignments.get(entry.names[0]).push(entry);
+    for (const name of entry.names) {
+      if (!assignments.has(name)) assignments.set(name, []);
+      assignments.get(name).push(entry);
+    }
   }
 
   const included = new Set();
@@ -437,6 +479,11 @@ function hostModule(source) {
     for (const name of entry.written) {
       if (includedNames.has(name)) {
         return {ok: false, error: `binding ${name} is reassigned by code outside the native-pipe host's dependencies`};
+      }
+    }
+    for (const name of entry.memberWritten) {
+      if (includedNames.has(name)) {
+        return {ok: false, error: `a property of ${name} is assigned by top-level code outside the native-pipe host's dependencies`};
       }
     }
   }

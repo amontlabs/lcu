@@ -85,7 +85,11 @@ def _member_for(current: str, specifier: str, members: set[str]) -> str:
         _required_layout(f'original dependency {specifier!r} leaves the application archive')
     # Node's own order for a relative specifier: the exact file, then .js, .json, .node,
     # then a directory's package.json "main" (not supported here) or index file.
+    # A trailing slash (or `/.`, `/..`) names a directory only; Node then skips file candidates.
+    directory_only = specifier.endswith(('/', '/.', '/..')) or specifier in ('.', '..')
     for suffix in _RESOLVED_SUFFIXES:
+        if directory_only and not suffix.startswith('/'):
+            continue
         if base + suffix in members:
             if suffix == '/package.json':
                 _required_layout(f'original dependency {base} is a package directory, which is not supported')

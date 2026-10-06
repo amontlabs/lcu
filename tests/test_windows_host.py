@@ -234,6 +234,47 @@ class WindowsHostTests(unittest.TestCase):
         main = factory('const u=state.value', prelude=prelude + 'state.unused=require("electron");')
         self.assertLayoutError(self.members(main), 'depends on Electron')
 
+    def test_comma_sequences_of_initialisation_travel_with_their_bindings(self):
+        prelude = 'const state={},tally={n:0};state.value=41,state.value++,tally.n+=2;'
+        module = self.plan(self.members(factory('const u=state.value', prelude=prelude))).module
+        self.assertIn('state.value=41,state.value++,tally.n+=2;', module)
+        self.assertIn('const tally={n:0};', module)  # the sequence also needs tally's declaration
+        # A sequence that mixes initialisation with another call cannot be carried, so it must refuse.
+        for prelude in ('const state={};state.value=41,register(state);function register(){}',
+                        'const state={};register(),state.value=41;function register(){}',
+                        'const state={};delete state.value;',
+                        'const state={};({a:state.value}={a:1});',
+                        'const state={};[state.value]=[1];'):
+            with self.subTest(prelude=prelude):
+                self.assertLayoutError(self.members(factory('const u=state', prelude=prelude)),
+                                       'property of state is assigned by top-level code')
+        # Writes inside a function that is not part of the dependencies run later, not at load.
+        prelude = 'const state={};function later(){state.value=1}'
+        self.assertIn('const state={};', self.plan(self.members(factory('const u=state', prelude=prelude))).module)
+
+    def test_fails_closed_on_hidden_require_bindings(self):
+        for prelude in ('var require;const state=require("electron");',
+                        'function require(){}const state=require("./x.js");',
+                        'const state=((require)=>require("electron"))(x=>x);',
+                        'const state=function eval(){};'):
+            with self.subTest(prelude=prelude):
+                self.assertLayoutError(self.members(factory('const u=state', prelude=prelude)),
+                                       'unsupported a binding named require or eval')
+        main = factory('const u=a.x', prelude='const a=require("./src-h.js");').encode()
+        for chunk in (b'var require;module.exports=require("electron");',
+                      b'function f(require){return require("electron")}module.exports=f;',
+                      b'try{}catch(eval){}'):
+            with self.subTest(chunk=chunk):
+                self.assertLayoutError(self.members(main, {'src-h.js': chunk}), 'unsupported')
+
+    def test_trailing_slash_names_a_directory_only(self):
+        main = factory('const u=a.x', prelude='const a=require("./dir/");').encode()
+        members = self.members(main, {'dir.js': b'module.exports={x:1};',
+                                      LOCATION + 'dir/index.js': b'module.exports={x:3};'})
+        self.assertEqual(set(self.plan(members).contents), {LOCATION + 'dir/index.js'})
+        self.assertLayoutError(self.members(main, {'dir.js': b'module.exports={x:1};'}),
+                               'original dependency is missing')
+
     def test_fails_closed_on_loop_writes_outside_the_dependencies(self):
         for source in ('var state=1;for(var state of [42]){}', 'var state=1;for(var state in {a:1}){}',
                        'var state=1;if(1){var state=2}'):
