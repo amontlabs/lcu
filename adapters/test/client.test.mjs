@@ -11,7 +11,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
   callWithDeadline, createApprovalGate, createCuaClient, nativeAppApprovalOptions,
-  nativeAppApprovalResponse, relayElicitation, sendControlRequest,
+  nativeAppApprovalResponse, relayElicitation, sendControlRequest, TURN_CLEANUP_TIMEOUT_CODE,
 } from '../client.mjs';
 
 // Host control is a macOS feature, but sendControlRequest only needs a net
@@ -50,6 +50,24 @@ test('keeps original tool descriptors and initialization instructions; hides int
     await bridge.turnEnded({ sessionId: 'real-session', turnId: 'real-turn' });
     await assert.rejects(bridge.turnEnded({ sessionId: 'fail-session', turnId: 'real-turn' }),
       /cleanup failed/);
+  } finally { await bridge.close(); }
+});
+
+test('turnEnded reports the host turn-ended timeout as a typed, retryable error', async () => {
+  const bridge = createCuaClient({ command });
+  try {
+    await bridge.connect();
+    await assert.rejects(bridge.turnEnded({ sessionId: 'timeout-1-session', turnId: 't1' }), error => {
+      assert.equal(error.code, TURN_CLEANUP_TIMEOUT_CODE);
+      assert.equal(error.code, 'LCU_TURN_CLEANUP_TIMEOUT');
+      assert.match(error.message, /still finishing in the background/);
+      assert.match(error.message, /retried before the next action/);
+      return true;
+    });
+    // The same cleanup succeeds once the worker has finished it.
+    await bridge.turnEnded({ sessionId: 'timeout-1-session', turnId: 't1' });
+    await assert.rejects(bridge.turnEnded({ sessionId: 'fail-session', turnId: 't2' }),
+      error => error.code === undefined && /cleanup failed/.test(error.message));
   } finally { await bridge.close(); }
 });
 

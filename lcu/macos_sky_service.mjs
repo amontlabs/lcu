@@ -20,7 +20,10 @@ const CONTROL_STOP_TIMEOUT_SECONDS = 15;
 // Bound extra original-policy lookups while preserving the full Stop timeout.
 const CONTROL_SELECTOR_RESOLUTION_BUDGET_MS = 5_000;
 const TURN_METADATA_LIMIT = 128;
-const TURN_CLEANUP_HOOK_TIMEOUT_MS = 22_000;
+// The original node_repl host waits only 5 s for turn-ended handlers and then
+// fails the turn. Return before that; slower cleanup continues in the
+// background and finishPendingCleanup() gates the next Sky request on it.
+const TURN_CLEANUP_HOOK_TIMEOUT_MS = 4_000;
 const TURN_ENDED_TIMEOUT_SECONDS = 15;
 const turnMetadata = new Map();
 
@@ -286,6 +289,22 @@ function startControlChannel(runtime) {
   return controlConnecting;
 }
 
+const SLOW_CLEANUP_STEP_MS = 1_000;
+
+// Report which cleanup step is slow so a host "turn-ended handlers timed out"
+// can be attributed to native IPC or the CLI helper.
+async function timedCleanupStep(step, run) {
+  const started = Date.now();
+  try {
+    return await run();
+  } finally {
+    const ms = Date.now() - started;
+    if (ms >= SLOW_CLEANUP_STEP_MS) {
+      console.error(`LCU macOS turn cleanup step "${step}" took ${ms} ms`);
+    }
+  }
+}
+
 function finishPendingCleanup() {
   // The original runtime can report MCP success after a hook fails. Retain
   // native cleanup until its host acknowledges it and retry before more actions.
@@ -296,14 +315,16 @@ function finishPendingCleanup() {
           const {MacComputerUseClient} = await import(pathToFileURL(
             globalThis.nodeRepl.env.LCU_MAC_SKY_CLIENT_PATH).href);
           controlClient ??= new MacComputerUseClient();
-          await controlClient.request('ComputerUseIPCCodexTurnEndedRequest', {
-            threadID: item.session_id,
-            turnID: item.turn_id,
-          }, {codexMetadata: item.metadata, timeoutSeconds: TURN_ENDED_TIMEOUT_SECONDS});
+          await timedCleanupStep('native IPC turn-ended', () =>
+            controlClient.request('ComputerUseIPCCodexTurnEndedRequest', {
+              threadID: item.session_id,
+              turnID: item.turn_id,
+            }, {codexMetadata: item.metadata, timeoutSeconds: TURN_ENDED_TIMEOUT_SECONDS}));
           item.nativeNotified = true;
         }
         if (!item.cliNotified) {
-          await lifetimeSignal(globalThis.nodeRepl, item.session_id, item.turn_id);
+          await timedCleanupStep('CLI turn-ended', () =>
+            lifetimeSignal(globalThis.nodeRepl, item.session_id, item.turn_id));
           item.cliNotified = true;
         }
         pendingCleanup.delete(key);

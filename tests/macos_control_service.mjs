@@ -150,7 +150,10 @@ try {
   const action = handleRpc({type: 'execute', method: 'click',
     args: [{app: 'com.fixture.A'}], wait: true});
   await waitFor(() => Boolean(turnEnded), 'original turn-ended hook was not registered');
-  assert.ok(turnEnded.timeoutMs >= 18_000);
+  // The original host gives all turn-ended handlers 5 s, so ours must return sooner;
+  // slower cleanup stays pending and is retried before the next Sky request.
+  assert.ok(turnEnded.timeoutMs > 0 && turnEnded.timeoutMs <= 4_000);
+  assert.ok(turnEnded.timeoutMs < 5_000);
   await waitFor(() => observedContexts.some(context => context.app === 'com.fixture.A'),
     'trusted service did not publish the current app context');
   metadata.turn_id = 'mutated-after-dispatch';
