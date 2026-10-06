@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest]
-        python: ['3.12']
+        python: ['3.12.10']
         include:
           - os: ubuntu-24.04
             python: '3.14'
@@ -39,21 +39,25 @@ jobs:
         with:
           node-version: 24
       - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
-      # Python 3.12: the whole suite, including the differentials (they pin CPython 3.12's argparse, tar, zip and
-      # shlex behaviour, so they run on this version only).
-      - if: matrix.python == '3.12'
+      # Python 3.12.10: the whole suite, including the differentials. They pin CPython 3.12.10's argparse, tar, zip,
+      # shlex and Expat behaviour (later 3.12.x patch releases change them), so they run on exactly this version.
+      - if: matrix.python == '3.12.10'
         run: python -m unittest discover -b -s tests -p 'test_*.py'
       # Other Pythons: the build and distribution tooling tests only.
-      - if: matrix.python != '3.12'
+      - if: matrix.python != '3.12.10'
         working-directory: tests
         shell: bash
         run: python -m unittest -b $(ls test_*.py | sed 's/\.py$//')
       # LCU's runtime tests. CI has no ChatGPT app, so the suite runs on the Node installed above (the PATH
       # node) only. run-all.sh also adds the app's own Node (cua_node) when it finds one, as a developer machine
       # does; LCU_TEST_NODES pins the list here. Tests that need the app, bubblewrap or root skip themselves.
+      # LCU_TEST_PYTHON names the 3.12.10 oracle interpreter for the Python-vs-Node differentials; on the 3.14 job
+      # it is unset and they skip themselves with their reason.
       - name: tests/node (PATH Node only)
         shell: bash
-        run: LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
+        run: |
+          if [ "${{ matrix.python }}" = 3.12.10 ]; then export LCU_TEST_PYTHON="$(command -v python)"; fi
+          LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
       - run: npm test --prefix adapters
 
   node22:
@@ -67,13 +71,13 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - uses: actions/setup-node@v5
         with:
           node-version: 22
       - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
       - name: tests/node (PATH Node only)
-        run: LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
+        run: LCU_TEST_PYTHON="$(command -v python)" LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
 
   blackbox:
     # The Python 0.9.4 oracle against this tree in the disposable Linux image, network off
@@ -101,7 +105,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -116,7 +120,7 @@ jobs:
       - name: tests/node (PATH Node only, advisory)
         continue-on-error: true
         shell: bash
-        run: LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
+        run: LCU_TEST_PYTHON="$(command -v python)" LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
       - run: python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"
       - run: python scripts/check_archive.py (Get-ChildItem "$env:RUNNER_TEMP\dist\*.zip").FullName
 
@@ -144,7 +148,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - uses: actions/setup-node@v5
         with:
           node-version: 24

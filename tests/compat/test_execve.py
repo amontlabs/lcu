@@ -82,6 +82,18 @@ def make_script(path, body, mode=0o755):
     path.chmod(mode)
 
 
+def argument_space():
+    """The bytes this system lets one exec carry, as lcu/compat/execve.mjs derives them (the kernel's
+    bprm_stack_limits on Linux: a quarter of the soft stack limit, at most 6 MiB, at least 128 KiB; kern.argmax on
+    macOS). CI kernels and ulimits differ from a developer machine's, so the cases below are sized from this."""
+    if sys.platform == 'darwin':
+        return 1048576
+    import resource
+    soft = resource.getrlimit(resource.RLIMIT_STACK)[0]
+    stack = float('inf') if soft == resource.RLIM_INFINITY else soft
+    return int(max(min(8 * 1024 * 1024 / 4 * 3, stack / 4), 32 * 4096))
+
+
 class ExecveTests(NodeTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -232,11 +244,13 @@ console.log('still running');
         # app_exec.py aggregate-pointers-E2BIG and exec-aggregate-E2BIG: many strings whose bytes fit but
         # whose pointers / sum do not.
         true = self.true_binary()
-        for argv in (['true'] + [''] * 300000, ['echo'] + ['x' * 1000] * 3000):
+        # Sized to exceed this system's limit twice over: the pointers alone (8 bytes each), resp. the string bytes.
+        limit = argument_space()
+        for argv in (['true'] + [''] * (2 * limit // 8), ['echo'] + ['x' * 1000] * (2 * limit // 1000)):
             with self.subTest(count=len(argv)):
                 self.compare({'mode': 'execve', 'file': true, 'argv': argv, 'env': {}})
         # order: a missing target with oversized arguments (Linux reports the target, macOS the arguments)
-        self.compare({'mode': 'execve', 'file': '/nonexistent', 'argv': ['true'] + [''] * 150000, 'env': {}})
+        self.compare({'mode': 'execve', 'file': '/nonexistent', 'argv': ['true'] + [''] * (2 * limit // 8), 'env': {}})
 
     def test_argument_space_boundary(self):
         # The largest argument list Python's execve accepts is accepted, one more string is E2BIG.
@@ -248,7 +262,7 @@ console.log('still running');
             return subprocess.run([sys.executable, '-c', code, str(n), str(k)], capture_output=True,
                                   text=True).stdout.strip() == ''
         for k in (0, 7, 1000):
-            lo, hi = 0, 4_000_000 // (k + 9)
+            lo, hi = 0, 2 * argument_space() // (k + 9)  # twice what the system allows: never the cap itself
             while lo < hi:
                 mid = (lo + hi + 1) // 2
                 if fits(mid, k):

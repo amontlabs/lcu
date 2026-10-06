@@ -6,24 +6,30 @@ import sys
 import tempfile
 import unittest
 
-if sys.platform == 'win32':
-    raise unittest.SkipTest('macOS acceptance drives POSIX terminals')
+# The acceptance scripts drive POSIX terminals (fcntl, pty): on Windows the module still imports, so it can be
+# loaded by name as well as by discovery, and its tests report as skipped instead of aborting the run.
+WINDOWS = sys.platform == 'win32'
 
-import pty
-import select
+if WINDOWS:
+    audio = pi_stop = None
+else:
+    import pty
+    import select
+
+    SPEC = importlib.util.spec_from_file_location(
+        'macos_audio_acceptance', Path(__file__).with_name('macos_audio_acceptance.py'))
+    audio = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(audio)
+
+    PI_SPEC = importlib.util.spec_from_file_location(
+        'macos_pi_stop_acceptance', Path(__file__).with_name('macos_pi_stop_acceptance.py'))
+    pi_stop = importlib.util.module_from_spec(PI_SPEC)
+    PI_SPEC.loader.exec_module(pi_stop)
+
+skip_on_windows = unittest.skipIf(WINDOWS, 'macOS acceptance drives POSIX terminals')
 
 
-SPEC = importlib.util.spec_from_file_location(
-    'macos_audio_acceptance', Path(__file__).with_name('macos_audio_acceptance.py'))
-audio = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(audio)
-
-PI_SPEC = importlib.util.spec_from_file_location(
-    'macos_pi_stop_acceptance', Path(__file__).with_name('macos_pi_stop_acceptance.py'))
-pi_stop = importlib.util.module_from_spec(PI_SPEC)
-PI_SPEC.loader.exec_module(pi_stop)
-
-
+@skip_on_windows
 class AudioApprovalTests(unittest.TestCase):
     def setUp(self):
         self.metadata = {'session_id': 'guest-session', 'turn_id': 'generated-tone-turn'}
@@ -70,6 +76,7 @@ class AudioApprovalTests(unittest.TestCase):
         self.assertEqual(self.events, [])
 
 
+@skip_on_windows
 class PiToolResultTests(unittest.TestCase):
     def test_stale_marker_from_an_earlier_tool_cannot_satisfy_current_call(self):
         request = {'messages': [
@@ -104,6 +111,7 @@ class PiToolResultTests(unittest.TestCase):
             pi_stop.assert_tool_result(request, 'pi-stop-step-3', 'pi-initial-native-ready')
 
 
+@skip_on_windows
 class PiAgentEndWaitTests(unittest.TestCase):
     def test_wait_drains_pty_while_waiting_for_agent_end_observer(self):
         with tempfile.TemporaryDirectory(prefix='lcu-pi-agent-end-test-') as temporary:
