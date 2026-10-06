@@ -39,6 +39,8 @@ class WindowsBuildTests(unittest.TestCase):
                 names = set(bundle.namelist())
                 prefix = f'lcu-{VERSION}-windows-x64/'
                 for name in ('bin/lcu.cmd', 'lcu/windows.py', 'scripts/install_windows.py',
+                             'lcu/windows_host_analyze.cjs', 'lcu/vendor/acorn/acorn.js',
+                             'lcu/vendor/acorn/LICENSE',
                              'scripts/windows_launcher.py', 'bundle.json',
                              'docs/verification/codex-interactive-2026-09-24.md'):
                     self.assertIn(prefix + name, names)
@@ -111,6 +113,7 @@ class WindowsBuildTests(unittest.TestCase):
                  mock.patch.object(install_windows, 'resolve_installed_windows_app',
                                    return_value=selected), \
                  mock.patch.object(install_windows, '_validated_copy'), \
+                 mock.patch.object(install_windows, '_preflight_host'), \
                  mock.patch.object(install_windows, 'materialize_original_host'), \
                  mock.patch('lcu.runtime.paths', return_value=(base / 'official-app', None, None, {})):
                 install_windows.install(prefix)
@@ -159,6 +162,7 @@ class WindowsBuildTests(unittest.TestCase):
                                    return_value=selected), \
                  mock.patch('lcu.windows.platform.system', return_value='Windows'), \
                  mock.patch('lcu.windows.platform.machine', return_value='AMD64'), \
+                 mock.patch.object(install_windows, '_preflight_host'), \
                  mock.patch.object(install_windows, 'materialize_original_host'), \
                  mock.patch('lcu.runtime.paths'):
                 install_windows.install(prefix)

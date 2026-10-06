@@ -127,6 +127,9 @@ def build(output, package=None, *, target='linux', app=None):
             shutil.copy2(SOURCE / 'lcu/windows.py', release / 'lcu/windows.py')
             shutil.copy2(SOURCE / 'lcu/windows_host.py', release / 'lcu/windows_host.py')
             shutil.copy2(SOURCE / 'lcu/windows_host_entry.cjs', release / 'lcu/windows_host_entry.cjs')
+            shutil.copy2(SOURCE / 'lcu/windows_host_analyze.cjs', release / 'lcu/windows_host_analyze.cjs')
+            # The pinned acorn parser that analyzer uses (see docs/PROVENANCE.md).
+            shutil.copytree(SOURCE / 'lcu/vendor/acorn', release / 'lcu/vendor/acorn')
             shutil.copy2(SOURCE / 'lcu/windows_lifetime_host.cjs', release / 'lcu/windows_lifetime_host.cjs')
             shutil.copy2(SOURCE / 'lcu/windows_sky_service.mjs', release / 'lcu/windows_sky_service.mjs')
         (release / 'docs').mkdir()
