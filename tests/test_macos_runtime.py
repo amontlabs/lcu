@@ -258,9 +258,8 @@ class MacRuntimeTests(unittest.TestCase):
         return error, stderr.getvalue(), time.monotonic() - started
 
     def test_turn_ended_command_past_its_timeout_fails_within_bounds(self):
-        # A shell script starts fast, so the one-second limit cannot expire before it writes.
         client = self.root / 'hung-client'
-        client.write_text('#!/bin/sh\necho "connect pending" >&2\nexec sleep 30\n')
+        client.write_text('#!/bin/sh\nexec sleep 30\n')
         client.chmod(0o755)
         error, log, elapsed = self.run_turn_ended(client, timeout=1)
         self.assertIsNotNone(error)
@@ -268,6 +267,13 @@ class MacRuntimeTests(unittest.TestCase):
         self.assertLess(elapsed, 5)
         self.assertIn('exit=timeout', log)
         self.assertRegex(log, r'elapsed=\d{4} ms')
+
+    def test_turn_ended_timeout_logs_the_stderr_captured_so_far(self):
+        expired = subprocess.TimeoutExpired(['client'], 10, stderr=b'connect pending')
+        with patch('lcu.macos_host.subprocess.run', side_effect=expired):
+            error, log, _ = self.run_turn_ended('client')
+        self.assertIn('timed out after 10 seconds', str(error))
+        self.assertIn('exit=timeout', log)
         self.assertIn('connect pending', log)
 
     def test_turn_ended_command_failure_logs_exit_code_and_bounded_stderr(self):
