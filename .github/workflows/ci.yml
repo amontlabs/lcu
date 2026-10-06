@@ -25,9 +25,13 @@ jobs:
           - os: ubuntu-24.04
             python: '3.14'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
+      # Full history: the Python-vs-Node differentials in tests/compat compare against the frozen 0.9.4 oracle,
+      # which tests/blackbox/oracle.py extracts from the commit named in tests/blackbox/BASE.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
@@ -35,15 +39,64 @@ jobs:
         with:
           node-version: 24
       - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
-      - run: python -m unittest discover -b -s tests -p 'test_*.py'
+      # Python 3.12: the whole suite, including the differentials (they pin CPython 3.12's argparse, tar, zip and
+      # shlex behaviour, so they run on this version only).
+      - if: matrix.python == '3.12'
+        run: python -m unittest discover -b -s tests -p 'test_*.py'
+      # Other Pythons: the build and distribution tooling tests only.
+      - if: matrix.python != '3.12'
+        working-directory: tests
+        shell: bash
+        run: python -m unittest -b $(ls test_*.py | sed 's/\.py$//')
+      # LCU's runtime tests. CI has no ChatGPT app, so the suite runs on the Node installed above (the PATH
+      # node) only. run-all.sh also adds the app's own Node (cua_node) when it finds one, as a developer machine
+      # does; LCU_TEST_NODES pins the list here. Tests that need the app, bubblewrap or root skip themselves.
+      - name: tests/node (PATH Node only)
+        shell: bash
+        run: LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
       - run: npm test --prefix adapters
+
+  node22:
+    # The oldest Node LCU supports (process.execve needs 22.15; the ChatGPT app ships Node 24 today).
+    name: tests/node on Node 22 (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
+      - name: tests/node (PATH Node only)
+        run: LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
+
+  blackbox:
+    # The Python 0.9.4 oracle against this tree in the disposable Linux image, network off
+    # (tests/blackbox/README.md). Accepted differences are the reviewed list in tests/blackbox/deviations.json.
+    name: Black-box differential (linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: tests/blackbox/docker.sh --runs 2
+      - run: tests/blackbox/docker.sh --root --runs 2
 
   windows:
     # Modules and tests for POSIX-only targets (Linux/macOS installers and
     # layouts, fcntl, mode bits, Unix sockets) skip themselves on Windows.
     name: Windows build and tests
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -53,8 +106,17 @@ jobs:
         with:
           node-version: 24
       - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
-      - run: python -m unittest discover -b -s tests -p 'test_*.py'
+      # The build and distribution tooling tests; the Node-vs-Python differentials (tests/compat) run in `unit`.
+      - working-directory: tests
+        shell: bash
+        run: python -m unittest -b $(ls test_*.py | sed 's/\.py$//')
       - run: npm test --prefix adapters
+      # Fixture tests of the Windows runtime, not live Windows evidence. Advisory until the suite has a recorded
+      # green run on the hosted Windows image.
+      - name: tests/node (PATH Node only, advisory)
+        continue-on-error: true
+        shell: bash
+        run: LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
       - run: python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"
       - run: python scripts/check_archive.py (Get-ChildItem "$env:RUNNER_TEMP\dist\*.zip").FullName
 
@@ -63,9 +125,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
       # Bug-class rules only (syntax errors, undefined names); style is not gated.
       - run: pipx run ruff check --isolated --select E9,F63,F7,F82 .
       - run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=error
+      - name: JavaScript modules parse
+        run: git ls-files -z '*.mjs' '*.cjs' | xargs -0 -n1 node --check
       - name: JSON files parse
         run: git ls-files '*.json' ':!:**/package-lock.json' | xargs -n1 python3 -m json.tool --no-ensure-ascii > /dev/null
 
@@ -81,6 +148,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+      # build_bundle.py smoke-tests the archive on the PATH Node (build time only; the installed runtime
+      # always runs on the ChatGPT app's own Node).
       - run: python scripts/build_bundle.py --platform linux --output "$RUNNER_TEMP/dist"
       - run: python scripts/build_bundle.py --platform windows --output "$RUNNER_TEMP/dist"
       - run: python scripts/check_archive.py "$RUNNER_TEMP"/dist/*.tar.gz "$RUNNER_TEMP"/dist/*.zip

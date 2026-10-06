@@ -163,7 +163,7 @@ def wait_for_target(address: Path, session_id: str, turn_id: str,
 
 
 def environment(test_tmp: Path, app: Path, control_path: Path) -> dict[str, str]:
-    from lcu.app_layout import locate_codex_tools
+    from lcu_bridge import locate_codex_tools
 
     resources = app / 'Contents/Resources'
     tools = locate_codex_tools(resources)
@@ -224,9 +224,8 @@ def main() -> None:
     guest_model = require_guest(args.expected_user)
     app = args.app.resolve(strict=True)
     release = args.release.resolve(strict=True)
-    sys.path.insert(0, str(release))
-    from lcu.app_layout import locate_codex_tools
-
+    # lcu_bridge loads locate_codex_tools from this release's lcu/*.mjs.
+    os.environ['LCU_BRIDGE_ROOT'] = str(release)
     resources = app / 'Contents/Resources'
     runtime = resources / 'cua_node'
     helper = runtime / 'lib/node_modules/@oai/sky/Codex Computer Use.app'

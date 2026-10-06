@@ -2,9 +2,9 @@ FROM node:24.11.1-bookworm-slim AS pi-verification
 RUN npm install --global @mariozechner/pi-coding-agent@0.73.0 --ignore-scripts --no-audit --no-fund
 
 FROM ubuntu:24.04
-# Match scripts/install.py's Ubuntu 24.04 runtime dependencies, then add fixtures.
+# Match scripts/install.mjs's SYSTEM_PACKAGES (Ubuntu 24.04 runtime dependencies), then add fixtures.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    at-spi2-core bubblewrap ca-certificates dbus-x11 ffmpeg \
+    acl at-spi2-core bubblewrap ca-certificates dbus-x11 ffmpeg \
     libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 \
     libc6 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libexpat1 \
     libgbm1 libgcc-s1 libgdk-pixbuf-2.0-0 libgl1 libglib2.0-bin \

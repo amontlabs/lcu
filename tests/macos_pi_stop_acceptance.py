@@ -223,12 +223,12 @@ def main() -> None:
     release = args.release.resolve(strict=True)
     app = args.app.resolve(strict=True)
     pi = args.pi.resolve(strict=True)
-    sys.path.insert(0, str(release))
-    from lcu.app_layout import locate_codex_tools
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from lcu_bridge import locate_codex_tools
 
     resources = app / 'Contents/Resources'
     runtime = resources / 'cua_node'
-    tools = locate_codex_tools(resources)
+    tools = locate_codex_tools(resources, root=release)
     lcu = release / 'bin/lcu'
     extension = release / 'adapters/pi/index.ts'
     for path in (lcu, extension, runtime / 'bin/node', runtime / 'bin/node_repl', pi):

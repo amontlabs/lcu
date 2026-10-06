@@ -7,15 +7,38 @@ removal. The original Node REPL sandbox and approvals remain enabled.
 import argparse
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu.macos_host import start_original_host, stop_original_host
-from lcu.runtime import _configure_macos_lifecycle
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lcu_bridge import call_with_args
 from macos_session import isolated_env
+
+
+def start_original_host(node, client, env):
+    """Start the lifetime host the way lcu/macos_host.mjs does: `<node> lcu/entry.mjs macos-host serve ADDRESS CLIENT`.
+
+    Returns (process, directory, address). The host exits when its stdin closes; nothing is ever signalled.
+    """
+    directory = Path(tempfile.mkdtemp(prefix='lcu-ml-', dir='/private/tmp'))
+    address = str(directory / 'lifetime.sock')
+    process = subprocess.Popen([str(node), str(ROOT / 'lcu/entry.mjs'), 'macos-host', 'serve', address, str(client)],
+                               env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                               start_new_session=True)
+    ready = json.loads(process.stdout.readline())
+    assert ready == {'ready': True, 'socket': address}, ready
+    return process, directory, address
+
+
+def stop_original_host(process, directory):
+    process.stdin.close()
+    status = process.wait(timeout=10)
+    process.stdout.close()
+    shutil.rmtree(directory, ignore_errors=True)
+    assert status == 0, f'Original macOS lifecycle host exited with status {status}.'
 
 
 def main():
@@ -28,7 +51,10 @@ def main():
         scratch = Path(directory)
         env = isolated_env(scratch, app)
         env['SKY_CUA_SERVICE_PATH'] = str(runtime / 'lib/node_modules/@oai/sky/Codex Computer Use.app')
-        _configure_macos_lifecycle(ROOT, runtime, env)
+        # runtime._configure_macos_lifecycle fills the Sky wrapper variables into the dict it is given.
+        _, (_, _, configured) = call_with_args('runtime', '_configure_macos_lifecycle', ROOT, runtime, env)
+        env.clear()
+        env.update(configured)
         log = scratch / 'native-argv.jsonl'
         fake = scratch / 'record-native-command'
         fake.write_text(f'#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\n'
@@ -39,9 +65,7 @@ def main():
                         'if "turn-Retry" in sys.argv[2] and "turn-Retry" not in previous:\n'
                         '    sys.exit(17)\n')
         fake.chmod(0o700)
-        host, temporary, address = start_original_host(
-            python=Path(sys.executable), client=fake,
-            entry=ROOT / 'lcu/macos_host.py', env=env)
+        host, temporary, address = start_original_host(runtime / 'bin/node', fake, env)
         env['LCU_MAC_LIFETIME_SOCKET'] = address
         script = scratch / 'probe.mjs'
         script.write_text('''

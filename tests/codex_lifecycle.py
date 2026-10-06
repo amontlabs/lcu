@@ -15,9 +15,12 @@ import threading
 import tomllib
 import time
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.codex_hooks import install_hooks, original_hooks
-from lcu.app_server import app_server
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lcu_bridge import AppServerSession as app_server, call, original_hooks
+
+
+def install_hooks(cli, config_path, cwd, env, host_root):
+    return call('codex_hooks', 'install_hooks', cli, config_path, cwd, env, host_root)
 
 
 def check(resources, output, scope, enabled, release=None, mode="stop"):

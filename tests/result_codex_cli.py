@@ -19,8 +19,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu.codex_hooks import install_hooks
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lcu_bridge import call
+
+
+def install_hooks(cli, config_path, cwd, env, host_root):
+    """lcu/codex_hooks.mjs install_hooks: the original trusted lifecycle hooks, written through the real Codex CLI."""
+    return call('codex_hooks', 'install_hooks', cli, config_path, cwd, env, host_root)
+
 
 ADAPTER = ROOT / "adapters/codex.mjs"
 FIXTURE = ROOT / "adapters/test/result-fixture.mjs"

@@ -10,3 +10,4 @@ node_modules/
 *.tar.*
 dist/
 tests/macos_native_fixture.bin
+tests/blackbox/golden/

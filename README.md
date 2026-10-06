@@ -67,7 +67,7 @@ Your harness decides whether the agent may call LCU's tools (Claude's "don't ask
 
 ## Requirements
 
-Install [the official ChatGPT desktop app](https://chatgpt.com/download/), Python 3.12+, and your harness first. LCU checks the installed app for compatibility and uses its original runtime. For Codex CLI, [update before setup](docs/ADAPTERS.md#codex-cli) to get the required hook support.
+Install [the official ChatGPT desktop app](https://chatgpt.com/download/) and your harness first (on Linux, LCU's installer also installs `acl` and the other [system packages](docs/INSTALLATION.md#linux); Windows needs Python 3.12+ only to install or update). LCU checks the installed app for compatibility and uses its original runtime. For Codex CLI, [update before setup](docs/ADAPTERS.md#codex-cli) to get the required hook support.
 
 | Platform | Requirements |
 | --- | --- |

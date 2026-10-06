@@ -128,7 +128,10 @@ test ! -e /opt/lcu/.next
 test -z "$(find /opt/lcu/releases -maxdepth 1 -name '.build-*' -print -quit)"
 test ! -e /opt/lcu/apps
 test ! -e /opt/lcu/cache
-python3 -m unittest discover -b -s /src/tests -p 'test_*.py' -q
+# The Python unit tests of the build/distribution tooling. tests/compat holds the Node-vs-Python differentials
+# (they need the frozen oracle from git history; run them with tests/compat/docker.sh) and tests/node the Node suite
+# (tests/node/run-all.sh); neither belongs in this gate.
+(cd /src/tests && python3 -m unittest -b -q $(ls test_*.py | sed 's/\.py$//'))
 python3 /src/tests/registration.py
 python3 /src/tests/pending_registration.py
 runuser -u lcutester -- dbus-run-session -- bash /src/tests/desktop.sh

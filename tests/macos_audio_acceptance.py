@@ -46,7 +46,7 @@ def require_disposable_guest(expected_user: str) -> str:
 def environment(home: Path, app: Path, *, audio: bool) -> dict[str, str]:
     # Import from the selected LCU release at runtime so the original and
     # LCU children use the same app-selected codex executable path.
-    from lcu.app_layout import locate_codex_tools
+    from lcu_bridge import locate_codex_tools
 
     resources = app / 'Contents/Resources'
     runtime = resources / 'cua_node'
@@ -274,9 +274,8 @@ def main() -> None:
     model = require_disposable_guest(args.expected_user)
     app = args.app.resolve(strict=True)
     release = args.release.resolve(strict=True)
-    sys.path.insert(0, str(release))
-    from lcu.app_layout import locate_codex_tools
-
+    # lcu_bridge loads locate_codex_tools from this release's lcu/*.mjs.
+    os.environ['LCU_BRIDGE_ROOT'] = str(release)
     resources = app / 'Contents/Resources'
     runtime = resources / 'cua_node'
     node = runtime / 'bin/node'

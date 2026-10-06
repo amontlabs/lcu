@@ -60,6 +60,74 @@ def linked_verification_records(source):
 
 OWNER_AUTH = 'lcu-owner-auth'
 
+# The macOS app's Node is validated by the same requirement the launchers' pre-Node gate uses.
+MAC_NODE_REQUIREMENT = 'anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2"'
+_RESOLVE_MAC_APP = (
+    "import { pathToFileURL } from 'node:url';"
+    "const { resolve_installed_mac_app } = await import(pathToFileURL(process.argv[1]).href);"
+    "try { const app = resolve_installed_mac_app(process.argv[2], { arch: process.argv[3] });"
+    " process.stdout.write(JSON.stringify({ runtime: app.runtime })); }"
+    " catch (error) { process.stderr.write(String(error && error.message || error)); process.exit(1); }")
+
+
+def resolve_mac_runtime(app, arch):
+    """Validate a locally installed ChatGPT.app with LCU's own validator (lcu/platforms.mjs) running on that app's
+    signed Node, and return its `cua_node` directory. Nothing runtime-related is imported by this build tool."""
+    app = Path(app).expanduser()
+    node = app / 'Contents/Resources/cua_node/bin/node'
+    if app.is_symlink() or not node.is_file():
+        raise ValueError(f'Expected a local ChatGPT.app directory with its bundled Node: {app}')
+    signature = subprocess.run(['/usr/bin/codesign', '--verify', '--strict', f'-R={MAC_NODE_REQUIREMENT}',
+                                str(node.resolve(strict=True))], capture_output=True, text=True, timeout=60)
+    if signature.returncode:
+        raise ValueError(f"The ChatGPT app's bundled Node is not signed by OpenAI: {signature.stderr.strip()}")
+    result = subprocess.run([str(node), '--disable-warning=ExperimentalWarning', '--input-type=module', '-e',
+                             _RESOLVE_MAC_APP, str(SOURCE / 'lcu/platforms.mjs'), str(app), arch],
+                            capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        raise ValueError(result.stderr.strip() or 'The ChatGPT app could not be validated')
+    return Path(json.loads(result.stdout)['runtime'])
+
+
+# -- what each platform's archive ships ---------------------------------------------------------------------------
+# Every lcu/*.mjs and lcu/compat/*.mjs is shared; platform-specific host modules are listed here. tests/node/
+# bundle_closure.test.mjs proves that the files each platform ships contain every module its entry points can load.
+LCU_ONLY = {
+    'linux': ('linux_sky_service.mjs', 'session.mjs'),
+    'darwin': ('macos_host.mjs', 'macos_sky_service.mjs', 'session.mjs'),
+    # macos_host.mjs: windows_host.mjs imports its process/line helpers. platforms.mjs: doctor.mjs imports it.
+    'windows': ('macos_host.mjs', 'windows.mjs', 'windows_host.mjs', 'windows_host_entry.cjs',
+                'windows_lifetime_host.cjs', 'windows_sky_service.mjs'),
+}
+LCU_OTHER_PLATFORMS = {name for names in LCU_ONLY.values() for name in names}
+SCRIPTS_COMMON = ('bundle_runtime.mjs', 'startup_env.mjs', 'install.mjs', 'installed_app.mjs')
+SCRIPTS = {
+    # install.py / install_macos.py: the names an older release's `lcu update` runs (tiny trampolines to install.sh).
+    'linux': ('install.sh', 'install.py', 'install_macos.py', 'install_macos.mjs'),
+    'darwin': ('install.sh', 'install.py', 'install_macos.py', 'install_macos.mjs'),
+    # bundle.py: the bridge imports architecture/verify from it before the long copy.
+    'windows': ('bundle.py', 'install_windows.py', 'install_windows.mjs', 'windows_launcher.py',
+                'windows_launcher.mjs'),
+}
+
+
+def runtime_files(target, source=None):
+    """Relative paths (posix) of the LCU runtime an archive for TARGET ships: lcu/, scripts/ and bin/ launchers
+    (without docs, adapters, agent-tools, metadata or generated files)."""
+    source = Path(source or SOURCE)
+    if target not in LCU_ONLY:
+        raise ValueError(f'Unknown target: {target}')
+    files = []
+    for path in sorted((source / 'lcu').iterdir()):
+        if path.suffix in ('.mjs', '.cjs') and (path.name in LCU_ONLY[target] or path.name not in LCU_OTHER_PLATFORMS):
+            files.append(f'lcu/{path.name}')
+    files += [f'lcu/compat/{path.name}' for path in sorted((source / 'lcu/compat').glob('*.mjs'))]
+    files += [f'scripts/{name}' for name in (*SCRIPTS[target], *SCRIPTS_COMMON)]
+    files += ['bin/lcu.cmd'] if target == 'windows' else ['bin/lcu', 'bin/lcu-session']
+    if target == 'linux':
+        files.append('bin/lcu-codex-sandbox')
+    return sorted(set(files))
+
 
 def build_owner_auth(destination):
     """Compile LCU's own owner-authentication helper (used by `lcu apps`) for this Mac.
@@ -76,6 +144,26 @@ def build_owner_auth(destination):
     os.chmod(destination, 0o755)
 
 
+def smoke_test(release, target, node=None):
+    """Import every shipped Node module and run `lcu --help` through the release's entry module. The macOS build
+    uses the selected app's Node (what the installed launchers run); other builds use the `node` on PATH
+    (build-time only: the installed runtime always runs on the ChatGPT app's bundled Node)."""
+    node = str(node or shutil.which('node') or '')
+    if not node:
+        raise ValueError('A Node >= 22 is required to smoke-test the archive')
+    flags = [node, '--disable-warning=ExperimentalWarning']
+    modules = sorted(path.relative_to(release).as_posix() for folder in ('lcu', 'lcu/compat')
+                     for path in (release / folder).glob('*.mjs') if path.name != 'entry.mjs')
+    script = ("import { pathToFileURL } from 'node:url';"
+              "for (const file of process.argv.slice(2)) await import(pathToFileURL(file).href);")
+    subprocess.run([*flags, '--input-type=module', '-e', script, *[str(release / name) for name in modules]],
+                   cwd=release, check=True, timeout=120)
+    result = subprocess.run([*flags, str(release / 'lcu/entry.mjs'), 'lcu', '--help'], cwd=release,
+                            capture_output=True, text=True, timeout=60)
+    if result.returncode or not result.stdout.startswith('Usage: lcu'):
+        raise ValueError(f'The archive failed its Node smoke test: {result.stderr.strip() or result.stdout.strip()}')
+
+
 def build(output, package=None, *, target='linux', app=None):
     if package is not None:
         raise ValueError('Build-time --package is retired. Install the official app separately before LCU setup.')
@@ -85,13 +173,10 @@ def build(output, package=None, *, target='linux', app=None):
     arch = 'x64' if target == 'windows' else architecture(target)
     selected_node = None
     if target == 'darwin':
-        sys.path.insert(0, str(SOURCE))
-        from lcu.platforms import resolve_installed_mac_app
         policy = json.loads((SOURCE / 'runtime.lock.json').read_text())['platforms']['darwin']
         if arch not in policy.get('architectures', {}):
             raise ValueError(f'This LCU release does not support macOS {arch}.')
-        selected = resolve_installed_mac_app(app or Path('/Applications/ChatGPT.app'), arch=arch)
-        selected_node = selected.runtime / 'bin/node'
+        selected_node = resolve_mac_runtime(app or Path('/Applications/ChatGPT.app'), arch) / 'bin/node'
     elif target not in ('linux', 'windows') or app is not None:
         raise ValueError('An installed application path is supported only for a macOS build.')
     output.mkdir(parents=True, exist_ok=True)
@@ -103,32 +188,12 @@ def build(output, package=None, *, target='linux', app=None):
         scratch = Path(temporary)
         release = scratch / name
         release.mkdir()
-        ignored = ['*.cmd'] if target != 'windows' else ['lcu-session']
-        if target != 'linux':
-            ignored.append('lcu-codex-sandbox')
-        shutil.copytree(SOURCE / 'bin', release / 'bin', ignore=shutil.ignore_patterns(*ignored))
-        (release / 'lcu').mkdir()
-        modules = ('__init__.py', 'app_layout.py', 'asar.py', 'runtime.py', 'setup.py',
-                         'setup_clients.py', 'codex_hooks.py', 'app_server.py', 'browser.py', 'doctor.py',
-                         'maintenance.py', 'native_host.py', 'claude_visibility.py', 'harness_setup.py',
-                         'tested.py', 'status.py', 'approval.py', 'interpreter.py', 'apps.py', 'claude_mod.py',
-                         'update.py', 'update_apply.py', 'capture.py', 'sandbox_shim.py')
-        if target != 'windows':
-            modules += ('session.py', 'platforms.py')
-        for filename in modules:
-            shutil.copy2(SOURCE / 'lcu' / filename, release / 'lcu' / filename)
-        if target == 'linux':
-            shutil.copy2(SOURCE / 'lcu/linux_sky_service.mjs', release / 'lcu/linux_sky_service.mjs')
+        for relative in runtime_files(target):
+            destination_file = release / relative
+            destination_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(SOURCE / relative, destination_file)
         if target == 'darwin':
             build_owner_auth(release / 'bin' / OWNER_AUTH)
-            shutil.copy2(SOURCE / 'lcu/macos_host.py', release / 'lcu/macos_host.py')
-            shutil.copy2(SOURCE / 'lcu/macos_sky_service.mjs', release / 'lcu/macos_sky_service.mjs')
-        elif target == 'windows':
-            shutil.copy2(SOURCE / 'lcu/windows.py', release / 'lcu/windows.py')
-            shutil.copy2(SOURCE / 'lcu/windows_host.py', release / 'lcu/windows_host.py')
-            shutil.copy2(SOURCE / 'lcu/windows_host_entry.cjs', release / 'lcu/windows_host_entry.cjs')
-            shutil.copy2(SOURCE / 'lcu/windows_lifetime_host.cjs', release / 'lcu/windows_lifetime_host.cjs')
-            shutil.copy2(SOURCE / 'lcu/windows_sky_service.mjs', release / 'lcu/windows_sky_service.mjs')
         (release / 'docs').mkdir()
         for filename in SHIPPED_DOCS:
             shutil.copy2(SOURCE / 'docs' / filename, release / 'docs' / filename)
@@ -143,24 +208,9 @@ def build(output, package=None, *, target='linux', app=None):
             shutil.copy2(document, shipped)
         for filename in ('README.md', 'LICENSE', 'runtime.lock.json', 'tested-versions.json'):
             shutil.copy2(SOURCE / filename, release / filename)
-        (release / 'scripts').mkdir()
-        scripts = (('bundle.py',) if target == 'windows'
-                   else ('install.sh', 'install.py', 'installed_app.py', 'bundle.py'))
-        for filename in scripts:
-            shutil.copy2(SOURCE / 'scripts' / filename, release / 'scripts' / filename)
-        if target == 'darwin':
-            shutil.copy2(SOURCE / 'scripts/install_macos.py', release / 'scripts/install_macos.py')
-        elif target == 'windows':
-            shutil.copy2(SOURCE / 'scripts/install_windows.py', release / 'scripts/install_windows.py')
-            shutil.copy2(SOURCE / 'scripts/windows_launcher.py', release / 'scripts/windows_launcher.py')
         provision_agents(release, SOURCE / 'scripts/agent-tools', target=target,
                          mac_node=selected_node, adapters_source=SOURCE / 'adapters')
-        # The installer selects and validates the matching app before registration.
-        imports = 'import lcu.runtime, lcu.setup, lcu.browser, lcu.doctor, lcu.codex_hooks, lcu.maintenance, lcu.tested, lcu.status, lcu.approval, lcu.apps, lcu.claude_mod'
-        if target != 'windows':
-            imports += ', lcu.session'
-        subprocess.run([sys.executable, '-B', '-c', imports],
-                       cwd=release, check=True, timeout=20)
+        smoke_test(release, target, selected_node)
         seal(release, arch, target)
         verify(release, arch, target)
         fd, temporary_archive = tempfile.mkstemp(prefix='.lcu-', suffix=destination.suffix, dir=output)

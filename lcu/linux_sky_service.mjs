@@ -23,7 +23,7 @@
 // owns a modal dialog and the input is a pointer action, a translated call fails with an explicit error
 // and sends nothing.
 import {pathToFileURL} from 'node:url';
-import {execFile} from 'node:child_process';
+import {execFile} from './compat/spawn.mjs';
 import {readFile, readlink, readdir} from 'node:fs/promises';
 import {hostname} from 'node:os';
 

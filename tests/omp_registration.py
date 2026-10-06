@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.harness_setup import configure_omp
+from lcu_bridge import configure_omp
 
 
 def isolated_env(root, omp, profile):

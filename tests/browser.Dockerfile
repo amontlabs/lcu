@@ -16,7 +16,7 @@ RUN mkdir /home/browser-test/thin-release \
     && mkdir -p /home/browser-test/.cache/ms-playwright \
     && tar -xzf /home/browser-test/release.tar.gz --strip-components=1 -C /home/browser-test/thin-release \
     && dpkg-deb --extract /home/browser-test/chatgpt.deb /home/browser-test/chatgpt-root \
-    && python3 /home/browser-test/thin-release/scripts/install.py \
+    && /home/browser-test/thin-release/scripts/install.sh \
          --prefix "$LCU_BROWSER_PREFIX" --runtime-only --skip-system \
          --existing-app /home/browser-test/chatgpt-root/usr/lib/chatgpt --offline \
     && if [ "$BROWSER_KIND" = chromium ]; then \

@@ -1,0 +1,6 @@
+{
+  "browserDiagnostics": [
+    {"browserFamily": "chrome", "shortDisplayName": "Chrome", "extensionManagementUrl": "chrome://extensions/?id=fake", "storeUrl": "https://chromewebstore.example.test/fake"},
+    {"browserFamily": "edge", "shortDisplayName": "Edge", "extensionManagementUrl": "edge://extensions/?id=fake", "storeUrl": "https://microsoftedge.example.test/fake"}
+  ]
+}

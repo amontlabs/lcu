@@ -15,9 +15,9 @@ else
   docker run --rm --platform "$platform" -v "$repo:/src:ro" -v "$output:/out" "$tag" python3 -c '
 import json,sys
 from pathlib import Path
-sys.path[:0]=["/src/scripts","/src"]
+sys.path[:0]=["/src/scripts","/src/tests"]
 from bundle import architecture
-from installed_app import _download
+from package_fixture import download as _download
 lock=json.loads(Path("/src/runtime.lock.json").read_text()); entry=lock["architectures"][architecture()]
 _download(lock,entry,Path("/out/upstream.deb"))
 '

@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.app_layout import locate_codex_tools
+from lcu_bridge import locate_codex_tools
 from mcp_client import Client, text
 
 
@@ -84,6 +84,8 @@ def main() -> None:
         parser.error('This comparison requires macOS')
     app = args.app.resolve(strict=True)
     release = args.release.resolve(strict=True)
+    # lcu_bridge loads locate_codex_tools from this release's lcu/*.mjs.
+    os.environ['LCU_BRIDGE_ROOT'] = str(release)
     runtime = app / 'Contents/Resources/cua_node'
     original = [str(runtime / 'bin/node'),
                 str(runtime / 'lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs')]

@@ -1,7 +1,7 @@
 """Exercise macOS Codex registration under a disposable home only.
 
-Calls setup.configure directly so neither pwd nor a personal account home is
-selected. It does not install the Chrome host or start a desktop provider.
+Calls lcu/setup.mjs's configure directly (through tests/lcu_bridge.py) so neither
+the password database nor a personal account home is selected. It does not install the Chrome host or start a desktop provider.
 """
 
 import argparse
@@ -13,9 +13,8 @@ import sys
 import tempfile
 import tomllib
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.codex_hooks import original_hooks
-from lcu.setup import configure, export_bundle, host_policy
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lcu_bridge import call, host_policy, original_hooks
 
 
 def check_mode(release: Path, app: Path, *, chrome: bool) -> None:
@@ -36,8 +35,8 @@ def check_mode(release: Path, app: Path, *, chrome: bool) -> None:
             'TMPDIR': str(home), 'LANG': 'C.UTF-8',
         }
         command = [str(runtime), *(['--chrome'] if chrome else [])]
-        failures = configure(['codex'], home, command, tools_root,
-                             release, environ=env)
+        failures = call('setup', 'configure', ['codex'], home, command, tools_root, release,
+                        root=release, environ=env)
         assert not failures, failures
         config = tomllib.loads(codex.read_text())
         assert config['model'] == 'fixture-model'
@@ -48,10 +47,10 @@ def check_mode(release: Path, app: Path, *, chrome: bool) -> None:
                             *(['--chrome'] if chrome else [])]
         assert registered['command'] == expected_command[0]
         assert registered.get('args', []) == expected_command[1:]
-        for key, value in host_policy(release).items():
+        for key, value in host_policy(release, root=release).items():
             assert registered[key] == value, key
 
-        expected_hooks = original_hooks(resources / 'plugins/openai-bundled')
+        expected_hooks = original_hooks(resources / 'plugins/openai-bundled', root=release)
         assert set(expected_hooks) == {'Stop', 'Interrupt', 'SubagentStop'}
         for event, groups in expected_hooks.items():
             actual = config['hooks'][event]
@@ -63,8 +62,8 @@ def check_mode(release: Path, app: Path, *, chrome: bool) -> None:
         assert not [p for p in home.rglob('SKILL.md') if p.parent.name == 'lcu'], 'an LCU skill was registered'
 
         export = home / 'portable'
-        export_bundle(export, command, release, chrome=chrome)
-        assert json.loads((export / 'host-contract.json').read_text()) == host_policy(release)
+        call('setup', 'export_bundle', export, command, release, root=release, chrome=chrome)
+        assert json.loads((export / 'host-contract.json').read_text()) == host_policy(release, root=release)
         assert not (export / 'skills').exists()
         exported = b'\n'.join(path.read_bytes() for path in export.rglob('*') if path.is_file())
         assert (modules / '@oai/cua/docs/tinysky-alt-core-cua-repl.md').read_bytes() not in exported

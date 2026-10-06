@@ -87,17 +87,25 @@ def source_root() -> Path:
     configured = os.environ.get("LCU_SOURCE_ROOT")
     candidates = ([Path(configured)] if configured else []) + list(Path(__file__).resolve().parents)
     for candidate in candidates:
-        if (candidate / "lcu/harness_setup.py").is_file():
+        if (candidate / "lcu/harness_setup.mjs").is_file():
             return candidate.resolve()
-    raise SystemExit("Could not locate the LCU source tree; set LCU_SOURCE_ROOT to a tree containing lcu/harness_setup.py")
+    raise SystemExit("Could not locate the LCU source tree; set LCU_SOURCE_ROOT to a tree containing lcu/harness_setup.mjs")
 
 
 ROOT = source_root()
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
-from lcu.harness_setup import configure_hermes, configure_omp
+from lcu_bridge import configure_hermes, configure_omp, locate_codex_tools
+
+
+def _run(argv, *, cwd, env):
+    """The Hermes/OMP installer step the Node harness_setup runs for itself: fail with its stderr text."""
+    result = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                            text=True, errors="replace", timeout=120)
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise ValueError(f"installer exited {result.returncode}" + (f": {detail}" if detail else ""))
 def cua_environment(home: Path, app: Path, *, audio: bool = False) -> dict[str, str]:
-    from lcu.app_layout import locate_codex_tools
     resources = app / "Contents/Resources"
     runtime = resources / "cua_node"
     tools = locate_codex_tools(resources)
@@ -223,6 +231,11 @@ def prepare_runtime_overlay(stage: Path, installed_root: Path, destination: Path
     (destination / "bin").mkdir()
     shutil.copy2(stage / "bin/lcu", destination / "bin/lcu")
     (destination / "bin/lcu").chmod(0o755)
+    # The launcher runs lcu/entry.mjs on <release>/agent-tools/node/bin/node (the selected app's own Node).
+    tools = installed_root / "agent-tools"
+    if not (tools / "node/bin/node").exists():
+        raise SystemExit("Installed LCU release has no agent-tools Node")
+    (destination / "agent-tools").symlink_to(tools.resolve(strict=True), target_is_directory=True)
     for name in ("bundle.json", "installation.json", "runtime.lock.json"):
         source = installed_root / name
         if source.is_file():
@@ -554,7 +567,7 @@ def main() -> None:
     cli, release, runtime, app = (args.cli.resolve(strict=True), args.release.resolve(strict=True),
                                   args.runtime.resolve(strict=True), args.app.resolve(strict=True))
     if not all((release / path).is_file() for path in
-               ("bin/lcu", "lcu/runtime.py", "adapters/pi/index.ts", "adapters/hermes/plugin.yaml")):
+               ("bin/lcu", "lcu/runtime.mjs", "lcu/entry.mjs", "adapters/pi/index.ts", "adapters/hermes/plugin.yaml")):
         raise SystemExit("Staged LCU source tree is incomplete")
     url = urlsplit(args.base_url)
     if (url.scheme != "http" or url.hostname != "192.168.64.1" or url.port != 62098 or
@@ -636,7 +649,6 @@ def main() -> None:
                     configure_hermes(home, ["/usr/bin/env", f"HOME={Path.home()}", str(overlay_runtime)],
                                      node, test_release, scope="user", project=None, env=env)
                     instrument_hermes_cleanup(hermes_home / "plugins/lcu-cua/__init__.py")
-                    from lcu.harness_setup import _run
                     for key, value in (("model.provider", "custom"), ("model.default", args.model),
                         ("model.base_url", args.base_url.rstrip("/")), ("model.api_mode", "chat_completions"),
                         ("agent.max_turns", "12"), ("tools.tool_search.enabled", "off")):

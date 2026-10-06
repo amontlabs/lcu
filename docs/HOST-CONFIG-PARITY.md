@@ -23,7 +23,7 @@ The actual archived `package.json` supplies `codexBuildFlavor: "prod"` and `vers
 
 ## Linux configuration matrix
 
-“Caller-only” means the reviewed `lcu/runtime.py` preserves a value in its own process environment but supplies no value itself. This is an explicit standalone launch option; Codex's MCP child environment is a separate layer. The original app server starts with a copy of its process environment, but the pinned Codex CLI forwards only configured `env` and selected `env_vars` to an MCP child, as verified below. Original `nne` on Linux supplies a selected `env` map and an empty `env_vars` list.
+“Caller-only” means the reviewed `lcu/runtime.mjs` preserves a value in its own process environment but supplies no value itself. This is an explicit standalone launch option; Codex's MCP child environment is a separate layer. The original app server starts with a copy of its process environment, but the pinned Codex CLI forwards only configured `env` and selected `env_vars` to an MCP child, as verified below. Original `nne` on Linux supplies a selected `env` map and an empty `env_vars` list.
 
 | Input | Exact original host value or condition | Reviewed LCU behavior and consequence |
 | --- | --- | --- |

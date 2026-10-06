@@ -109,7 +109,7 @@ def main() -> None:
             "OPENAI_API_KEY": synthetic_key,
         }
 
-        from lcu.harness_setup import configure_hermes
+        from lcu_bridge import configure_hermes
 
         configure_hermes(home, command, node, release, scope="user",
                          project=None, env=env)

@@ -30,7 +30,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from lcu.harness_setup import configure_omp
+from lcu_bridge import configure_omp
 
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 ORIGIN = "http://127.0.0.1:8080"

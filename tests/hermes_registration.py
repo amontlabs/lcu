@@ -16,7 +16,7 @@ TEMP_PARENT = "/private/tmp" if sys.platform == "darwin" else "/tmp" if os.name 
 
 
 def main() -> None:
-    from lcu.harness_setup import configure_hermes
+    from lcu_bridge import configure_hermes
 
     hermes = os.environ.get("HERMES_BIN") or shutil.which("hermes")
     if not hermes:

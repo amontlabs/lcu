@@ -57,7 +57,7 @@ class _FixtureProvider(BaseHTTPRequestHandler):
 @unittest.skipUnless(OMP, "Set OMP_BIN to an installed OMP executable for native host verification.")
 class OmpHostTests(unittest.TestCase):
     def test_generated_extension_delivers_first_prompt_calls_original_tool_and_cleans_up(self):
-        from lcu.harness_setup import configure_omp
+        from lcu_bridge import configure_omp
 
         _FixtureProvider.requests = []
         with tempfile.TemporaryDirectory(prefix="lcu-omp-host-", dir=TEMP_PARENT) as temporary:
