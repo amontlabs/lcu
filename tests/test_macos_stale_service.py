@@ -181,7 +181,9 @@ class DiagnoseTests(unittest.TestCase):
     def test_several_stale_services_are_all_named(self):
         message = stale_service_message([7, 9])
         self.assertIn('(pids 7, 9)', message)
-        self.assertIn('wait, or quit it, then retry.', message)
+        self.assertEqual(message, 'Computer Use services (pids 7, 9) started before ChatGPT was updated '
+                                  'still hold the connection. They quit on their own about a minute after '
+                                  'they are last used: wait, or quit them, then retry.')
 
     def test_ps_failure_is_an_error_response_not_a_guess(self):
         with self.assertRaises(ValueError):

@@ -81,12 +81,12 @@ def bundle_replaced_at(executable, stat=os.stat):
 
 def stale_service_message(pids):
     if len(pids) == 1:
-        subject, verb, quits = f'A Computer Use service (pid {pids[0]})', 'still holds', 'It quits'
-    else:
-        subject = f'Computer Use services (pids {", ".join(str(pid) for pid in pids)})'
-        verb, quits = 'still hold', 'They quit'
-    return (f'{subject} started before ChatGPT was updated {verb} the connection. '
-            f'{quits} on its own about a minute after it is last used: wait, or quit it, then retry.')
+        return (f'A Computer Use service (pid {pids[0]}) started before ChatGPT was updated still holds '
+                'the connection. It quits on its own about a minute after it is last used: '
+                'wait, or quit it, then retry.')
+    return (f'Computer Use services (pids {", ".join(str(pid) for pid in pids)}) started before ChatGPT '
+            'was updated still hold the connection. They quit on their own about a minute after they '
+            'are last used: wait, or quit them, then retry.')
 
 
 def _ps_environment():
