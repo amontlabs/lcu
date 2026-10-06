@@ -44,7 +44,8 @@ MAC_SOCKET_MAX_BYTES = 103
 def mac_socket_path(environ=None) -> tuple[str, bool]:
     """The socket path the signed Mac helper will try to bind, and whether the env override set it.
 
-    The helper's own environment variable wins when set; otherwise the path is
+    SKY_CUA_SERVICE_NATIVE_PIPE_PATH in the given environment wins when set (the helper's own
+    environment is not visible to LCU); otherwise the path is
     under the account's real home folder, not $HOME.
     """
     override = (os.environ if environ is None else environ).get(MAC_SOCKET_ENV)
