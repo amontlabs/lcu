@@ -699,6 +699,8 @@ class RefreshTests(unittest.TestCase):
         self.chrome = self.manifest('Google/Chrome')
         self.edge = self.manifest('Microsoft Edge')
         self.fail = None
+        self.during = None
+        self.homes = []
         self.node_path = '/fake/node'
         self.calls = 0
         for patcher in (mock.patch('lcu.browser.platform.system', return_value='Darwin'),
@@ -715,16 +717,21 @@ class RefreshTests(unittest.TestCase):
     def manifest(self, browser):
         return self.support / browser / 'NativeMessagingHosts/com.openai.codexextension.json'
 
-    def original_installer(self, command, **_options):
-        """The upstream installer: writes every browser's manifest at the private copy's own host."""
+    def original_installer(self, command, **options):
+        """The upstream installer: writes every browser's manifest, under the HOME it is run with."""
         self.calls += 1
         plugin = _plugin_of(command)
         (plugin / 'extension-host/macos/arm64/extension-host-config.json').write_text(
             json.dumps({'nodePath': self.node_path}))
-        for path in (self.chrome, self.edge):
+        home = Path(options['env']['HOME'])
+        self.homes.append(home)
+        for browser in ('Google/Chrome', 'Microsoft Edge'):
+            path = home / 'Library/Application Support' / browser / 'NativeMessagingHosts/com.openai.codexextension.json'
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({'name': 'com.openai.codexextension',
                                         'path': str(plugin / 'extension-host/macos/arm64/ChatGPT for Chrome')}))
+        if self.during:
+            self.during()
         return subprocess.CompletedProcess(command, 1 if self.fail else 0, stdout='', stderr=self.fail or '')
 
     def test_nothing_is_installed_or_changed_when_the_connector_was_never_set_up(self):
@@ -773,22 +780,44 @@ class RefreshTests(unittest.TestCase):
         self.assertFalse(self.chrome.exists())
         self.assertEqual(self.calls, 0)
 
-    def test_only_manifests_that_already_pointed_at_the_relay_are_touched(self):
+    def test_other_browsers_are_never_written_by_a_refresh(self):
         install(self.root)
         taken = json.dumps({'name': 'com.openai.codexextension', 'path': '/Applications/ChatGPT.app/host'})
         self.edge.write_text(taken)
         brave = self.manifest('BraveSoftware/Brave-Browser')
-        self.assertEqual(refresh(self.root)[0], 'unchanged')
-        self.assertEqual(self.edge.read_text(), taken)  # the installer rewrote it; refresh put it back
+        self.homes.clear()
+        self.assertEqual(refresh(self.root).status, 'unchanged')
+        self.assertEqual(self.edge.read_text(), taken)
         self.assertFalse(brave.exists())
+        self.assertEqual(len(self.homes), 1)
+        self.assertNotEqual(self.homes[0], self.home)  # the original installer ran against a scratch home
+        self.assertFalse(self.homes[0].exists())  # and it is gone
 
-    def test_installer_failure_raises_and_restores_other_owners_manifests(self):
+    def test_a_registration_made_by_another_installer_during_the_refresh_survives(self):
         install(self.root)
+        self.edge.write_text('{"path": "/chatgpt/edge-host"}')
+        brave = self.manifest('BraveSoftware/Brave-Browser')
+
+        def another_installer():
+            brave.parent.mkdir(parents=True, exist_ok=True)
+            brave.write_text('{"path": "/other/host"}')
+            self.edge.write_text('{"path": "/other/edge-host"}')
+
+        self.during = another_installer
+        self.assertEqual(refresh(self.root).status, 'unchanged')
+        self.assertEqual(brave.read_text(), '{"path": "/other/host"}')
+        self.assertEqual(self.edge.read_text(), '{"path": "/other/edge-host"}')
+
+    def test_a_failed_refresh_leaves_the_working_registration_and_other_manifests_alone(self):
+        destination = install(self.root)
         taken = json.dumps({'name': 'com.openai.codexextension', 'path': '/Applications/ChatGPT.app/host'})
         self.edge.write_text(taken)
-        self.fail = 'node crashed'  # after it wrote the manifests
+        before = self.chrome.read_bytes()
+        self.fail = 'node crashed'
         with self.assertRaisesRegex(ValueError, 'installer failed'):
             refresh(self.root)
+        self.assertEqual(self.chrome.read_bytes(), before)
+        self.assertEqual(json.loads(self.chrome.read_text())['path'], str(destination / 'lcu-native-host'))
         self.assertEqual(self.edge.read_text(), taken)
 
     def test_a_browser_that_was_not_set_up_is_not_registered_by_a_refresh(self):
@@ -815,17 +844,15 @@ class RefreshTests(unittest.TestCase):
         self.assertFalse((self.support / 'lcu/browser').exists() and any((self.support / 'lcu/browser').iterdir()))
 
     @unittest.skipIf(os.name == 'nt', 'creating symlinks needs a privilege on Windows')
-    def test_a_symlinked_manifest_is_refused_before_the_installer_can_write_through_it(self):
+    def test_a_symlinked_manifest_of_another_owner_is_not_written_through(self):
         install(self.root)
-        self.calls = 0
         target = Path(self.temporary.name) / 'someone-elses-file'
         target.write_text('theirs')
         self.edge.unlink()
         self.edge.symlink_to(target)
-        with self.assertRaisesRegex(ValueError, 'regular file'):
-            refresh(self.root)
-        self.assertEqual(self.calls, 0)
+        self.assertEqual(refresh(self.root).status, 'unchanged')
         self.assertEqual(target.read_text(), 'theirs')
+        self.assertTrue(self.edge.is_symlink())
 
     def test_linux_does_not_recreate_a_removed_registration(self):
         config = self.home / '.config'
@@ -835,16 +862,21 @@ class RefreshTests(unittest.TestCase):
         (plugin / 'scripts').mkdir(parents=True)
         (plugin / 'scripts/installManifest.mjs').write_text('fixture')
 
-        def installer(command, **_options):
-            for path in (chrome, edge):
+        def installer(command, **options):
+            home = Path(options['env']['HOME'])
+            for browser in ('google-chrome', 'microsoft-edge'):
+                path = home / '.config' / browser / 'NativeMessagingHosts/com.openai.codexextension.json'
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(json.dumps({'path': str(_plugin_of(command) / 'extension-host/linux/x64/extension-host')}))
             return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
 
         with mock.patch('lcu.browser.platform.system', return_value='Linux'), \
                 mock.patch.dict(os.environ, {'HOME': str(self.home), 'XDG_DATA_HOME': str(self.home / 'data')}), \
+                mock.patch.dict(os.environ, {}, clear=False), \
                 mock.patch('lcu.runtime.paths', return_value=(self.root / 'app', self.root / 'app/resources', None, {})), \
                 mock.patch('lcu.browser.subprocess.run', side_effect=installer):
+            os.environ.pop('XDG_CONFIG_HOME', None)
+            os.environ.pop('CHROME_CONFIG_HOME', None)
             install(self.root)
             edge.unlink()
             self.assertEqual(refresh(self.root).status, 'unchanged')
@@ -852,24 +884,11 @@ class RefreshTests(unittest.TestCase):
             self.assertTrue(chrome.is_file())
 
     @unittest.skipIf(os.name == 'nt', 'POSIX permission bits')
-    def test_other_owners_manifests_keep_their_permissions(self):
-        install(self.root)
-        taken = json.dumps({'name': 'com.openai.codexextension', 'path': '/Applications/ChatGPT.app/host'})
-        self.edge.write_text(taken)
-        self.edge.chmod(0o600)
-        self.assertEqual(refresh(self.root).status, 'unchanged')
-        self.assertEqual(self.edge.read_text(), taken)
-        self.assertEqual(self.edge.stat().st_mode & 0o777, 0o600)
-
-    @unittest.skipIf(os.name == 'nt' or (hasattr(os, 'geteuid') and os.geteuid() == 0), 'needs an unprivileged POSIX user')
-    def test_an_unreadable_manifest_stops_the_refresh_before_anything_is_written(self):
-        install(self.root)
-        self.calls = 0
-        self.edge.chmod(0)
-        self.addCleanup(self.edge.chmod, 0o644)
-        with self.assertRaises(PermissionError):
-            refresh(self.root)
-        self.assertEqual(self.calls, 0)
+    def test_a_repaired_launcher_permission_asks_to_reconnect(self):
+        destination = install(self.root)
+        (destination / 'lcu-native-host').chmod(0o600)
+        self.assertEqual(refresh(self.root).status, 'changed')
+        self.assertEqual((destination / 'lcu-native-host').stat().st_mode & 0o777, 0o700)
 
     def test_a_change_only_in_the_hosts_runtime_configuration_asks_to_reconnect(self):
         destination = install(self.root)
@@ -888,23 +907,29 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(json.loads(self.chrome.read_text())['path'], str(custom / 'lcu-native-host'))
         self.assertTrue(default.is_dir())
 
-    @unittest.skipIf(os.name == 'nt' or (hasattr(os, 'geteuid') and os.geteuid() == 0), 'needs an unprivileged POSIX user')
-    def test_a_manifest_that_cannot_be_put_back_stops_the_refresh_before_the_installer_runs(self):
-        install(self.root)
-        self.calls = 0
-        self.edge.write_text(json.dumps({'path': '/Applications/ChatGPT.app/host'}))
-        self.edge.parent.chmod(0o555)
-        self.addCleanup(self.edge.parent.chmod, 0o755)
-        with self.assertRaisesRegex(ValueError, 'Cannot restore'):
-            refresh(self.root)
-        self.assertEqual(self.calls, 0)
-
     @unittest.skipIf(os.name == 'nt', 'POSIX effective user ids')
     def test_root_leaves_the_account_alone(self):
         destination = install(self.root)
         self.calls = 0
         with mock.patch('lcu.browser.os.geteuid', return_value=0):
             self.assertEqual(refresh(self.root), ('root', destination, []))
+        self.assertEqual(self.calls, 0)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX effective user ids')
+    def test_sudo_looks_for_the_relay_in_the_desktop_accounts_home(self):
+        destination = install(self.root)
+        self.calls = 0
+        roots_home = Path(self.temporary.name) / 'var-root'
+        roots_home.mkdir()
+        entry = mock.Mock(pw_dir=str(self.home))
+        with mock.patch('lcu.browser.os.geteuid', return_value=0), \
+                mock.patch.dict(os.environ, {'HOME': str(roots_home), 'SUDO_USER': 'desktop'}), \
+                mock.patch('pwd.getpwnam', return_value=entry):
+            self.assertEqual(refresh(self.root), ('root', destination, []))
+            os.environ['SUDO_USER'] = 'nobody-here'
+            mock_entry = mock.patch('pwd.getpwnam', side_effect=KeyError('nobody-here'))
+            with mock_entry:
+                self.assertEqual(refresh(self.root).status, 'absent')
         self.assertEqual(self.calls, 0)
 
     def test_windows_relay_is_refreshed_and_follows_a_replaced_app_generation(self):
@@ -934,10 +959,10 @@ class RefreshTests(unittest.TestCase):
             manifest.parent.mkdir(parents=True, exist_ok=True)
             manifest.write_text(json.dumps({'name': 'com.openai.codexextension', 'path': str(
                 _plugin_of(command) / 'extension-host/windows/x64/extension-host.exe')}))
-            return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+            return subprocess.CompletedProcess(command, 1 if failing['on'] else 0, stdout='', stderr='')
 
         selected = mock.Mock(return_value=generations['gen1'])
-        registered, installs = {'value': None}, []
+        registered, installs, failing = {'value': None}, [], {'on': False}
         with mock.patch('lcu.browser.platform.system', return_value='Windows'), \
                 mock.patch.dict(os.environ, {'USERPROFILE': str(home), 'LOCALAPPDATA': str(local)}), \
                 mock.patch('lcu.runtime.paths', selected), \
@@ -951,6 +976,13 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(refresh(root), ('changed', destination, []))
             self.assertEqual((destination / 'lcu-native-host.py').read_text(), '# v2\n')
             self.assertEqual(json.loads(manifest.read_text())['path'], str(destination / 'lcu-native-host.cmd'))
+            # A failing original installer has already rewritten the manifest; the working registration comes back.
+            failing['on'] = True
+            working = manifest.read_text()
+            with self.assertRaisesRegex(ValueError, 'installer failed'):
+                refresh(root)
+            self.assertEqual(manifest.read_text(), working)
+            failing['on'] = False
             # The Store app changed: the update's installer made a new private generation.
             selected.return_value = generations['gen2']
             ours = manifest.read_text()
