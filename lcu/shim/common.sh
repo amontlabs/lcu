@@ -1,4 +1,5 @@
 # BEGIN LCU COMMON (lcu/shim/common.sh, inlined verbatim; tests/node/entry.test.mjs checks every copy)
+# shellcheck shell=sh
 # Shared pre-Node launch code of bin/lcu, bin/lcu-session, bin/lcu-codex-sandbox and scripts/install.sh:
 # function definitions only. Every shell variable is named __LCU_*: that prefix is LCU's reserved launch
 # channel (lcu/startup_vars.mjs removes all of it before any child starts), so a caller's ordinary exported
