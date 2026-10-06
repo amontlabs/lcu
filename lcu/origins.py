@@ -8,12 +8,14 @@ entries; it never adds one, so granting access stays with the original prompt. I
 `browser/config.toml` or `browser_use.origins` in `config.toml`.
 """
 import argparse
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 import tomllib
 from urllib.parse import urlsplit
 
@@ -25,7 +27,8 @@ WRITE_ATTEMPTS = 5
 CACHE_NOTE = ('A running agent may keep its saved decisions in memory for up to 5 minutes. Restart the '
               'agent, or wait, and the next request for the site asks again.')
 _DEFAULT_PORTS = {'http': 80, 'https': 443}
-_HOST = re.compile(r'[a-z0-9._-]+|[0-9a-f:.]+')
+_HOST = re.compile(r'[a-z0-9._-]+')
+_NUMERIC_LABEL = re.compile(r'[0-9]+|0x[0-9a-f]*')
 _BARE_KEY = re.compile(r'[A-Za-z0-9_-]+')
 _STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\'')
 
@@ -98,11 +101,24 @@ def normalize_origin(value):
     if (scheme not in _DEFAULT_PORTS or not host or '@' in parts.netloc or parts.path not in ('', '/')
             or parts.query or parts.fragment or '?' in text or '#' in text):
         raise OriginsError(hint)
-    try:
-        host = host.encode('ascii').decode() if host.isascii() else host.encode('idna').decode('ascii')
-    except UnicodeError:
-        raise OriginsError(hint) from None
-    if not _HOST.fullmatch(host) or (port is not None and not 0 < port < 65536):
+    if not host.isascii():
+        raise OriginsError(f'{value!r} has a non-ASCII host; pass its punycode (xn--) form, which is what '
+                           'the browser reports.')
+    if ':' in host:
+        try:
+            host = ipaddress.IPv6Address(host).compressed
+        except ValueError:
+            raise OriginsError(hint) from None
+    elif not _HOST.fullmatch(host):
+        raise OriginsError(hint)
+    elif _NUMERIC_LABEL.fullmatch(host.rstrip('.').rsplit('.', 1)[-1]):
+        # Browsers read a name ending in a number as an IPv4 address and rewrite it; accept only a plain one.
+        try:
+            host = str(ipaddress.IPv4Address(host))
+        except ValueError:
+            raise OriginsError(f'{value!r} looks like an IPv4 address in an unusual form; '
+                               'pass it as four decimal numbers.') from None
+    if port is not None and not 0 < port < 65536:
         raise OriginsError(hint)
     result = f'{scheme}://' + (f'[{host}]' if ':' in host else host)
     if port is not None and port != _DEFAULT_PORTS[scheme]:
@@ -214,8 +230,11 @@ def write_atomically(path, text, mode):
 def forget_in(path, origin, kinds, *, attempts=WRITE_ATTEMPTS):
     """Remove `origin` from the given lists of one session file. Returns {kind: count removed}.
 
-    The original runtime does not share a lock with LCU, so the file is read again just before the
-    replace and the change is recomputed if the runtime wrote in between.
+    The original runtime does not share a lock with LCU (it serializes only its own writes), so the
+    file is read again just before the replace and the change is recomputed if the runtime wrote in
+    between, and read once more afterwards to report a write that landed after it. A write in the
+    instant between the first two reads can still be lost, which no check without a lock the runtime
+    shares can prevent.
     """
     path = Path(path)
     for _ in range(attempts):
@@ -241,6 +260,10 @@ def forget_in(path, origin, kinds, *, attempts=WRITE_ATTEMPTS):
                 raise OriginsError(f'cannot replace {path}: {exc.strerror or exc}') from None
         finally:
             Path(temporary).unlink(missing_ok=True)
+        time.sleep(0.05)
+        if path.read_bytes() != text.encode('utf-8'):
+            raise OriginsError(f'the original runtime changed {path} while it was being updated; run '
+                               '`lcu origins list` to see what is saved now and repeat the command if needed.')
         return removed
     raise OriginsError(f'{path} kept changing while it was being updated; try again.')
 

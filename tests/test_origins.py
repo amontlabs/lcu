@@ -256,6 +256,20 @@ class OriginsTests(unittest.TestCase):
         self.assertEqual([p.name for p in self.sessions.iterdir()], ['abc.toml'])
         self.assertEqual(path.read_text().count('late.example'), 1)
 
+    def test_forget_reports_a_runtime_write_that_lands_after_the_replace(self):
+        self.session('abc')
+        real = origins.os.replace
+
+        def late(source, target):
+            real(source, target)
+            Path(target).write_text('[origins]\ndenied = ["https://late.example"]\n')
+
+        with mock.patch.object(origins.os, 'replace', late):
+            code, out, err = self.run_origins('forget', 'https://bad.example', '--session', 'abc')
+        self.assertEqual(code, 1)
+        self.assertIn('original runtime changed', err)
+        self.assertNotIn('5 minutes', out)
+
     def test_forget_gives_up_when_the_file_never_settles(self):
         path = self.session('abc')
         real = origins.write_atomically
@@ -303,18 +317,19 @@ class OriginsTests(unittest.TestCase):
         path = self.session('abc')
         for value in ('example.com', 'localhost:3000', 'ftp://a.example', 'https://a.example/path',
                       'https://a.example?x=1', 'https://a.example#x', 'https://user@a.example', 'https://',
-                      'https://a b.example', 'https://a.example:99999', '*', ''):
+                      'https://a b.example', 'https://a.example:99999', '*', '', 'https://bücher.de',
+                      'https://faß.de', 'http://0x7f.1', 'http://127.1', 'http://2130706433', 'http://[::g]'):
             with self.subTest(value=value):
                 code, _, err = self.run_origins('forget', value)
                 self.assertEqual(code, 1)
-                self.assertIn('not an origin', err)
-        self.assertEqual(path.read_text(), SAMPLE)
+                self.assertEqual(path.read_text(), SAMPLE)
 
     def test_origin_normalization(self):
         cases = {'https://Example.com': 'https://example.com', 'https://example.com:443/': 'https://example.com',
                  'http://example.com:80': 'http://example.com', 'http://localhost:3000': 'http://localhost:3000',
                  'https://example.com:8443': 'https://example.com:8443', 'http://[::1]:8080': 'http://[::1]:8080',
-                 'https://bücher.de': 'https://xn--bcher-kva.de', ' https://a.example ': 'https://a.example'}
+                 'https://xn--bcher-kva.de': 'https://xn--bcher-kva.de', ' https://a.example ': 'https://a.example',
+                 'http://[2001:DB8:0:0::1]:81': 'http://[2001:db8::1]:81', 'https://127.0.0.1': 'https://127.0.0.1'}
         for value, expected in cases.items():
             self.assertEqual(origins.normalize_origin(value), expected, value)
 
@@ -327,11 +342,14 @@ class OriginsTests(unittest.TestCase):
 
     def test_codex_home_resolution(self):
         self.assertEqual(origins.codex_home({'CODEX_HOME': str(self.home)}, windows=False), self.home)
-        self.assertEqual(origins.codex_home({'HOME': '/home/a'}, windows=False), Path('/home/a/.codex'))
-        self.assertEqual(origins.codex_home({'HOME': '//home/a'}, windows=False), Path('/home/a/.codex'))
         self.assertEqual(runtime.default_codex_home({'USERPROFILE': 'C:\\Users\\a', 'HOME': '/x'}, True),
                          'C:\\Users\\a\\.codex')
         self.assertEqual(runtime.default_codex_home({'HOME': 'C:\\h'}, True), 'C:\\h\\.codex')
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX path semantics')
+    def test_default_codex_home_on_posix(self):
+        self.assertEqual(origins.codex_home({'HOME': '/home/a'}, windows=False), Path('/home/a/.codex'))
+        self.assertEqual(origins.codex_home({'HOME': '//home/a'}, windows=False), Path('/home/a/.codex'))
 
     def test_empty_or_relative_codex_home_is_rejected(self):
         for value in ('', 'relative/dir'):
