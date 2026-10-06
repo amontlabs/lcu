@@ -75,14 +75,16 @@ def _raise(reply):
     raise BridgeError(error['message'], error.get('name', 'Error'), error.get('stack', ''))
 
 
-def call_with_args(module, function, *args, root=None, node=None, timeout=300, env=None, **options):
+def call_with_args(module, function, *args, root=None, node=None, timeout=300, process_env=None, **options):
+    # `env` is not a parameter of its own: it is the Node function's own option (configure_omp(..., env=...)) and goes
+    # to `options`; `process_env` is the environment of the Node process.
     """Return (result, args_after_call). The second value shows what a function filled into a caller-supplied dict."""
     root = default_root(root)
     request = {'root': str(root), 'module': module, 'function': function, 'args': _jsonable(list(args)),
                'options': _jsonable(options) if options else None}
     process = subprocess.run([node or find_node(root), '--disable-warning=ExperimentalWarning', str(BRIDGE), 'call'],
                              input=json.dumps(request), capture_output=True, text=True, timeout=timeout,
-                             env=env if env is not None else os.environ.copy())
+                             env=process_env if process_env is not None else os.environ.copy())
     printed, reply = _split(process.stdout, process.stderr)
     if printed:
         sys.stdout.write(printed)
