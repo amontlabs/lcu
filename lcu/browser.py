@@ -404,8 +404,10 @@ def _restore(path, saved):
 def _relay_snapshot(destination, system, manifest_paths):
     """The bytes Chrome and the extension depend on, to tell whether a refresh changed anything."""
     launcher = 'lcu-native-host.cmd' if system == 'Windows' else 'lcu-native-host'
+    # The original installer also writes the host's runtime paths beside its binary.
+    host_configs = sorted(destination.glob('chrome/extension-host/*/*/extension-host-config.json'))
     files = [destination / launcher, destination / 'lcu-native-host.py', destination / _PLUGIN_DIGEST,
-             *sorted(manifest_paths)]
+             *host_configs, *sorted(manifest_paths)]
     return [(str(path), _read_or_none(path)) for path in files]
 
 

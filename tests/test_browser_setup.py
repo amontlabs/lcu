@@ -699,6 +699,7 @@ class RefreshTests(unittest.TestCase):
         self.chrome = self.manifest('Google/Chrome')
         self.edge = self.manifest('Microsoft Edge')
         self.fail = None
+        self.node_path = '/fake/node'
         self.calls = 0
         for patcher in (mock.patch('lcu.browser.platform.system', return_value='Darwin'),
                         mock.patch.dict(os.environ, {'HOME': str(self.home)}),
@@ -718,6 +719,8 @@ class RefreshTests(unittest.TestCase):
         """The upstream installer: writes every browser's manifest at the private copy's own host."""
         self.calls += 1
         plugin = _plugin_of(command)
+        (plugin / 'extension-host/macos/arm64/extension-host-config.json').write_text(
+            json.dumps({'nodePath': self.node_path}))
         for path in (self.chrome, self.edge):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({'name': 'com.openai.codexextension',
@@ -867,6 +870,14 @@ class RefreshTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             refresh(self.root)
         self.assertEqual(self.calls, 0)
+
+    def test_a_change_only_in_the_hosts_runtime_configuration_asks_to_reconnect(self):
+        destination = install(self.root)
+        self.assertEqual(refresh(self.root).status, 'unchanged')
+        self.node_path = '/new/node'
+        self.assertEqual(refresh(self.root), ('changed', destination, []))
+        config = destination / 'chrome/extension-host/macos/arm64/extension-host-config.json'
+        self.assertEqual(json.loads(config.read_text()), {'nodePath': '/new/node'})
 
     def test_the_active_custom_directory_wins_over_a_leftover_default_relay(self):
         default = install(self.root)
