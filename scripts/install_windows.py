@@ -9,6 +9,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -17,9 +18,9 @@ sys.path.insert(0, str(SOURCE))
 
 from bundle import VERSION, architecture, verify
 from lcu import setup
-from lcu.windows import (inventory_sha256, resolve_installed_windows_app,
+from lcu.windows import (_component, inventory_sha256, resolve_installed_windows_app,
                          validate_windows_app_tree)
-from lcu.windows_host import materialize_original_host
+from lcu.windows_host import materialize_original_host, plan_original_host
 
 
 def _redirected(path):
@@ -63,6 +64,26 @@ def _validated_copy(app, selected):
     return validate_windows_app_tree(app, expected_version=selected.version,
         expected_runtime=selected.runtime_version,
         expected_inventory=selected.inventory)
+
+
+def _preflight_host(selected):
+    """Check the selected app's native-pipe host layout read-only, before anything is copied.
+
+    The protected Store directory refuses direct execution, so the structural
+    analyzer runs with a temporary copy of only the app's own node.exe; the
+    selected app itself is only read. Nothing from this check remains afterwards.
+    """
+    node = _component(selected.app, 'app/resources/cua_node/bin/node.exe')
+    if _redirected(node) or not node.is_file():
+        raise ValueError('The selected ChatGPT app has no usable app/resources/cua_node/bin/node.exe.')
+    with tempfile.TemporaryDirectory(prefix='lcu-host-check-', ignore_cleanup_errors=True) as scratch:
+        staged = Path(scratch) / 'node.exe'
+        shutil.copy2(_copy_path(node), _copy_path(staged))
+        try:
+            plan_original_host(selected.app, node=staged)
+        except ValueError as exc:
+            raise ValueError(f'{exc} (observed ChatGPT app {selected.version}, '
+                             f'runtime {selected.runtime_version}; nothing was installed)') from exc
 
 
 def _atomic_bytes(path, data):
@@ -116,6 +137,9 @@ def install(prefix):
     digest = inventory_sha256(inventory)
     if digest != selected.inventory_digest:
         raise ValueError('Selected Windows application inventory changed after validation.')
+    # Fail on an unrecognised host layout before the 2 GB copy or any prefix write.
+    print('LCU: Checking the original Windows native host layout...', file=sys.stderr, flush=True)
+    _preflight_host(selected)
     # Keep the registered MSIX intact. Its protected WindowsApps directory does
     # not permit direct execution, so run an unchanged private copy instead.
     prefix.mkdir(parents=True, exist_ok=True)
@@ -125,6 +149,7 @@ def install(prefix):
         raise ValueError(f'Refusing a redirected Windows app generation directory: {apps}')
     apps.mkdir(exist_ok=True)
     generation = _generation(prefix, digest)
+    created_generation = False
     if _redirected(generation):
         raise ValueError(f'Refusing a redirected Windows app generation: {generation}')
     if generation.exists():
@@ -150,6 +175,7 @@ def install(prefix):
             (stage / 'inventory.json').write_text(json.dumps(
                 inventory, sort_keys=True, separators=(',', ':')) + '\n')
             os.replace(stage, generation)
+            created_generation = True
         except BaseException:
             shutil.rmtree(_copy_path(stage), ignore_errors=True)
             raise
@@ -161,6 +187,7 @@ def install(prefix):
     previous_launchers = {}
     replaced_launchers = []
     temporary = None
+    committed = False
     try:
         shutil.copytree(SOURCE, release)
         verify(release, arch, 'windows')
@@ -187,7 +214,10 @@ def install(prefix):
         temporary = prefix / ('.current-' + uuid.uuid4().hex + '.json')
         temporary.write_text(json.dumps({'release': release.name}) + '\n')
         os.replace(temporary, prefix / 'current.json')
+        committed = True
     except BaseException:
+        if committed:
+            raise
         if temporary is not None:
             temporary.unlink(missing_ok=True)
         for path in reversed(replaced_launchers):
@@ -197,6 +227,10 @@ def install(prefix):
             else:
                 _atomic_bytes(path, content)
         shutil.rmtree(_copy_path(release), ignore_errors=True)
+        # Remove only a copy this run created; a generation that already existed
+        # (or that a committed release uses) is never touched.
+        if created_generation:
+            shutil.rmtree(_copy_path(generation), ignore_errors=True)
         raise
     return release
 
