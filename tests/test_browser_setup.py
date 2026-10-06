@@ -469,7 +469,6 @@ class BrowserStatusTests(unittest.TestCase):
         self.assertFalse(self.run_status())
         text = self.output.getvalue()
         self.assertIn("points to /original/ChatGPT for Chrome, not LCU's relay", text)
-        self.assertIn('re-point it at its own host', text)
         self.assertIn('Run `lcu browser install`, then restart Chrome, or turn the ChatGPT extension off and on '
                       'at chrome://extensions', text)
 

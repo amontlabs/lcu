@@ -286,7 +286,7 @@ Custom harnesses must deliver the original instructions and images, present site
 
 Chrome calls fail with `Browser request-header policy requires caller identity.` when the extension is still connected to the original ChatGPT native host instead of LCU's relay. Restart Chrome, or turn the ChatGPT extension off and on in `chrome://extensions`, then list tabs again.
 
-The ChatGPT app can also re-point the `com.openai.codexextension` manifest at its own host when it starts or updates. `lcu browser status` then prints where the manifest points. Run `lcu browser install`, then reconnect the extension as above.
+If the `com.openai.codexextension` manifest points somewhere other than LCU's relay, for example at the ChatGPT app's own host, `lcu browser status` prints where it points. Run `lcu browser install`, then reconnect the extension as above.
 
 ## Approval mode
 

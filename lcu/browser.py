@@ -344,7 +344,6 @@ def status(root, family='chrome'):
         print(f'{label} connector: configured for this LCU installation.')
     elif foreign_host:
         print(f'{label} connector: the native-host manifest points to {foreign_host}, not LCU\'s relay. '
-              'The ChatGPT app can re-point it at its own host. '
               f'Run `lcu browser install`, then {_reconnect_step(browser)}')
     else:
         print(f'{label} connector: missing or outdated. Run `lcu browser install`.')
