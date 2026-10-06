@@ -12,6 +12,8 @@ USAGE = ('Usage: lcu [--chrome] [--audio] [--mcp-discovery-compat]\n'
          '       lcu browser install\n'
          '       lcu browser status\n'
          '       lcu apps [list|allow APP|revoke APP] [--json]   (macOS)\n'
+         '       lcu origins [list [--session ID] [--json]]\n'
+         '       lcu origins forget ORIGIN [--session ID | --all-sessions] [--allowed | --denied]\n'
          '       lcu prune [--keep N] [--yes]\n'
          '       lcu update [--check [--json]] [--yes]\n'
          '       lcu doctor\n'
@@ -90,6 +92,16 @@ def paths(root, descriptor=None):
     return app, resources, runtime, {'version': resolved.version, 'runtime': resolved.runtime_version}
 
 
+def default_codex_home(env, windows):
+    """The directory the original runtime uses when CODEX_HOME is not set."""
+    path_api = ntpath if windows else os.path
+    home = (env.get('USERPROFILE') or env.get('HOME') or str(Path.home())) if windows else (
+        env['HOME'] if 'HOME' in env else str(Path.home()))
+    selected = path_api.normpath(path_api.join(home, '.codex'))
+    # Node path.join collapses double leading slashes on Linux.
+    return '/' + selected.lstrip('/') if selected.startswith('//') else selected
+
+
 def environment(root, resolved=None, *, chrome=False, audio=False, platform=None):
     _, resources, runtime, metadata = resolved or paths(root)
     target = platform if platform is not None else json.loads(
@@ -106,11 +118,7 @@ def environment(root, resolved=None, *, chrome=False, audio=False, platform=None
     # Original gM/nne selects and trusts CODEX_HOME verbatim, including an
     # explicitly empty value. This changes only the launched child environment.
     if 'CODEX_HOME' not in env:
-        home = (env.get('USERPROFILE') or env.get('HOME') or str(Path.home())) if windows else (
-            env['HOME'] if 'HOME' in env else str(Path.home()))
-        selected = path_api.normpath(path_api.join(home, '.codex'))
-        # Node path.join collapses double leading slashes on Linux.
-        env['CODEX_HOME'] = ('/' + selected.lstrip('/') if selected.startswith('//') else selected)
+        env['CODEX_HOME'] = default_codex_home(env, windows)
     # Select our verified executables, while retaining upstream caller options,
     # metadata, services, policy flags, and additional module/trust roots.
     def prepend(key, *paths):
@@ -416,6 +424,10 @@ def main(root, argv):
     if argv[:1] == ['apps']:
         from .apps import main as apps
         apps(root, argv[1:])
+        return
+    if argv[:1] == ['origins']:
+        from .origins import main as origins
+        origins(argv[1:])
         return
     if argv[:1] == ['prune']:
         from .maintenance import main as maintenance
