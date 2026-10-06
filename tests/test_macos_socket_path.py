@@ -9,6 +9,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+if sys.platform == 'win32':
+    # The checks are macOS-only in production and read the POSIX password database.
+    raise unittest.SkipTest('macOS socket path checks need pwd')
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lcu import doctor, platforms
 import test_setup_pending as pending
@@ -119,7 +123,7 @@ class DoctorSocketTests(unittest.TestCase):
         self.assertIn("Computer Use cannot start for this macOS account: the ChatGPT helper's "
                       'socket path is 104 bytes (macOS limit 103)', output)
         self.assertIn(home + SUFFIX, output)
-        self.assertIn('13 characters or fewer after /Users/', output)
+        self.assertIn('13 ASCII characters or fewer after /Users/', output)
         self.assertNotIn('Original Mac provider loaded', output)
 
     def test_short_home_still_passes(self):

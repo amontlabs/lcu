@@ -65,7 +65,7 @@ def mac_socket_path_problem(environ=None) -> str | None:
     return (f"Computer Use cannot start for this macOS account: the ChatGPT helper's socket path is "
             f'{size} bytes (macOS limit {MAC_SOCKET_MAX_BYTES}): {path}. {source} '
             'LCU cannot change the signed helper. Use an account whose home folder path is short enough '
-            '(13 characters or fewer after /Users/).')
+            '(13 ASCII characters or fewer after /Users/).')
 
 
 @dataclass(frozen=True)
