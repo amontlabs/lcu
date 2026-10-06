@@ -1,5 +1,6 @@
 """Connect installed Chromium browsers using OpenAI's original native host."""
 import argparse
+import collections
 import contextlib
 import hashlib
 import json
@@ -350,15 +351,23 @@ def _install_locked(root, system, destination, selected_app):
     return destination
 
 
-def _points_here(manifest_path, destination):
-    """True when the host manifest at `manifest_path` names a launcher inside `destination`."""
+def _launcher_dir(manifest_path):
+    """The directory of the launcher the regular manifest file `manifest_path` names, else None."""
     try:
         if manifest_path.is_symlink() or not manifest_path.is_file():
-            return False
-        target = Path(json.loads(manifest_path.read_text()).get('path', ''))
-        return target.parent.resolve() == destination.resolve()
+            return None
+        return Path(json.loads(manifest_path.read_text()).get('path', '')).parent
     except (OSError, ValueError, AttributeError):
-        return False
+        return None
+
+
+def _points_into(manifest_path, directories):
+    return _launcher_dir(manifest_path) in directories
+
+
+def _marker_beside(manifest_path):
+    directory = _launcher_dir(manifest_path)
+    return directory is not None and (directory / '.lcu-browser-host').is_file()
 
 
 def _read_or_none(path):
@@ -393,48 +402,90 @@ def _relay_snapshot(destination, system, manifest_paths):
     return [(str(path), _read_or_none(path)) for path in files]
 
 
+Refreshed = collections.namedtuple('Refreshed', 'status destination displaced')
+
+
+def _owned_relay_dirs(manifests, expected_app, apps):
+    """Relay directories named by `manifests` that this installation made, keyed to their marker's app path.
+
+    A directory is ours when its `.lcu-browser-host` marker names the selected app, or (Windows) a
+    private app generation under this prefix: the Store app changed since `lcu browser install` ran.
+    """
+    owned = {}
+    for path in manifests:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            launcher = Path(json.loads(path.read_text()).get('path', ''))
+            marker = launcher.parent / '.lcu-browser-host'
+            if (launcher.name not in ('lcu-native-host', 'lcu-native-host.cmd') or launcher.parent.is_symlink()
+                    or marker.is_symlink() or not marker.is_file()):
+                continue
+            recorded = marker.read_text()
+        except (OSError, ValueError, AttributeError):
+            continue
+        app = os.path.normcase(recorded.strip())
+        if recorded == expected_app or (apps and app.startswith(os.path.normcase(str(apps)) + os.sep)):
+            owned[launcher.parent] = recorded
+    return owned
+
+
 def refresh(root):
     """Refresh the relay a previous `lcu browser install` made for this installation; never enables Chrome.
 
-    Returns (status, destination or None) where status is
+    Returns Refreshed(status, destination, displaced). `status` is
       'absent'     no relay was installed for this installation, or its manifests were removed (nothing is touched),
       'elsewhere'  one is, but no native-host manifest points at it any more (nothing is touched),
+      'root'       one is installed but this process runs as root (nothing is touched),
       'unchanged'  reinstalled; every relay file and manifest came out byte for byte the same,
-      'changed'    reinstalled; the relay or its manifest differs, so Chrome must reconnect,
-      'root'       one is installed but this process runs as root (nothing is touched).
-    Errors propagate. The existing `install` path does the work, so the result is what
-    `lcu browser install` would leave.
+      'changed'    reinstalled; the relay or its manifest differs, so Chrome must reconnect.
+    `displaced` lists Chrome manifests that point somewhere other than a relay of this installation and were left alone.
+    The relay is found from the manifests that name it, so a custom `--directory` and a Windows app generation that
+    has since been replaced are found too. Errors propagate. The existing install path does the work.
     """
     system = platform.system()
-    if system not in ('Linux', 'Darwin', 'Windows') or not _data_root(system).is_dir():
-        return 'absent', None  # never set up: do not even resolve the app
-    system, destination, selected_app = _host_location(root)
-    marker = destination / '.lcu-browser-host'
-    if (destination.is_symlink() or not destination.is_dir() or marker.is_symlink() or not marker.is_file()
-            or marker.read_text() != str(selected_app) + '\n'):
-        return 'absent', destination
+    if system not in ('Linux', 'Darwin', 'Windows'):
+        return Refreshed('absent', None, [])
     manifests = _manifest_paths(os.environ, system)
-    ours = sorted(path for path in manifests if _points_here(path, destination))
-    if not ours:
-        if not any(path.is_file() for path in manifests):
-            return 'absent', destination  # the connector was removed; nothing to refresh or report
+    existing = sorted(path for path in manifests if path.is_file() or path.is_symlink())
+    candidates = any(_marker_beside(path) for path in existing)
+    default_present = _data_root(system).is_dir()
+    if not candidates and not default_present:
+        return Refreshed('absent', None, [])  # never set up: do not even resolve the app
+    system, default, selected_app = _host_location(root)
+    expected = str(selected_app) + '\n'
+    prefix = Path(root).resolve().parent.parent
+    owned = _owned_relay_dirs(existing, expected, prefix / 'apps' if system == 'Windows' else None)
+    marker = default / '.lcu-browser-host'
+    if not owned:
+        valid = (default.is_dir() and not default.is_symlink() and marker.is_file() and not marker.is_symlink()
+                 and marker.read_text() == expected)
+        if not valid or not existing:
+            return Refreshed('absent', default if valid else None, [])
         # The ChatGPT app (or the user) took the manifest back. Re-pointing it is what the explicit
         # `lcu browser install` is for; an update must not take the connector from another owner.
-        return 'elsewhere', destination
+        return Refreshed('elsewhere', default, [])
+    # Reinstall where the relay is. A replaced app generation moves to the directory of the selected one.
+    current = [path for path, recorded in owned.items() if recorded == expected]
+    destination = default if default in owned else (sorted(current)[0] if current else default)
+    ours = sorted(path for path in existing if _points_into(path, owned))
     if hasattr(os, 'geteuid') and os.geteuid() == 0:
         # `sudo lcu update` must not write root-owned files into the desktop account's browser setup.
-        return 'root', destination
-    # The original installer writes every browser's manifest. Only those already pointing at this relay are ours.
+        return Refreshed('root', destination, [])
+    # The original installer writes every browser's manifest. Only those already pointing at a relay of
+    # this installation are ours; the others are put back as they were (or removed again if they were new).
     others = {path: _read_or_none(path) for path in manifests if path not in ours}
     with _destination_lock(destination):
         before = _relay_snapshot(destination, system, ours)
         try:
             _install_locked(root, system, destination, selected_app)
         finally:
-            for path, saved in others.items():
-                _restore(path, saved)
+            for path in set(others) | set(_manifest_paths(os.environ, system)):
+                if path not in ours:
+                    _restore(path, others.get(path))
         after = _relay_snapshot(destination, system, ours)
-    return ('unchanged' if before == after else 'changed'), destination
+    displaced = [path for path, saved in sorted(others.items()) if saved is not None and 'chrome' in str(path).lower()]
+    return Refreshed('unchanged' if before == after else 'changed', destination, displaced)
 
 
 def status(root, family='chrome'):

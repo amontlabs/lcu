@@ -252,28 +252,35 @@ class UpdateTest(unittest.TestCase):
         return out.getvalue(), err.getvalue()
 
     def test_post_install_refreshes_an_installed_chrome_relay_and_asks_to_reconnect_when_it_changed(self):
-        out, err = self.post_install_output(('changed', Path('/relay/dir')))
+        out, err = self.post_install_output(('changed', Path('/relay/dir'), []))
         self.assertIn('Refreshed the Chrome relay at', out)
         self.assertIn('restart Chrome or turn the ChatGPT extension off and on', out)
         self.assertEqual(err, '')
 
     def test_post_install_does_not_ask_to_reconnect_when_the_relay_is_unchanged(self):
-        out, err = self.post_install_output(('unchanged', Path('/relay/dir')))
+        out, err = self.post_install_output(('unchanged', Path('/relay/dir'), []))
         self.assertIn('Refreshed the Chrome relay at', out)
         self.assertNotIn('Chrome or', out)
         self.assertEqual(err, '')
 
+    def test_post_install_reports_a_displaced_chrome_manifest_beside_a_refresh(self):
+        out, _ = self.post_install_output(('unchanged', Path('/relay/dir'), [Path('/cfg/Chrome/manifest.json')]))
+        self.assertIn('Refreshed the Chrome relay at', out)
+        self.assertIn('/cfg/Chrome/manifest.json', out)
+        self.assertIn('left alone', out)
+        self.assertIn('browser install', out)
+
     def test_post_install_is_silent_about_chrome_when_it_was_never_set_up(self):
-        self.assertEqual(self.post_install_output(('absent', Path('/relay/dir'))), ('', ''))
+        self.assertEqual(self.post_install_output(('absent', Path('/relay/dir'), [])), ('', ''))
 
     def test_post_install_reports_a_manifest_that_points_elsewhere(self):
-        out, _ = self.post_install_output(('elsewhere', Path('/relay/dir')))
+        out, _ = self.post_install_output(('elsewhere', Path('/relay/dir'), []))
         self.assertIn('left alone', out)
         self.assertIn('browser install', out)
         self.assertNotIn('Refreshed the Chrome relay', out)
 
     def test_post_install_tells_root_to_run_browser_install_as_the_desktop_account(self):
-        out, _ = self.post_install_output(('root', Path('/relay/dir')))
+        out, _ = self.post_install_output(('root', Path('/relay/dir'), []))
         self.assertIn('ran as root', out)
         self.assertIn('browser install', out)
 
