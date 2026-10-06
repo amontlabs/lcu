@@ -333,6 +333,31 @@ def codex_needs_setup(home=None, env=None):
                    for event in ('SessionStart', 'UserPromptSubmit'))
 
 
+def refresh_chrome_relay(root):
+    """Refresh the Chrome relay `lcu browser install` set up earlier; never enables Chrome, never fails the update."""
+    from . import browser
+    command = f'{stable_command(root)} browser install'
+    try:
+        state, destination, displaced = browser.refresh(root)
+        if state == 'absent':
+            return
+        if state == 'elsewhere':
+            print(f'Chrome: the native-host manifest no longer points at the LCU relay, so it was left alone. '
+                  f'To use Chrome through LCU again, run `{command}`.')
+        elif state == 'root':
+            print(f'Chrome: the relay was not refreshed because the update ran as root. As the desktop account, run `{command}`.')
+        else:
+            print(f'Refreshed the Chrome relay at {destination}.')
+            if state == 'changed':
+                print('If the extension was already connected, restart Chrome or turn the ChatGPT extension off and on '
+                      "so it reconnects through LCU's relay.")
+            if displaced:
+                print('Chrome: a native-host manifest points somewhere other than the LCU relay and was left alone '
+                      f'({displaced[0]}). To use Chrome through LCU again, run `{command}`.')
+    except Exception as exc:
+        print(f'lcu update: could not refresh the Chrome relay ({exc}); run `{command}`.', file=sys.stderr)
+
+
 def post_install(root, home=None):
     """Refresh what setup copied out of an earlier release; `lcu update` runs it from the new release."""
     from . import claude_mod
@@ -341,6 +366,7 @@ def post_install(root, home=None):
     if target.is_dir() and claude_mod._owned(target):
         claude_mod.install(home, root)
         print(f'Refreshed the Claude Code lcu-approve mod at {target}.')
+    refresh_chrome_relay(root)
     if codex_needs_setup(home):
         print(f'Codex: run `{stable_command(root)} setup --agent codex` to add the LCU update-notice hook.')
     return 0

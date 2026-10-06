@@ -1,5 +1,6 @@
 """Connect installed Chromium browsers using OpenAI's original native host."""
 import argparse
+import collections
 import contextlib
 import hashlib
 import json
@@ -7,7 +8,9 @@ import os
 from pathlib import Path
 import platform
 import shlex
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -147,25 +150,37 @@ def _refresh_plugin(source, destination):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def install(root, directory=None):
-    from .runtime import environment, paths
+def _data_root(system, env=None):
+    """Where this account keeps LCU's private browser host copies."""
+    env = os.environ if env is None else env
+    home = (Path(env.get('USERPROFILE', Path.home())) if system == 'Windows'
+            else Path(env.get('HOME', Path.home())))
+    if system == 'Darwin':
+        data = home / 'Library/Application Support'
+    elif system == 'Windows':
+        data = Path(env.get('LOCALAPPDATA', home / 'AppData/Local'))
+    else:
+        data = Path(env.get('XDG_DATA_HOME', home / '.local/share'))
+    return data / 'lcu/browser'
+
+
+def _host_location(root, directory=None, env=None):
+    """(system, destination, selected_app) of the private host copy `lcu browser install` keeps for `root`."""
+    from .runtime import paths
 
     system = platform.system()
     if system not in ('Linux', 'Darwin', 'Windows'):
         raise ValueError('The original Chrome native host is supported on Linux, macOS, and Windows only.')
     # The upstream installer writes its host configuration beside the executable.
     # Keep the sealed release immutable; give this account a private host copy.
-    home = (Path(os.environ.get('USERPROFILE', Path.home())) if system == 'Windows'
-            else Path(os.environ.get('HOME', Path.home())))
-    if system == 'Darwin':
-        data = home / 'Library/Application Support'
-    elif system == 'Windows':
-        data = Path(os.environ.get('LOCALAPPDATA', home / 'AppData/Local'))
-    else:
-        data = Path(os.environ.get('XDG_DATA_HOME', home / '.local/share'))
     selected_app = paths(root)[0] if system == 'Windows' else (root / 'app').resolve()
     identity = hashlib.sha256(str(selected_app).encode()).hexdigest()[:16]
-    destination = Path(directory).expanduser().absolute() if directory else data / 'lcu/browser' / identity
+    destination = Path(directory).expanduser().absolute() if directory else _data_root(system, env) / identity
+    return system, destination, selected_app
+
+
+def install(root, directory=None):
+    system, destination, selected_app = _host_location(root, directory)
     with _destination_lock(destination):
         return _install_locked(root, system, destination, selected_app)
 
@@ -239,7 +254,7 @@ def _wrapper_is_current(text, script):
     return False
 
 
-def _install_locked(root, system, destination, selected_app):
+def _install_locked(root, system, destination, selected_app, env_overrides=None):
     from .runtime import environment, paths
 
     marker = destination / '.lcu-browser-host'
@@ -252,6 +267,11 @@ def _install_locked(root, system, destination, selected_app):
     selected = paths(root)
     # The persisted Codex path is the real executable, not the sandbox shim.
     env = unshimmed_env(environment(root, selected))
+    for key, value in (env_overrides or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
     # Runtime selection returns the original resource tree. Linux stores it
     # under app/resources; macOS stores it under app/Contents/Resources.
     source = selected[1] / 'plugins/openai-bundled/plugins/chrome'
@@ -331,12 +351,249 @@ def _install_locked(root, system, destination, selected_app):
     if changed == 0:
         raise ValueError('The original Chrome installer produced no manifest for the selected host.')
     if system == 'Windows':
-        key = r'HKCU\Software\Google\Chrome\NativeMessagingHosts\com.openai.codexextension'
-        registered = subprocess.run(['reg.exe', 'query', key, '/ve'],
-                                    capture_output=True, text=True, timeout=20)
-        if registered.returncode or str(next(iter(manifest_paths))) not in registered.stdout:
+        if not _windows_registered(next(iter(manifest_paths))):
             raise ValueError('The original Chrome installer did not register the selected manifest for this account.')
     return destination
+
+
+def _launcher_dir(manifest_path):
+    """The directory of the launcher the regular manifest file `manifest_path` names, else None."""
+    try:
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            return None
+        return Path(json.loads(manifest_path.read_text()).get('path', '')).parent
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _points_into(manifest_path, directories):
+    return _launcher_dir(manifest_path) in directories
+
+
+def _marker_beside(manifest_path):
+    directory = _launcher_dir(manifest_path)
+    return directory is not None and (directory / '.lcu-browser-host').is_file()
+
+
+def _read_or_none(path):
+    """The bytes of `path`, None when it does not exist. Any other failure propagates."""
+    try:
+        return path.read_bytes()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def _file_state(path):
+    """(bytes, permission bits) of `path`, None when it does not exist."""
+    data = _read_or_none(path)
+    return None if data is None else (data, stat.S_IMODE(path.stat().st_mode))
+
+
+def _restore(path, saved):
+    """Put back what `path` held before, bytes and permissions (nothing, when `saved` is None)."""
+    if path.is_symlink() or _file_state(path) == saved:
+        return
+    if saved is None:
+        path.unlink(missing_ok=True)
+        return
+    data, mode = saved
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.lcu-manifest-', delete=False) as staged:
+        staged_path = Path(staged.name)
+        staged.write(data)
+    try:
+        staged_path.chmod(mode)
+        staged_path.replace(path)
+    finally:
+        staged_path.unlink(missing_ok=True)
+
+
+def _relay_snapshot(destination, system, manifest_paths):
+    """The bytes Chrome and the extension depend on, to tell whether a refresh changed anything."""
+    launcher = 'lcu-native-host.cmd' if system == 'Windows' else 'lcu-native-host'
+    # The original installer also writes the host's runtime paths beside its binary.
+    host_configs = sorted(destination.glob('chrome/extension-host/*/*/extension-host-config.json'))
+    files = [destination / launcher, destination / 'lcu-native-host.py', destination / _PLUGIN_DIGEST,
+             *host_configs, *sorted(manifest_paths)]
+    return [(str(path), _file_state(path)) for path in files]
+
+
+Refreshed = collections.namedtuple('Refreshed', 'status destination displaced')
+
+
+def _owned_marker(directory, expected_app, apps):
+    """The app a relay directory's marker records when this installation made it, else None.
+
+    A directory is ours when its `.lcu-browser-host` marker names the selected app, or (Windows) a
+    private app generation under this prefix: the Store app changed since `lcu browser install` ran.
+    """
+    marker = directory / '.lcu-browser-host'
+    try:
+        if directory.is_symlink() or marker.is_symlink() or not marker.is_file():
+            return None
+        recorded = marker.read_text()
+    except OSError:
+        return None
+    app = os.path.normcase(recorded.strip())
+    if recorded == expected_app or (apps and app.startswith(os.path.normcase(str(apps)) + os.sep)):
+        return recorded
+    return None
+
+
+def _owned_relay_dirs(manifests, data_root, expected_app, apps):
+    """{directory: recorded app} of this installation's relays: those the manifests name and those kept under `data_root`."""
+    directories = {directory for directory in map(_launcher_dir, manifests) if directory is not None}
+    try:
+        directories.update(path for path in data_root.iterdir() if path.is_dir())
+    except OSError:
+        pass
+    owned = {}
+    for directory in directories:
+        recorded = _owned_marker(directory, expected_app, apps)
+        if recorded is not None:
+            owned[directory] = recorded
+    return owned
+
+
+def _windows_registered(manifest_path):
+    """True when the account's Chrome native-host registration names `manifest_path`."""
+    key = r'HKCU\Software\Google\Chrome\NativeMessagingHosts\com.openai.codexextension'
+    registered = subprocess.run(['reg.exe', 'query', key, '/ve'], capture_output=True, text=True, timeout=20)
+    if registered.returncode:
+        return False
+    # `reg query` prints `    <value name>    REG_SZ    <data>`; the name is localized, so match the type.
+    values = re.findall(r'REG_(?:EXPAND_)?SZ\s+(.*?)\s*$', registered.stdout, re.MULTILINE)
+
+    def normal(text):
+        return os.path.normcase(os.path.normpath(str(text)))
+    return any(normal(value) == normal(manifest_path) for value in values)
+
+
+def _scratch_environment(env, scratch):
+    """Overrides that make the original installer write its manifests under `scratch`, plus real -> scratch roots."""
+    roots = [(Path(env.get('HOME', Path.home())), scratch / 'home')]
+    overrides = {'HOME': str(scratch / 'home'), 'XDG_CONFIG_HOME': None, 'CHROME_CONFIG_HOME': None}
+    for key, name in (('XDG_CONFIG_HOME', 'xdg'), ('CHROME_CONFIG_HOME', 'chrome')):
+        if env.get(key):
+            roots.append((Path(env[key]), scratch / name))
+            overrides[key] = str(scratch / name)
+    return overrides, sorted(roots, key=lambda pair: len(pair[0].parts), reverse=True)
+
+
+def _write_manifest(path, data):
+    """Publish a manifest the way `_install_locked` does: staged beside it and renamed over it."""
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.lcu-manifest-', delete=False) as staged:
+        staged_path = Path(staged.name)
+        staged.write(data)
+    try:
+        staged_path.chmod(0o644)
+        staged_path.replace(path)
+    finally:
+        staged_path.unlink(missing_ok=True)
+
+
+def _refresh_in_scratch(root, system, destination, selected_app, ours, env, saved):
+    """Run the install path with the original installer's manifests going to a scratch home, then publish ours.
+
+    The original installer writes a manifest for every browser. Run against the real ones it would, for a
+    moment or after a failure, point other owners' (or never set up) browsers at LCU's host and could
+    overwrite what another installer wrote meanwhile. In scratch it cannot touch them: only the manifests
+    that already named this relay are then replaced, once the whole install path has succeeded.
+    """
+    with tempfile.TemporaryDirectory(prefix='lcu-browser-refresh-') as temporary:
+        scratch = Path(temporary).resolve()
+        overrides, roots = _scratch_environment(env, scratch)
+        (scratch / 'home').mkdir()
+        _install_locked(root, system, destination, selected_app, overrides)
+        staged = {}
+        for path in ours:
+            twin = next((replacement / path.relative_to(real) for real, replacement in roots
+                         if path.is_relative_to(real)), None)
+            if twin is None or not twin.is_file():
+                raise ValueError(f'The original Chrome installer produced no manifest for {path}.')
+            staged[path] = twin.read_bytes()
+        for path, data in staged.items():
+            if _file_state(path) == saved[path]:  # changed or removed meanwhile by someone else: theirs now
+                _write_manifest(path, data)
+
+
+def refresh(root):
+    """Refresh the relay a previous `lcu browser install` made for this installation; never enables Chrome.
+
+    Returns Refreshed(status, destination, displaced). `status` is
+      'absent'     no relay was installed for this installation, or its manifests were removed (nothing is touched),
+      'elsewhere'  one is, but no native-host manifest (or Windows registry entry) points at it any more (nothing is touched),
+      'root'       one is installed but this process runs as root (nothing is touched),
+      'unchanged'  reinstalled; every relay file and manifest came out byte for byte the same,
+      'changed'    reinstalled; the relay, its host configuration or its manifest differs, so Chrome must reconnect.
+    `displaced` lists Chrome manifests that point somewhere other than a relay of this installation and were left alone.
+    The relay is found from the manifests that name it and from LCU's host directory, so a custom `--directory`
+    that is still registered and a Windows app generation that has since been replaced are found too. Errors
+    propagate. The existing install path does the work; only manifests that already named the relay are replaced.
+    """
+    system = platform.system()
+    if system not in ('Linux', 'Darwin', 'Windows'):
+        return Refreshed('absent', None, [])
+    env = dict(os.environ)
+    as_root = hasattr(os, 'geteuid') and os.geteuid() == 0
+    if as_root and env.get('SUDO_USER'):
+        # `sudo lcu update` runs with root's home; look where the desktop account keeps its relay.
+        try:
+            import pwd
+            env = {key: value for key, value in env.items()
+                   if key not in ('XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'CHROME_CONFIG_HOME')}
+            env['HOME'] = pwd.getpwnam(env['SUDO_USER']).pw_dir
+        except (ImportError, KeyError):
+            pass
+    manifests = _manifest_paths(env, system)
+    existing = sorted(path for path in manifests if path.is_file() or path.is_symlink())
+    if not any(_marker_beside(path) for path in existing) and not _data_root(system, env).is_dir():
+        return Refreshed('absent', None, [])  # never set up: do not even resolve the app
+    system, default, selected_app = _host_location(root, env=env)
+    expected = str(selected_app) + '\n'
+    prefix = Path(root).resolve().parent.parent
+    owned = _owned_relay_dirs(existing, _data_root(system, env), expected,
+                              prefix / 'apps' if system == 'Windows' else None)
+    if not owned:
+        return Refreshed('absent', None, [])
+    ours = sorted(path for path in existing if _points_into(path, owned))
+    if not ours:
+        if not existing:
+            return Refreshed('absent', None, [])
+        # The ChatGPT app (or the user) took the manifest back. Re-pointing it is what the explicit
+        # `lcu browser install` is for; an update must not take the connector from another owner.
+        return Refreshed('elsewhere', default, [])
+    # Reinstall where the relay is. A replaced app generation moves to the directory of the selected one.
+    active = {directory for directory in map(_launcher_dir, ours)}
+    current = sorted(directory for directory in active if owned.get(directory) == expected)
+    destination = default if default in active else (current[0] if current else default)
+    if system == 'Windows' and not _windows_registered(ours[0]):
+        # The original installer would replace the registration; another owner holds it, so only report.
+        return Refreshed('elsewhere', default, [])
+    if as_root:
+        # `sudo lcu update` must not write root-owned files into the desktop account's browser setup.
+        return Refreshed('root', destination, [])
+    displaced = [path for path in existing if path not in ours and 'chrome' in str(path).lower()]
+    with _destination_lock(destination):
+        before = _relay_snapshot(destination, system, ours)
+        saved = {path: _file_state(path) for path in ours}
+        try:
+            if system == 'Windows':
+                # One manifest, already ours, and the registry entry is checked above; the installer
+                # records the manifest path in HKCU, so it has to write the real one.
+                _install_locked(root, system, destination, selected_app)
+            else:
+                _refresh_in_scratch(root, system, destination, selected_app, ours, env, saved)
+        except BaseException:
+            if system == 'Windows':
+                # Only the real manifest was written, and it may now name the original host instead of
+                # the relay. Put it back only in that state; a later change by someone else stays theirs.
+                for path, state in saved.items():
+                    directory = _launcher_dir(path)
+                    if directory is not None and directory.is_relative_to(destination / 'chrome/extension-host'):
+                        _restore(path, state)
+            raise
+        after = _relay_snapshot(destination, system, ours)
+    return Refreshed('unchanged' if before == after else 'changed', destination, displaced)
 
 
 def status(root, family='chrome'):

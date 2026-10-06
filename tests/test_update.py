@@ -241,6 +241,66 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(out.getvalue(), '')
         self.assertEqual((target / '.claude-plugin/plugin.json').read_text(), '{"name": "someone-else"}')
 
+    def post_install_output(self, result=None, error=None):
+        refresh = mock.Mock(return_value=result, side_effect=error)
+        with mock.patch('lcu.browser.refresh', refresh), \
+                mock.patch('sys.stdout', new_callable=io.StringIO) as out, \
+                mock.patch('sys.stderr', new_callable=io.StringIO) as err:
+            status = update.post_install(self.root, self.home)
+        self.assertEqual(status, 0)
+        refresh.assert_called_once_with(self.root)
+        return out.getvalue(), err.getvalue()
+
+    def test_post_install_refreshes_an_installed_chrome_relay_and_asks_to_reconnect_when_it_changed(self):
+        out, err = self.post_install_output(('changed', Path('/relay/dir'), []))
+        self.assertIn('Refreshed the Chrome relay at', out)
+        self.assertIn('restart Chrome or turn the ChatGPT extension off and on', out)
+        self.assertEqual(err, '')
+
+    def test_post_install_does_not_ask_to_reconnect_when_the_relay_is_unchanged(self):
+        out, err = self.post_install_output(('unchanged', Path('/relay/dir'), []))
+        self.assertIn('Refreshed the Chrome relay at', out)
+        self.assertNotIn('Chrome or', out)
+        self.assertEqual(err, '')
+
+    def test_post_install_reports_a_displaced_chrome_manifest_beside_a_refresh(self):
+        out, _ = self.post_install_output(('unchanged', Path('/relay/dir'), [Path('/cfg/Chrome/manifest.json')]))
+        self.assertIn('Refreshed the Chrome relay at', out)
+        self.assertIn(str(Path('/cfg/Chrome/manifest.json')), out)
+        self.assertIn('left alone', out)
+        self.assertIn('browser install', out)
+
+    def test_post_install_is_silent_about_chrome_when_it_was_never_set_up(self):
+        self.assertEqual(self.post_install_output(('absent', Path('/relay/dir'), [])), ('', ''))
+
+    def test_post_install_reports_a_manifest_that_points_elsewhere(self):
+        out, _ = self.post_install_output(('elsewhere', Path('/relay/dir'), []))
+        self.assertIn('left alone', out)
+        self.assertIn('browser install', out)
+        self.assertNotIn('Refreshed the Chrome relay', out)
+
+    def test_post_install_tells_root_to_run_browser_install_as_the_desktop_account(self):
+        out, _ = self.post_install_output(('root', Path('/relay/dir'), []))
+        self.assertIn('ran as root', out)
+        self.assertIn('browser install', out)
+
+    def test_a_failed_relay_refresh_warns_and_does_not_fail_the_update(self):
+        out, err = self.post_install_output(error=ValueError('The original Chrome installer failed (exit 1).'))
+        self.assertEqual(out, '')
+        self.assertIn('could not refresh the Chrome relay', err)
+        self.assertIn('installer failed', err)
+        self.assertIn('browser install', err)
+
+    def test_post_install_without_a_relay_on_disk_touches_no_browser_files(self):
+        with mock.patch('lcu.browser.subprocess.run') as run, \
+                mock.patch('sys.stdout', new_callable=io.StringIO) as out:
+            self.assertEqual(update.post_install(self.root, self.home), 0)
+        run.assert_not_called()
+        self.assertEqual(out.getvalue(), '')
+        self.assertFalse((self.home / '.local/share/lcu').exists())
+        self.assertFalse((self.home / 'Library/Application Support/lcu').exists())
+        self.assertFalse((self.home / 'local/lcu').exists())
+
     def test_codex_hint_only_when_registered_without_notice_hook(self):
         codex = self.home / '.codex'
         codex.mkdir()
