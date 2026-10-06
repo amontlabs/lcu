@@ -124,6 +124,16 @@ def diagnose_response():
         return {'ok': False, 'error': str(exc)[:512]}
 
 
+def answer_diagnose(connection):
+    """Send the diagnosis on a private duplicate of the request connection, then close it."""
+    with connection:
+        try:
+            connection.settimeout(3)
+            connection.sendall((json.dumps(diagnose_response(), separators=(',', ':')) + '\n').encode())
+        except OSError:
+            pass
+
+
 def turn_ended_payload(session_id, turn_id):
     return json.dumps({
         'type': 'agent-turn-complete',
@@ -386,11 +396,9 @@ def serve(address, client, control_address=None):
                 try:
                     request = LineReader(connection).read()
                     if isinstance(request, dict) and request.get('type') == 'diagnose':
-                        # Read-only: list Sky services and report; never signal them.
-                        try:
-                            connection.sendall((json.dumps(diagnose_response(), separators=(',', ':')) + '\n').encode())
-                        except OSError:
-                            pass
+                        # Read-only: list Sky services and report; never signal them. It runs on
+                        # its own thread so a slow `ps` cannot hold up turn-ended cleanup.
+                        Thread(target=answer_diagnose, args=(connection.dup(),), daemon=True).start()
                         continue
                     session_id = request.get('session_id') if isinstance(request, dict) else None
                     turn_id = request.get('turn_id') if isinstance(request, dict) else None

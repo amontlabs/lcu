@@ -247,6 +247,41 @@ class HostRequestTests(unittest.TestCase):
             finally:
                 stop_original_host(process, temporary)
 
+    def test_a_slow_diagnosis_does_not_delay_turn_cleanup(self):
+        from lcu.macos_host import start_original_host, stop_original_host
+        with tempfile.TemporaryDirectory() as base:
+            client = Path(base) / 'client'
+            client.write_text('#!/bin/sh\nexit 0\n')
+            client.chmod(0o755)
+            fake_ps = Path(base) / 'bin' / 'ps'
+            fake_ps.parent.mkdir()
+            fake_ps.write_text('#!/bin/sh\nsleep 1.5\n')
+            fake_ps.chmod(0o755)
+            env = {**os.environ, 'PATH': f'{fake_ps.parent}{os.pathsep}{os.environ["PATH"]}'}
+            process, temporary, address = start_original_host(
+                python=Path(sys.executable), client=client,
+                entry=Path(__file__).resolve().parents[1] / 'lcu/macos_host.py', env=env)
+            try:
+                slow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                slow.settimeout(8)
+                slow.connect(address)
+                slow.sendall(b'{"type":"diagnose"}\n')
+                time.sleep(0.2)
+                started = time.monotonic()
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(8)
+                    connection.connect(address)
+                    connection.sendall(b'{"session_id":"s","turn_id":"t"}\n')
+                    self.assertEqual(json.loads(connection.recv(1024)), {'notified': True})
+                self.assertLess(time.monotonic() - started, 1.0)
+                response = bytearray()
+                while b'\n' not in response:
+                    response.extend(slow.recv(4096))
+                self.assertTrue(json.loads(response)['ok'])
+                slow.close()
+            finally:
+                stop_original_host(process, temporary)
+
 
 if __name__ == '__main__':
     unittest.main()
