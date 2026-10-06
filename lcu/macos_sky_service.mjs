@@ -394,9 +394,17 @@ function finishPendingCleanup({retryFailed = false} = {}) {
   return run.promise;
 }
 
+// A turn can end while the run being awaited is finishing, so recheck that no
+// native acknowledgement is outstanding before dispatching.
+async function gateOnCleanup() {
+  do {
+    await finishPendingCleanup({retryFailed: true});
+  } while ([...pendingCleanup.values()].some(item => item.metadata && !item.nativeNotified));
+}
+
 export async function handleRpc(request) {
   register();
-  await finishPendingCleanup({retryFailed: true});
+  await gateOnCleanup();
   original ??= import(pathToFileURL(globalThis.nodeRepl.env.LCU_MAC_SKY_SERVICE_PATH).href);
   const runtime = globalThis.nodeRepl;
   const metadata = readTurnMetadata(runtime);
