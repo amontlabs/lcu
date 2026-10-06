@@ -139,11 +139,25 @@ class InstallHostTests(unittest.TestCase):
         # A release this run itself created is removed, but an unreadable record keeps the copy.
         self.assertTrue(install_windows._generation_in_use(self.prefix, generations[0]))
 
-    def test_unreadable_release_record_counts_as_in_use(self):
+    def test_unreadable_or_malformed_release_record_counts_as_in_use(self):
         generation = self.prefix / 'apps' / 'digest'
         (self.prefix / 'releases' / 'broken').mkdir(parents=True)
-        (self.prefix / 'releases' / 'broken' / 'installation.json').write_text('not json')
-        self.assertTrue(install_windows._generation_in_use(self.prefix, generation))
+        record = self.prefix / 'releases' / 'broken' / 'installation.json'
+        for text in ('not json', '{"app": 5}', '{"app": null}', '[]', '{}'):
+            with self.subTest(text=text):
+                record.write_text(text)
+                self.assertTrue(install_windows._generation_in_use(self.prefix, generation))
+        record.write_text(json.dumps({'app': str(self.prefix / 'apps' / 'other' / 'app')}))
+        self.assertFalse(install_windows._generation_in_use(self.prefix, generation))
+
+    def test_failure_with_a_malformed_release_record_keeps_the_original_error(self):
+        def fail(app, destination, **options):
+            other = self.prefix / 'releases' / 'odd'
+            other.mkdir(parents=True)
+            (other / 'installation.json').write_text('{"app": 5}')
+            raise OSError('host extraction failed')
+        with self.assertRaisesRegex(OSError, 'host extraction failed'):
+            self.install(materialize=fail)
 
     def test_failure_never_removes_a_generation_that_already_existed(self):
         self.install()

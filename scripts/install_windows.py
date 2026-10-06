@@ -95,10 +95,10 @@ def _generation_in_use(prefix, generation):
     for descriptor in releases.glob('*/installation.json'):
         try:
             recorded = json.loads(descriptor.read_text())['app']
+            if Path(recorded).parent == generation:
+                return True
         except (OSError, ValueError, KeyError, TypeError):
-            return True  # unreadable record: assume it may use the generation
-        if Path(recorded).parent == generation:
-            return True
+            return True  # unreadable or malformed record: assume it may use the generation
     return False
 
 
