@@ -70,3 +70,36 @@ The native step's duration is the time from the hook starting to the CLI step st
   app was running. The ChatGPT app was not running and was not launched for this test.
 - Not shown: delivery to the service. Exit 0 is not proof of delivery, and os_log redacts the
   client's messages. Visible cursor removal was also not checked.
+
+## Rerun after the app update, ChatGPT app running
+
+The user updated ChatGPT.app by hand and left it running. The same harness ran on fresh scratch roots
+from origin/main `1180362` and branch `61b9763`. The roots' `installation.json` was generated from the
+installed app, as LCU resolves it.
+
+| Item | Value |
+| --- | --- |
+| ChatGPT.app | 26.930.61225 (build 13232), signature verifies (`codesign --verify --deep --strict`), `com.openai.codex`, team 2DC432GLL2 |
+| CUA runtime | 0.0.27/20260927214556-b77d38801cca (unchanged; pair not in `tested-versions.json`) |
+| `SkyComputerUseClient` | unchanged, same SHA-256 as above |
+| Running CUA services | two `SkyComputerUseService` processes: the bundled copy and `~/.codex/computer-use/Codex Computer Use.app` (same version 26.929.1001365, same binary hash) |
+| Chrome/Chromium `com.openai.codexextension.json` | unchanged by the update: SHA-256 `a4e76915…a6be`, mtime Sep 25, path `~/.codex/plugins/cache/openai-bundled/chrome/latest/extension-host/macos/arm64/ChatGPT for Chrome` |
+
+Results:
+
+- Signed command run directly with dummy IDs: 96–117 ms over 8 runs, exit 0, empty stdout/stderr.
+- **Every Sky request failed in both versions**, including turn 1 before any turn ended. The error was
+  `Sky Computer Use native pipe startup failed`, after about 5.4 s, or 1.4 s for some requests.
+- origin/main: `turn_ended` took 4001–4004 ms on all 4 turns, which is the hook's 4 s limit. The
+  diagnostic log still recorded `outcome=ok`.
+- Branch: `turn_ended` took 4002 ms on turn 1, when the native step hung on the failing pipe, and 0–1 ms
+  on turns 2–4. Instrumentation explains this. Each later Sky request retried turn 1's failed native
+  step and threw at the gate before its own turn metadata was recorded. So turns 2–4 had no native step,
+  and the hook ran only the CLI step: 36, 16 and 14 ms, `notified: true`. The CLI step for turn 1 never
+  ran because its native step never succeeded.
+- No run produced a `turn-ended` command near 3 s or 5 s. The host's slow/failed log never fired.
+
+Conclusion: #23 still does not reproduce here. With the app running, the Sky native pipe itself fails,
+so this condition cannot show whether the fix keeps later requests working. The condition with the app
+quit, on the updated build, was not run: the user left the app open and it was not quit for this test.
+Before the update with the app not running, the earlier runs passed.
