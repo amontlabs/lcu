@@ -17,7 +17,7 @@ from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.browser import _RELAY_MINIMUM, _manifest_paths, _posix_wrapper, _write_private, install, status
+from lcu.browser import _RELAY_MINIMUM, _manifest_paths, _posix_wrapper, _write_private, install, refresh, status
 
 
 class BrowserSetupTests(unittest.TestCase):
@@ -635,6 +635,172 @@ class PosixRelayLauncherTests(unittest.TestCase):
         result, _ = self.launch('/usr/bin:/bin')
         self.assert_round_trip(result)
         self.assertEqual(self.used(), [str(python)])
+
+
+class RefreshTests(unittest.TestCase):
+    """`refresh` is the update-time path: it reuses `install` but only for a relay that is already ours."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        base = Path(self.temporary.name).resolve()
+        self.root = base / 'release'
+        self.home = base / 'home'
+        self.home.mkdir()
+        self.support = self.home / 'Library/Application Support'
+        resources = self.root / 'app/Contents/Resources'
+        source = resources / 'plugins/openai-bundled/plugins/chrome'
+        (source / 'scripts').mkdir(parents=True)
+        (source / 'scripts/installManifest.mjs').write_text('fixture')
+        host = source / 'extension-host/macos/arm64/ChatGPT for Chrome'
+        host.parent.mkdir(parents=True)
+        host.write_text('fixture')
+        self.relay_source = self.root / 'lcu/native_host.py'
+        self.relay_source.parent.mkdir(parents=True)
+        self.relay_source.write_text('#!/usr/bin/env python3\n# v1\n')
+        env = {'HOME': str(self.home), 'NODE_REPL_NODE_PATH': '/fake/node',
+               'CODEX_CLI_PATH': '/fake/codex', 'CUA_REPL_NODE_REPL_PATH': '/fake/repl'}
+        self.chrome = self.manifest('Google/Chrome')
+        self.edge = self.manifest('Microsoft Edge')
+        self.fail = None
+        self.calls = 0
+        for patcher in (mock.patch('lcu.browser.platform.system', return_value='Darwin'),
+                        mock.patch.dict(os.environ, {'HOME': str(self.home)}),
+                        mock.patch('lcu.runtime.paths', return_value=(self.root / 'app', resources, None, {})),
+                        mock.patch('lcu.runtime.environment', return_value=env),
+                        mock.patch('lcu.browser.subprocess.run', side_effect=self.original_installer)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.geteuid = mock.patch('lcu.browser.os.geteuid', create=True, return_value=501)
+        self.geteuid.start()
+        self.addCleanup(self.geteuid.stop)
+
+    def manifest(self, browser):
+        return self.support / browser / 'NativeMessagingHosts/com.openai.codexextension.json'
+
+    def original_installer(self, command, **_options):
+        """The upstream installer: writes every browser's manifest at the private copy's own host."""
+        self.calls += 1
+        plugin = next(d for d in (self.support / 'lcu/browser').iterdir() if d.is_dir()) / 'chrome'
+        for path in (self.chrome, self.edge):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'name': 'com.openai.codexextension',
+                                        'path': str(plugin / 'extension-host/macos/arm64/ChatGPT for Chrome')}))
+        return subprocess.CompletedProcess(command, 1 if self.fail else 0, stdout='', stderr=self.fail or '')
+
+    def test_nothing_is_installed_or_changed_when_the_connector_was_never_set_up(self):
+        self.assertEqual(refresh(self.root)[0], 'absent')
+        self.assertEqual(self.calls, 0)
+        self.assertFalse((self.support / 'lcu').exists())
+        self.assertFalse(self.chrome.exists())
+
+    def test_windows_never_set_up_does_not_resolve_the_app(self):
+        local = Path(self.temporary.name) / 'win-empty/AppData/Local'
+        with mock.patch('lcu.browser.platform.system', return_value='Windows'), \
+                mock.patch.dict(os.environ, {'USERPROFILE': str(local.parents[1]), 'LOCALAPPDATA': str(local)}), \
+                mock.patch('lcu.runtime.paths', side_effect=AssertionError('resolved the app')):
+            self.assertEqual(refresh(self.root), ('absent', None))
+        self.assertFalse(local.exists())
+
+    def test_installed_relay_is_refreshed_and_reports_a_change_once(self):
+        destination = install(self.root)
+        self.calls = 0
+        self.assertEqual(refresh(self.root), ('unchanged', destination))
+        self.relay_source.write_text('#!/usr/bin/env python3\n# v2\n')
+        (destination / 'lcu-native-host').write_text('#!/bin/sh\n# an older wrapper\n')
+        self.assertEqual(refresh(self.root), ('changed', destination))
+        self.assertEqual((destination / 'lcu-native-host.py').read_bytes(), self.relay_source.read_bytes())
+        self.assertIn('exec "$python" -B -u "$script"', (destination / 'lcu-native-host').read_text())
+        self.assertEqual(json.loads(self.chrome.read_text())['path'], str(destination / 'lcu-native-host'))
+        self.assertEqual(refresh(self.root)[0], 'unchanged')
+        self.assertEqual(self.calls, 3)
+
+    def test_a_manifest_that_points_elsewhere_is_reported_and_left_alone(self):
+        destination = install(self.root)
+        self.calls = 0
+        taken = json.dumps({'name': 'com.openai.codexextension', 'path': '/Applications/ChatGPT.app/host'})
+        self.chrome.write_text(taken)
+        self.edge.unlink()
+        self.assertEqual(refresh(self.root), ('elsewhere', destination))
+        self.assertEqual(self.chrome.read_text(), taken)
+        self.assertEqual(self.calls, 0)
+
+    def test_removed_manifests_are_not_recreated(self):
+        install(self.root)
+        self.calls = 0
+        self.chrome.unlink()
+        self.edge.unlink()
+        self.assertEqual(refresh(self.root)[0], 'absent')
+        self.assertFalse(self.chrome.exists())
+        self.assertEqual(self.calls, 0)
+
+    def test_only_manifests_that_already_pointed_at_the_relay_are_touched(self):
+        install(self.root)
+        taken = json.dumps({'name': 'com.openai.codexextension', 'path': '/Applications/ChatGPT.app/host'})
+        self.edge.write_text(taken)
+        brave = self.manifest('BraveSoftware/Brave-Browser')
+        self.assertEqual(refresh(self.root)[0], 'unchanged')
+        self.assertEqual(self.edge.read_text(), taken)  # the installer rewrote it; refresh put it back
+        self.assertFalse(brave.exists())
+
+    def test_installer_failure_raises_and_restores_other_owners_manifests(self):
+        install(self.root)
+        taken = json.dumps({'name': 'com.openai.codexextension', 'path': '/Applications/ChatGPT.app/host'})
+        self.edge.write_text(taken)
+        self.fail = 'node crashed'  # after it wrote the manifests
+        with self.assertRaisesRegex(ValueError, 'installer failed'):
+            refresh(self.root)
+        self.assertEqual(self.edge.read_text(), taken)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX effective user ids')
+    def test_root_leaves_the_account_alone(self):
+        destination = install(self.root)
+        self.calls = 0
+        with mock.patch('lcu.browser.os.geteuid', return_value=0):
+            self.assertEqual(refresh(self.root), ('root', destination))
+        self.assertEqual(self.calls, 0)
+
+    def test_windows_relay_is_found_by_its_generation_path_and_refreshed(self):
+        base = Path(self.temporary.name).resolve() / 'win'
+        root, app = base / 'release', base / 'apps/generation/app'
+        resources = app / 'resources'
+        plugin = resources / 'plugins/openai-bundled/plugins/chrome'
+        (plugin / 'scripts').mkdir(parents=True)
+        (plugin / 'scripts/installManifest.mjs').write_text('fixture')
+        (plugin / 'extension-host/windows/x64').mkdir(parents=True)
+        (plugin / 'extension-host/windows/x64/extension-host.exe').write_text('fixture')
+        (root / 'lcu').mkdir(parents=True)
+        (root / 'lcu/native_host.py').write_text('# v1\n')
+        home = base / 'account'
+        local = home / 'AppData/Local'
+        manifest = local / 'OpenAI/extension/com.openai.codexextension.json'
+        env = {'USERPROFILE': str(home), 'LOCALAPPDATA': str(local), 'NODE_REPL_NODE_PATH': 'C:/node.exe',
+               'CODEX_CLI_PATH': 'C:/codex.exe', 'CUA_REPL_NODE_REPL_PATH': 'C:/node_repl.exe'}
+
+        def installer(command, **_options):
+            if command[0] == 'reg.exe':
+                return subprocess.CompletedProcess(command, 0, stdout=f'{manifest} REG_SZ {manifest}')
+            private = next(d for d in (local / 'lcu/browser').iterdir() if d.is_dir()) / 'chrome'
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text(json.dumps({'name': 'com.openai.codexextension',
+                                            'path': str(private / 'extension-host/windows/x64/extension-host.exe')}))
+            return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+
+        with mock.patch('lcu.browser.platform.system', return_value='Windows'), \
+                mock.patch.dict(os.environ, {'USERPROFILE': str(home), 'LOCALAPPDATA': str(local)}), \
+                mock.patch('lcu.runtime.paths', return_value=(app, resources, None, {})), \
+                mock.patch('lcu.runtime.environment', return_value=env), \
+                mock.patch('lcu.browser.subprocess.run', side_effect=installer), \
+                mock.patch('lcu.browser.sys.executable', 'C:\\Python313\\python.exe'):
+            self.assertEqual(refresh(root)[0], 'absent')
+            destination = install(root)
+            self.assertEqual(refresh(root), ('unchanged', destination))
+            (root / 'lcu/native_host.py').write_text('# v2\n')
+            self.assertEqual(refresh(root), ('changed', destination))
+            self.assertEqual((destination / 'lcu-native-host.py').read_text(), '# v2\n')
+            self.assertEqual(json.loads(manifest.read_text())['path'], str(destination / 'lcu-native-host.cmd'))
+            manifest.write_text(json.dumps({'path': 'C:\\ChatGPT\\extension-host.exe'}))
+            self.assertEqual(refresh(root), ('elsewhere', destination))
 
 
 class RelaySourceCompatibilityTests(unittest.TestCase):

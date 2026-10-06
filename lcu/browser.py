@@ -147,14 +147,8 @@ def _refresh_plugin(source, destination):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def install(root, directory=None):
-    from .runtime import environment, paths
-
-    system = platform.system()
-    if system not in ('Linux', 'Darwin', 'Windows'):
-        raise ValueError('The original Chrome native host is supported on Linux, macOS, and Windows only.')
-    # The upstream installer writes its host configuration beside the executable.
-    # Keep the sealed release immutable; give this account a private host copy.
+def _data_root(system):
+    """Where this account keeps LCU's private browser host copies."""
     home = (Path(os.environ.get('USERPROFILE', Path.home())) if system == 'Windows'
             else Path(os.environ.get('HOME', Path.home())))
     if system == 'Darwin':
@@ -163,9 +157,26 @@ def install(root, directory=None):
         data = Path(os.environ.get('LOCALAPPDATA', home / 'AppData/Local'))
     else:
         data = Path(os.environ.get('XDG_DATA_HOME', home / '.local/share'))
+    return data / 'lcu/browser'
+
+
+def _host_location(root, directory=None):
+    """(system, destination, selected_app) of the private host copy `lcu browser install` keeps for `root`."""
+    from .runtime import paths
+
+    system = platform.system()
+    if system not in ('Linux', 'Darwin', 'Windows'):
+        raise ValueError('The original Chrome native host is supported on Linux, macOS, and Windows only.')
+    # The upstream installer writes its host configuration beside the executable.
+    # Keep the sealed release immutable; give this account a private host copy.
     selected_app = paths(root)[0] if system == 'Windows' else (root / 'app').resolve()
     identity = hashlib.sha256(str(selected_app).encode()).hexdigest()[:16]
-    destination = Path(directory).expanduser().absolute() if directory else data / 'lcu/browser' / identity
+    destination = Path(directory).expanduser().absolute() if directory else _data_root(system) / identity
+    return system, destination, selected_app
+
+
+def install(root, directory=None):
+    system, destination, selected_app = _host_location(root, directory)
     with _destination_lock(destination):
         return _install_locked(root, system, destination, selected_app)
 
@@ -337,6 +348,93 @@ def _install_locked(root, system, destination, selected_app):
         if registered.returncode or str(next(iter(manifest_paths))) not in registered.stdout:
             raise ValueError('The original Chrome installer did not register the selected manifest for this account.')
     return destination
+
+
+def _points_here(manifest_path, destination):
+    """True when the host manifest at `manifest_path` names a launcher inside `destination`."""
+    try:
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            return False
+        target = Path(json.loads(manifest_path.read_text()).get('path', ''))
+        return target.parent.resolve() == destination.resolve()
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _read_or_none(path):
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore(path, saved):
+    """Put back what `path` held before (nothing, when `saved` is None); other owners' entries stay theirs."""
+    if path.is_symlink() or _read_or_none(path) == saved:
+        return
+    if saved is None:
+        path.unlink(missing_ok=True)
+        return
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.lcu-manifest-', delete=False) as staged:
+        staged_path = Path(staged.name)
+        staged.write(saved)
+    try:
+        staged_path.chmod(0o644)
+        staged_path.replace(path)
+    finally:
+        staged_path.unlink(missing_ok=True)
+
+
+def _relay_snapshot(destination, system, manifest_paths):
+    """The bytes Chrome and the extension depend on, to tell whether a refresh changed anything."""
+    launcher = 'lcu-native-host.cmd' if system == 'Windows' else 'lcu-native-host'
+    files = [destination / launcher, destination / 'lcu-native-host.py', destination / _PLUGIN_DIGEST,
+             *sorted(manifest_paths)]
+    return [(str(path), _read_or_none(path)) for path in files]
+
+
+def refresh(root):
+    """Refresh the relay a previous `lcu browser install` made for this installation; never enables Chrome.
+
+    Returns (status, destination or None) where status is
+      'absent'     no relay was installed for this installation, or its manifests were removed (nothing is touched),
+      'elsewhere'  one is, but no native-host manifest points at it any more (nothing is touched),
+      'unchanged'  reinstalled; every relay file and manifest came out byte for byte the same,
+      'changed'    reinstalled; the relay or its manifest differs, so Chrome must reconnect,
+      'root'       one is installed but this process runs as root (nothing is touched).
+    Errors propagate. The existing `install` path does the work, so the result is what
+    `lcu browser install` would leave.
+    """
+    system = platform.system()
+    if system not in ('Linux', 'Darwin', 'Windows') or not _data_root(system).is_dir():
+        return 'absent', None  # never set up: do not even resolve the app
+    system, destination, selected_app = _host_location(root)
+    marker = destination / '.lcu-browser-host'
+    if (destination.is_symlink() or not destination.is_dir() or marker.is_symlink() or not marker.is_file()
+            or marker.read_text() != str(selected_app) + '\n'):
+        return 'absent', destination
+    manifests = _manifest_paths(os.environ, system)
+    ours = sorted(path for path in manifests if _points_here(path, destination))
+    if not ours:
+        if not any(path.is_file() for path in manifests):
+            return 'absent', destination  # the connector was removed; nothing to refresh or report
+        # The ChatGPT app (or the user) took the manifest back. Re-pointing it is what the explicit
+        # `lcu browser install` is for; an update must not take the connector from another owner.
+        return 'elsewhere', destination
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        # `sudo lcu update` must not write root-owned files into the desktop account's browser setup.
+        return 'root', destination
+    # The original installer writes every browser's manifest. Only those already pointing at this relay are ours.
+    others = {path: _read_or_none(path) for path in manifests if path not in ours}
+    with _destination_lock(destination):
+        before = _relay_snapshot(destination, system, ours)
+        try:
+            _install_locked(root, system, destination, selected_app)
+        finally:
+            for path, saved in others.items():
+                _restore(path, saved)
+        after = _relay_snapshot(destination, system, ours)
+    return ('unchanged' if before == after else 'changed'), destination
 
 
 def status(root, family='chrome'):
