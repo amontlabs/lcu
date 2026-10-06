@@ -373,6 +373,9 @@ function originApproval(params, allowedOrigins) {
   return allowedOrigins.has(origin);
 }
 
+/** Code of the error `turnEnded` throws when the original host gave up waiting for cleanup. */
+export const TURN_CLEANUP_TIMEOUT_CODE = 'LCU_TURN_CLEANUP_TIMEOUT';
+
 /** Transport and lifecycle bridge only. The installed original server owns CUA behavior. */
 export function createCuaClient({
   command, cwd, env, onElicitation, allowedOrigins = [], adapter = 'client', log = openDiagnosticLog({ adapter }),
@@ -527,6 +530,15 @@ export function createCuaClient({
       log.event('turn_end', { hook_event: event, ms: Date.now() - started, outcome: result.isError ? 'error' : 'ok' });
       if (result.isError) {
         const detail = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+        if (/turn-ended handlers timed out/i.test(detail)) {
+          // The original host stops waiting after about 5 s; the cleanup keeps
+          // running in the worker and is retried before the next action.
+          const where = log.path ? ` See the diagnostic log at ${log.path}.` : '';
+          const timeout = new Error('Original CUA turn cleanup did not finish within the host\'s wait; it may still be ' +
+            `finishing in the background and will be retried before the next action.${where}`);
+          timeout.code = TURN_CLEANUP_TIMEOUT_CODE;
+          throw timeout;
+        }
         throw new Error(`Original CUA turn cleanup failed: ${detail || 'unknown error'}`);
       }
       return result;

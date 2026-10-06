@@ -21,6 +21,10 @@ class TTYInput(io.StringIO):
 
 class DoctorTests(unittest.TestCase):
     def setUp(self):
+        # These tests are about permissions guidance, not the account's home folder length.
+        patcher = patch('lcu.platforms.mac_socket_path_problem', return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         base = Path(temporary.name)

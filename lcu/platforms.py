@@ -33,6 +33,42 @@ MAC_EXECUTABLES = (
 )
 
 
+# The signed helper binds its socket here (or at the path in this variable) and
+# refuses a path longer than the AF_UNIX sun_path limit. LCU cannot change that
+# in the helper; it can only detect it.
+MAC_SOCKET_ENV = 'SKY_CUA_SERVICE_NATIVE_PIPE_PATH'
+MAC_SOCKET_SUFFIX = f'Library/Group Containers/{OPENAI_TEAM_ID}.{MAC_HELPER_ID}/IPC/computeruse.sock'
+MAC_SOCKET_MAX_BYTES = 103
+
+
+def mac_socket_path(environ=None) -> tuple[str, bool]:
+    """The socket path LCU checks for the signed Mac helper, and whether the env override set it.
+
+    SKY_CUA_SERVICE_NATIVE_PIPE_PATH in the given environment wins when set (the helper's own
+    environment is not visible to LCU); otherwise the path is
+    under the account's real home folder, not $HOME.
+    """
+    override = (os.environ if environ is None else environ).get(MAC_SOCKET_ENV)
+    if override:
+        return override, True
+    import pwd
+    return os.path.join(pwd.getpwuid(os.getuid()).pw_dir, MAC_SOCKET_SUFFIX), False
+
+
+def mac_socket_path_problem(environ=None) -> str | None:
+    """A message when the helper's socket path is too long to bind, else None."""
+    path, overridden = mac_socket_path(environ)
+    size = len(os.fsencode(path))
+    if size <= MAC_SOCKET_MAX_BYTES:
+        return None
+    source = (f'The path comes from {MAC_SOCKET_ENV}.' if overridden else
+              'The path comes from your home folder, so the ChatGPT app is affected too.')
+    return (f"Computer Use cannot start for this macOS account: the ChatGPT helper's socket path is "
+            f'{size} bytes (macOS limit {MAC_SOCKET_MAX_BYTES}): {path}. {source} '
+            'LCU cannot change the signed helper. Use an account whose home folder path is short enough '
+            '(13 ASCII characters or fewer after /Users/).')
+
+
 @dataclass(frozen=True)
 class InstalledApplication:
     app: Path

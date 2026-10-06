@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -250,7 +251,8 @@ def cli_setup_contract(release):
             assert copied.is_file() and os.access(destination, os.W_OK)
             assert not copied.samefile(installer), 'installer must run from a private copy, never the immutable app'
             relay = destination / 'lcu-native-host'
-            assert relay.read_bytes() == (root / 'lcu/native_host.py').read_bytes()
+            assert (destination / 'lcu-native-host.py').read_bytes() == (root / 'lcu/native_host.py').read_bytes()
+            assert relay.read_text().startswith('#!/bin/sh\n') and shlex.quote(sys.executable) in relay.read_text()
             assert os.access(relay, os.X_OK)
             configured = json.loads(manifest.read_text())
             assert configured['path'] == str(relay)
