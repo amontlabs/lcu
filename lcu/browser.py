@@ -378,8 +378,14 @@ def status(root, family='chrome'):
                             'Windows': ('windows', 'extension-host.exe')}[platform.system()]
             host = directory / 'chrome/extension-host' / system / arch / name
             relay_name = 'lcu-native-host.cmd' if system == 'windows' else 'lcu-native-host'
-            source_matches = ((directory / 'lcu-native-host.py').read_bytes() ==
-                              (root / 'lcu/native_host.py').read_bytes())
+            script = directory / 'lcu-native-host.py'
+            source_matches = script.read_bytes() == (root / 'lcu/native_host.py').read_bytes()
+            if system != 'windows':
+                # The launcher Chrome runs must be ours and must point at this script.
+                wrapper = relay.read_text()
+                source_matches = (source_matches and wrapper.startswith('#!/bin/sh\n')
+                                  and f'\nscript={shlex.quote(str(script))}\n' in wrapper
+                                  and wrapper.endswith('\nexec "$python" -B -u "$script" "$@"\n'))
             connected_host = (
                 relay.name == relay_name and relay.is_file() and os.access(relay, os.X_OK)
                 and source_matches

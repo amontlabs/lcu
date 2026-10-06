@@ -401,9 +401,9 @@ class BrowserStatusTests(unittest.TestCase):
         (self.host_dir / '.lcu-browser-plugin').write_text(_plugin_digest(
             resources / 'plugins/openai-bundled/plugins/chrome') + '\n')
         self.relay = self.host_dir / 'lcu-native-host'
-        self.relay.write_text('#!/bin/sh\nexec true\n')
-        self.relay.chmod(0o700)
         self.script = self.host_dir / 'lcu-native-host.py'
+        self.relay.write_text(_posix_wrapper(sys.executable, self.script))
+        self.relay.chmod(0o700)
         self.script.write_text('fixture relay')
         source = self.root / 'lcu/native_host.py'
         source.parent.mkdir()
@@ -486,6 +486,16 @@ class BrowserStatusTests(unittest.TestCase):
         self.script.unlink()
         self.assertFalse(self.run_status())
         self.assertIn('missing or outdated', self.output.getvalue())
+
+    def test_wrapper_that_is_not_ours_or_targets_another_script_requires_refresh(self):
+        for text in ('#!/bin/sh\nexit 0\n', '#!/usr/bin/env python3\nprint(1)\n',
+                     _posix_wrapper(sys.executable, self.host_dir / 'elsewhere.py')):
+            with self.subTest(text=text[:40]):
+                self.relay.write_text(text)
+                self.output.seek(0)
+                self.output.truncate()
+                self.assertFalse(self.run_status())
+                self.assertIn('missing or outdated', self.output.getvalue())
 
     def test_missing_wrapper_requires_refresh(self):
         self.relay.unlink()
