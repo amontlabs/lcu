@@ -330,7 +330,7 @@ See the [verification record](verification/apps-command-2026-10-04.md).
 
 ## Chrome site decisions
 
-When Chrome mode asks `Allow Browser use to access <origin>?`, the original runtime saves your answer for that agent session in `$CODEX_HOME/browser/sessions/<session-id>.toml` (`~/.codex/browser/sessions/` unless `CODEX_HOME` is set) as `[origins]` `allowed` and `denied` lists, and checks it before asking again. The file format is the original runtime's private storage and can change between releases.
+When Chrome mode asks `Allow Browser use to access <origin>?`, the original runtime saves your answer for that agent session in `$CODEX_HOME/browser/sessions/<session-id>.toml` (`~/.codex/browser/sessions/` unless `CODEX_HOME` is set) as `[origins]` `allowed` and `denied` lists, and checks it before asking again. The file format is the original runtime's private storage and can change between releases; the [source record](verification/origin-decisions-2026-10-06.md) lists what was checked.
 
 - A site you declined is refused for the rest of that session ("A saved user permission setting blocks this action") without a new prompt.
 - The scope is one session. A new session asks again, so Deny is not a lasting block. Subagents have their own session, and their decisions are separate.
@@ -344,9 +344,9 @@ When Chrome mode asks `Allow Browser use to access <origin>?`, the original runt
 ~~~
 
 - `lcu origins [list] [--session ID] [--json]` prints each session's `allowed` and `denied` origins. `--json` prints `{"codexHome", "sessions": [{"session", "file", "allowed", "denied"}], "problems": [...]}`.
-- `lcu origins forget <origin>` removes a saved decision so the next request for that site asks again. It never allows a site; only the original prompt can. By default it removes the origin from the `denied` list of every saved session. `--session ID` limits it to one session, `--allowed` removes it from the `allowed` list instead (`--allowed --denied` both), and `--all-sessions` states the default. `<origin>` is `scheme://host[:port]`; case and a default port are normalized.
+- `lcu origins forget <origin>` removes a saved decision so the next request for that site asks again. It never allows a site; only the original prompt can. By default it removes the origin from the `denied` list of every saved session. `--session ID` limits it to one session, `--allowed` removes it from the `allowed` list instead (`--allowed --denied` both), and `--all-sessions` states the default. `<origin>` is `scheme://host[:port]`; case, a default port and IPv6 notation are normalized. Pass an internationalized host in its `xn--` form, as the browser reports it.
 - After a change, restart the agent or wait up to 5 minutes; then the next request for the site prompts again.
-- It edits only simple session files (tables of strings, booleans, integers and string lists), replaces them atomically and keeps their other keys and origins. A file with comments, nested tables, other value types or invalid TOML is reported and left untouched; a symbolic link is refused. It never writes `browser/config.toml` or the `browser_use` settings in `config.toml`.
+- It edits only simple session files (tables of strings, booleans, integers and string lists), replaces them atomically and keeps their other keys and origins. The runtime shares no lock with LCU, so `forget` re-reads the file before and after the replace and reports a write that landed in between; run it again if it does. A file with comments, nested tables, other value types or invalid TOML is reported and left untouched; a symbolic link is refused. It never writes `browser/config.toml` or the `browser_use` settings in `config.toml`.
 
 Two other places can also block or allow a site, and `lcu origins` does not read or change them: `$CODEX_HOME/browser/config.toml` holds approvals the runtime saves globally when a request is answered with an "always" choice, and `browser_use.origins."<origin>".access = "deny"` in `$CODEX_HOME/config.toml` is the per-site setting that blocks a site in every session. Use that setting, not Deny, when a site should stay blocked.
 
