@@ -346,6 +346,13 @@ class UpdateTest(unittest.TestCase):
             self.assertEqual(update.main(self.root, ['--notice', '--hook', event]), 0)
         return json.loads(out.getvalue())['hookSpecificOutput'] if out.getvalue() else None
 
+    def announced(self, data=None):
+        path = update.cache_path().with_name('announced.json')
+        if data is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data))
+        return json.loads(path.read_text())
+
     def test_hook_announces_once_per_session_and_version(self):
         self.cache()
         first = self.hook('SessionStart')
@@ -353,11 +360,91 @@ class UpdateTest(unittest.TestCase):
         self.assertTrue(first['additionalContext'].startswith('LCU 0.9.2 is available'))
         self.assertIsNone(self.hook('SessionStart'))
         self.assertIsNone(self.hook('UserPromptSubmit'))
-        other = self.hook('UserPromptSubmit', '{"session_id": "s2"}')
-        self.assertEqual(other['hookEventName'], 'UserPromptSubmit')
+        # Another session within the cooldown is told nothing about the same release.
+        self.assertIsNone(self.hook('UserPromptSubmit', '{"session_id": "s2"}'))
+        # A newer release is announced at once, to the session that asks, then cooled down too.
         self.cache({**INFO, 'version': '0.9.3', 'tag': 'v0.9.3'})
         self.assertIn('0.9.3', self.hook('UserPromptSubmit')['additionalContext'])
         self.assertIsNone(self.hook('SessionStart'))
+        self.assertIsNone(self.hook('SessionStart', '{"session_id": "s2"}'))
+
+    def test_announce_cooldown_is_account_wide_and_per_release(self):
+        day = update.ANNOUNCE_COOLDOWN
+        self.assertEqual(day, 24 * 3600)
+        t = 1_000_000_000
+        self.assertTrue(update.announce('a', '0.9.2', t))
+        self.assertFalse(update.announce('a', '0.9.2', t + 1))
+        self.assertFalse(update.announce('b', '0.9.2', t + 3600))
+        self.assertFalse(update.announce('c', '0.9.2', t + day - 1))
+        self.assertFalse(update.announce(None, '0.9.2', t + day - 1))
+        # After the cooldown the next session (or prompt of one not told yet) is told, once.
+        self.assertTrue(update.announce('b', '0.9.2', t + day))
+        self.assertFalse(update.announce('c', '0.9.2', t + day + 1))
+        self.assertFalse(update.announce('b', '0.9.2', t + day + 1))
+        # A session is never told twice about the same release, even after the cooldown.
+        self.assertFalse(update.announce('a', '0.9.2', t + 3 * day))
+        # A newer release bypasses the cooldown, then has its own.
+        self.assertTrue(update.announce('c', '0.9.3', t + day + 2))
+        self.assertFalse(update.announce('d', '0.9.3', t + day + 3))
+        self.assertTrue(update.announce('a', '0.9.3', t + 2 * day + 2))
+        data = self.announced()
+        self.assertEqual(data[update.ANNOUNCE_ACCOUNT], {'version': '0.9.3', 'at': t + 2 * day + 2})
+        self.assertEqual(data['b'], {'version': '0.9.2', 'at': t + day})
+        self.assertNotIn('d', data)
+
+    def test_announce_without_a_session_follows_the_cooldown(self):
+        t = 1_000_000_000
+        self.assertTrue(update.announce(None, '0.9.2', t))
+        self.assertFalse(update.announce(None, '0.9.2', t + 60))
+        self.assertFalse(update.announce('s', '0.9.2', t + 60))
+        self.assertTrue(update.announce(None, '0.9.2', t + update.ANNOUNCE_COOLDOWN))
+        self.assertEqual(set(self.announced()), {update.ANNOUNCE_ACCOUNT})
+
+    def test_security_notices_follow_the_cooldown_but_status_shows_them(self):
+        self.cache({**INFO, 'severity': 'security'})
+        self.assertIsNotNone(self.hook('SessionStart'))
+        self.assertIsNone(self.hook('SessionStart', '{"session_id": "s2"}'))
+        self.assertIn('0.9.2', update.status_line(self.root))
+        with mock.patch.object(update.subprocess, 'Popen'):
+            self.assertEqual(json.loads(self.run_main('--notice', '--json')[1])['severity'], 'security')
+
+    def test_cooldown_expiry_through_the_hook(self):
+        self.cache()
+        self.assertIsNotNone(self.hook('SessionStart'))
+        self.assertIsNone(self.hook('SessionStart', '{"session_id": "s2"}'))
+        later = time.time() + update.ANNOUNCE_COOLDOWN + 1
+        self.cache(age=-update.ANNOUNCE_COOLDOWN - 1)  # keep the cache fresh at the later time
+        with mock.patch.object(update.time, 'time', return_value=later):
+            self.assertIsNotNone(self.hook('UserPromptSubmit', '{"session_id": "s2"}'))
+            self.assertIsNone(self.hook('UserPromptSubmit', '{"session_id": "s3"}'))
+            self.assertIsNone(self.hook('UserPromptSubmit', '{"session_id": "s2"}'))
+            self.assertIsNone(self.hook('UserPromptSubmit'))
+
+    def test_legacy_per_session_file_still_loads(self):
+        self.cache()
+        now = time.time()
+        self.announced({'s1': {'version': '0.9.2', 'at': now - 3600}, 's2': {'version': '0.9.1', 'at': now - 7200}})
+        self.assertIsNone(self.hook('UserPromptSubmit'))
+        # No account-wide record yet: the first other session is told, and starts the cooldown.
+        self.assertIsNotNone(self.hook('UserPromptSubmit', '{"session_id": "s2"}'))
+        self.assertIsNone(self.hook('UserPromptSubmit', '{"session_id": "s3"}'))
+        data = self.announced()
+        self.assertEqual(set(data), {'s1', 's2', update.ANNOUNCE_ACCOUNT})
+        self.assertEqual(data['s1']['at'], now - 3600)
+
+    def test_notice_json_announce_for_agent_integrations(self):
+        self.cache()
+        with mock.patch.object(update.subprocess, 'Popen'):
+            status, out = self.run_main('--notice', '--json', '--announce=s1')
+            self.assertEqual(json.loads(out)['latest'], '0.9.2')
+            self.assertEqual(self.run_main('--notice', '--json', '--announce=s1'), (0, '{}\n'))
+            self.assertEqual(self.run_main('--notice', '--json', '--announce=s2'), (0, '{}\n'))
+            self.assertEqual(self.run_main('--notice', '--json', '--announce'), (0, '{}\n'))
+            self.assertEqual(self.run_main('--notice', '--announce', 's3'), (0, ''))
+            # Without --announce (a person, status-like use) the cached notice is printed unconditionally.
+            self.assertEqual(json.loads(self.run_main('--notice', '--json')[1])['latest'], '0.9.2')
+            self.assertTrue(self.run_main('--notice')[1].startswith('LCU 0.9.2 is available'))
+            self.assertIn('0.9.2', update.status_line(self.root))
 
     def test_hook_without_notice_is_silent(self):
         self.cache({**INFO, 'version': '0.9.1'})
@@ -366,22 +453,28 @@ class UpdateTest(unittest.TestCase):
 
     def test_hook_missing_or_garbage_session_id(self):
         self.cache()
+        path = update.cache_path().with_name('announced.json')
         for stdin in ('', 'garbage{', '[]', '{"session_id": 5}', '{}'):
+            path.unlink(missing_ok=True)
+            # Without a session id SessionStart is still announced, under the account-wide cooldown only.
             self.assertIsNotNone(self.hook('SessionStart', stdin))
+            self.assertIsNone(self.hook('SessionStart', stdin))
             self.assertIsNone(self.hook('UserPromptSubmit', stdin))
-        self.assertFalse(update.cache_path().with_name('announced.json').exists())
+            self.assertEqual(set(json.loads(path.read_text())), {update.ANNOUNCE_ACCOUNT})
 
     def test_hook_prunes_old_announcements(self):
         self.cache()
         path = update.cache_path().with_name('announced.json')
         now = time.time()
         path.write_text(json.dumps({'old': {'version': '0.9.2', 'at': now - 8 * 86400},
-                                    'recent': {'version': '0.9.2', 'at': now - 86400}, 'bad': 3}))
+                                    'recent': {'version': '0.9.2', 'at': now - 86400}, 'bad': 3,
+                                    update.ANNOUNCE_ACCOUNT: {'version': '0.9.2', 'at': now - 2 * 86400}}))
         self.assertIsNone(self.hook('UserPromptSubmit', '{"session_id": "recent"}'))
         self.assertIsNotNone(self.hook('UserPromptSubmit', '{"session_id": "old"}'))
         data = json.loads(path.read_text())
-        self.assertEqual(set(data), {'old', 'recent'})
+        self.assertEqual(set(data), {'old', 'recent', update.ANNOUNCE_ACCOUNT})
         self.assertGreater(data['old']['at'], now - 5)
+        self.assertGreater(data[update.ANNOUNCE_ACCOUNT]['at'], now - 5)
         path.write_text('{broken')
         self.assertIsNotNone(self.hook('UserPromptSubmit'))
 

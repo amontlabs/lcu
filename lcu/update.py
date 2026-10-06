@@ -21,6 +21,8 @@ INTERVAL = 600
 RETRY = 3600
 STAMP_TTL = 120
 ANNOUNCE_TTL = 7 * 24 * 3600
+ANNOUNCE_COOLDOWN = 24 * 3600
+ANNOUNCE_ACCOUNT = '*'
 TIMEOUT = 5
 SEVERITIES = ('security', 'breaking')
 
@@ -255,10 +257,15 @@ def hook_session_id():
 
 
 def announce(session_id, version, now=None):
-    """True when this session should be told about `version`; records it. Never raises."""
+    """True when an agent session should be told about `version` now; records it. Never raises.
+
+    A release is announced at most once per ANNOUNCE_COOLDOWN across every session on the account (the `*`
+    entry of `announced.json`, beside the per-session entries), whatever its severity; a session is never told
+    twice about the same release, and a different release is announced at once. A session that was not told
+    during the cooldown may be told at its next prompt after it. Without a session id only the account-wide
+    cooldown applies.
+    """
     try:
-        if not session_id:
-            return True
         now = time.time() if now is None else now
         path = cache_path().with_name('announced.json')
         try:
@@ -268,9 +275,14 @@ def announce(session_id, version, now=None):
             data = {}
         data = {k: v for k, v in data.items() if isinstance(v, dict) and isinstance(v.get('at'), (int, float))
                 and 0 <= now - v['at'] < ANNOUNCE_TTL}
-        if data.get(session_id, {}).get('version') == version:
+        if session_id and data.get(session_id, {}).get('version') == version:
             return False
-        data[session_id] = {'version': version, 'at': now}
+        last = data.get(ANNOUNCE_ACCOUNT, {})
+        if last.get('version') == version and now - last['at'] < ANNOUNCE_COOLDOWN:
+            return False
+        data[ANNOUNCE_ACCOUNT] = {'version': version, 'at': now}
+        if session_id:
+            data[session_id] = {'version': version, 'at': now}
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(dir=path.parent, prefix='.announced-')
@@ -381,6 +393,7 @@ def main(root, argv=None):
     mode.add_argument('--post-install', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--json', action='store_true', help='Print JSON (with --check or --notice)')
     parser.add_argument('--hook', choices=('SessionStart', 'UserPromptSubmit'), help=argparse.SUPPRESS)
+    parser.add_argument('--announce', nargs='?', const='', metavar='SESSION_ID', help=argparse.SUPPRESS)
     parser.add_argument('--yes', action='store_true', help='Do not ask before installing')
     args = parser.parse_args(argv)
     root = Path(root)
@@ -388,13 +401,17 @@ def main(root, argv=None):
         try:
             found = notice(root)
             if args.hook:
-                # A hook's documented way to add model context: once per session and release, else silent.
+                # A hook's documented way to add model context: once per session and release, and at most once
+                # a day per release across the account, else silent.
                 if found:
                     session = hook_session_id()
                     if (session or args.hook == 'SessionStart') and announce(session, found['latest']):
                         print(json.dumps({'hookSpecificOutput': {'hookEventName': args.hook,
                                                                  'additionalContext': found['message']}}))
             else:
+                if found and args.announce is not None and not announce(args.announce or None, found['latest']):
+                    # An agent integration (the Claude Code mod) under the same cooldown as the hooks.
+                    found = None
                 print(json.dumps(found or {}) if args.json else (found['message'] if found else ''),
                       end='\n' if args.json or found else '')
         except Exception:

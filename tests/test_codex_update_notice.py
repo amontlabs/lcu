@@ -1,15 +1,20 @@
 """LCU's SessionStart update-notice hook: separate from the original lifecycle hooks, trusted like them."""
+import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.codex_hooks import install_hooks, is_notice_group, notice_hook, original_hooks
+from lcu import update
+from lcu.codex_hooks import NOTICE_EVENTS, install_hooks, is_notice_group, notice_hook, original_hooks
 
 
 class NoticeHookTests(unittest.TestCase):
@@ -42,6 +47,62 @@ class NoticeHookTests(unittest.TestCase):
                       {'hooks': [{'type': 'mcp_tool', 'server': 'lcu', 'tool': 'turn_ended'}]},
                       {'hooks': []}):
             self.assertFalse(is_notice_group(other))
+
+
+class NoticeCooldownTests(unittest.TestCase):
+    """The hooks' own command lines, run as Codex runs them for several sessions on one account."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        home = Path(self.tmp.name).resolve() / 'home'
+        home.mkdir()
+        env = mock.patch.dict(os.environ, {'HOME': str(home), 'XDG_CACHE_HOME': str(home / 'xdg'),
+                                           'LOCALAPPDATA': str(home / 'local')})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop('LCU_NO_UPDATE_CHECK', None)
+        patcher = mock.patch('pathlib.Path.home', return_value=home)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.root = home / 'prefix/releases/r1'
+        self.root.mkdir(parents=True)
+        (self.root / 'bundle.json').write_text(json.dumps({'version': '0.9.1'}))
+        self.release('0.9.2')
+
+    def release(self, version, at=None):
+        path = update.cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        info = {'version': version, 'tag': f'v{version}', 'severity': 'normal',
+                'release_url': f'https://github.com/amontlabs/lcu/releases/tag/v{version}'}
+        path.write_text(json.dumps({'checked_at': time.time() if at is None else at, 'latest': info, 'error': None}))
+
+    def run_hook(self, event, session):
+        argv = shlex.split(notice_hook('/p/current/bin/lcu', event)['hooks'][0]['command'])[2:]  # drop 'lcu update'
+        out = io.StringIO()
+        with mock.patch('sys.stdin', io.StringIO(json.dumps({'session_id': session}))), \
+                mock.patch('sys.stdout', out), mock.patch.object(update.subprocess, 'Popen'):
+            self.assertEqual(update.main(self.root, argv), 0)
+        return json.loads(out.getvalue())['hookSpecificOutput']['additionalContext'] if out.getvalue() else None
+
+    def test_a_release_is_announced_once_a_day_across_codex_sessions(self):
+        self.assertIn('0.9.2', self.run_hook('SessionStart', 'a'))
+        for event in NOTICE_EVENTS:
+            self.assertIsNone(self.run_hook(event, 'a'))
+            self.assertIsNone(self.run_hook(event, 'b'))
+        later = time.time() + update.ANNOUNCE_COOLDOWN + 1
+        self.release('0.9.2', later)
+        with mock.patch.object(update.time, 'time', return_value=later):
+            self.assertIsNone(self.run_hook('UserPromptSubmit', 'a'))
+            self.assertIn('0.9.2', self.run_hook('UserPromptSubmit', 'b'))
+            self.assertIsNone(self.run_hook('SessionStart', 'c'))
+
+    def test_a_newer_release_is_announced_at_once(self):
+        self.assertIn('0.9.2', self.run_hook('SessionStart', 'a'))
+        self.assertIsNone(self.run_hook('SessionStart', 'b'))
+        self.release('0.9.3')
+        self.assertIn('0.9.3', self.run_hook('SessionStart', 'b'))
+        self.assertIsNone(self.run_hook('UserPromptSubmit', 'a'))
 
 
 @unittest.skipUnless(shutil.which('codex'), 'Codex CLI not installed')
