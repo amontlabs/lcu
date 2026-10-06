@@ -21,6 +21,7 @@ from lcu.macos_host import (SKY_SERVICE_NAME, bundle_replaced_at, diagnose_respo
 BUNDLE = '/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app'
 EXECUTABLE = f'{BUNDLE}/Contents/MacOS/{SKY_SERVICE_NAME}'
 PLIST = f'{BUNDLE}/Contents/Info.plist'
+SEAL = f'{BUNDLE}/Contents/_CodeSignature/CodeResources'
 
 
 def epoch(text):
@@ -66,13 +67,40 @@ class ProcessTableTests(unittest.TestCase):
 
 
 class BundleTimeTests(unittest.TestCase):
-    def test_uses_the_newest_inode_change_of_executable_and_plist(self):
-        stat = stat_with({EXECUTABLE: 100.0, PLIST: 250.0})
+    def test_uses_the_oldest_change_among_executable_plist_and_seal(self):
+        stat = stat_with({EXECUTABLE: 300.0, PLIST: 250.0, SEAL: 280.0})
         self.assertEqual(bundle_replaced_at(EXECUTABLE, stat), 250.0)
 
-    def test_executable_alone_is_enough_and_a_missing_executable_is_none(self):
+    def test_one_file_with_a_metadata_change_does_not_read_as_a_replacement(self):
+        # chmod or an extended attribute on the executable alone: the plist and seal keep their old ctime.
+        stat = stat_with({EXECUTABLE: 900.0, PLIST: 100.0, SEAL: 100.0})
+        self.assertEqual(bundle_replaced_at(EXECUTABLE, stat), 100.0)
+        run = ps(f'45404 Thu Jan  1 00:10:00 1970 {EXECUTABLE}')
+        self.assertEqual(diagnose_sky_services(run=run, stat=stat)['stale'], [])
+
+    def test_the_executable_alone_is_enough_and_a_missing_executable_is_none(self):
         self.assertEqual(bundle_replaced_at(EXECUTABLE, stat_with({EXECUTABLE: 100.0})), 100.0)
-        self.assertIsNone(bundle_replaced_at(EXECUTABLE, stat_with({PLIST: 250.0})))
+        self.assertIsNone(bundle_replaced_at(EXECUTABLE, stat_with({PLIST: 250.0, SEAL: 250.0})))
+        self.assertEqual(bundle_replaced_at('/' + SKY_SERVICE_NAME, stat_with({'/' + SKY_SERVICE_NAME: 5.0})), 5.0)
+
+
+class StartTimeTests(unittest.TestCase):
+    def test_start_time_is_read_as_utc_whatever_the_local_zone(self):
+        if not hasattr(time, 'tzset'):
+            self.skipTest('no tzset')
+        previous = os.environ.get('TZ')
+        self.addCleanup(lambda: (os.environ.__setitem__('TZ', previous) if previous is not None
+                                 else os.environ.pop('TZ', None), time.tzset()))
+        # 02:30 happens twice on 2026-10-25 in Paris; a UTC reading has no ambiguity.
+        for zone in ('Europe/Paris', 'America/New_York', 'UTC'):
+            os.environ['TZ'] = zone
+            time.tzset()
+            self.assertEqual(parse_process_start('Sun Oct 25 02:30:00 2026'.split()), 1792895400.0)
+
+    def test_ps_is_asked_for_utc_times(self):
+        run = ps()
+        diagnose_sky_services(run=run, stat=stat_with({}))
+        self.assertEqual(run.call_args.kwargs['env']['TZ'], 'UTC')
 
 
 class DiagnoseTests(unittest.TestCase):
@@ -150,8 +178,8 @@ class DiagnoseTests(unittest.TestCase):
             executable.parent.mkdir(parents=True)
             executable.write_text('service')
             changed = os.stat(executable).st_ctime
-            older = time.strftime('%a %b %e %H:%M:%S %Y', time.localtime(changed - 600))
-            newer = time.strftime('%a %b %e %H:%M:%S %Y', time.localtime(changed + 600))
+            older = time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(changed - 600))
+            newer = time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(changed + 600))
             self.assertEqual(diagnose_sky_services(run=ps(f'10 {older} {executable}'))['stale'], [10])
             self.assertEqual(diagnose_sky_services(run=ps(f'10 {newer} {executable}'))['stale'], [])
 

@@ -1,4 +1,5 @@
 """Supervise the original macOS client turn-ended command for one MCP process."""
+import calendar
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ _MONTHS = {name: number for number, name in enumerate(
 
 
 def parse_process_start(fields):
-    """Local epoch seconds from the five `ps lstart` fields, or None when malformed."""
+    """UTC epoch seconds from the five `ps lstart` fields, or None when malformed."""
     try:
         _, month, day, clock, year = fields
         hour, minute, second = (int(part) for part in clock.split(':'))
@@ -30,7 +31,8 @@ def parse_process_start(fields):
         if not (1 <= day <= 31 and 0 <= hour <= 23 and 0 <= minute <= 59 and
                 0 <= second <= 60 and 1970 <= year <= 9999):
             return None
-        return time.mktime((year, month, day, hour, minute, second, 0, 0, -1))
+        # `ps` is run with TZ=UTC, so there is no local-time ambiguity at DST changes.
+        return float(calendar.timegm((year, month, day, hour, minute, second, 0, 0, 0)))
     except (KeyError, ValueError, OverflowError):
         return None
 
@@ -58,23 +60,30 @@ def parse_process_table(text):
 
 
 def bundle_replaced_at(executable, stat=os.stat):
-    """When the service bundle on disk last changed, or None when it is gone.
+    """When the service bundle on disk was last replaced, or None when it is gone.
 
-    This is the newest inode change time (ctime) of the executable and the bundle
-    Info.plist. An in-place app update keeps the inodes and the build-time mtimes
-    (observed live: mtime days before the update, creation time months before it),
-    while ctime cannot be set by an updater and moves to the moment the files were
-    replaced. Starting the service does not change it.
+    This is the oldest inode change time (ctime) among the executable, the bundle
+    Info.plist and its code-signature seal. An app update replaces the whole bundle:
+    observed live, all 167 files had the update time as ctime while their mtimes
+    (build time) and creation times were days to months older, so neither of those
+    can detect it. Requiring all three to have changed keeps one metadata change
+    (chmod, an extended attribute) on a single file from reading as an update.
+    Starting the service does not change ctime.
     """
     try:
         times = [stat(executable).st_ctime]
     except OSError:
         return None
     try:
-        times.append(stat(Path(executable).parents[1] / 'Info.plist').st_ctime)
-    except (OSError, IndexError):
-        pass
-    return max(times)
+        contents = Path(executable).parents[1]
+    except IndexError:
+        return times[0]
+    for sibling in (contents / 'Info.plist', contents / '_CodeSignature' / 'CodeResources'):
+        try:
+            times.append(stat(sibling).st_ctime)
+        except OSError:
+            pass
+    return min(times)
 
 
 def stale_service_message(pids):
@@ -91,7 +100,7 @@ def diagnose_sky_services(*, run=subprocess.run, stat=os.stat):
     """List running Sky services and flag those older than their bundle. Kills nothing."""
     result = run(['ps', '-axo', 'pid=,lstart=,comm='], stdin=subprocess.DEVNULL,
                  capture_output=True, text=True, timeout=2, check=False,
-                 env={**os.environ, 'LC_ALL': 'C'})
+                 env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'})
     if result.returncode != 0:
         raise ValueError(f'ps exited with status {result.returncode}.')
     found, unparsed = parse_process_table(result.stdout)

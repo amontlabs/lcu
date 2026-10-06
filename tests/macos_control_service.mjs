@@ -58,6 +58,10 @@ await writeFile(clientPath, `export class MacComputerUseClient {
     if (requestType === 'ComputerUseIPCCodexTurnEndedRequest' && globalThis.turnEndedGate) {
       await globalThis.turnEndedGate;
     }
+    if (requestType === 'ComputerUseIPCCodexTurnEndedRequest' && globalThis.failTurnEndedCount > 0) {
+      globalThis.failTurnEndedCount--;
+      throw new Error(globalThis.failTurnEndedMessage);
+    }
     if (requestType === 'ComputerUseIPCCodexTurnEndedRequest' && globalThis.failTurnEndedOnce) {
       globalThis.failTurnEndedOnce = false;
       throw new Error('fixture native turn-ended failure');
@@ -152,6 +156,7 @@ try {
   globalThis.calls = calls;
   globalThis.policyCalls = policyCalls;
   globalThis.failTurnEndedOnce = false;
+  globalThis.failTurnEndedCount = 0;
   globalThis.originalRpcCount = 0;
   globalThis.nodeRepl = {
     env: {LCU_MAC_CONTROL_SOCKET: controlPath,
@@ -353,28 +358,6 @@ try {
     turnID: noControlMetadata.turn_id});
   assert.deepEqual(noControlEnded.metadata, noControlMetadata);
 
-  const boundaryTurns = [];
-  for (let index = 0; index < 127; index++) {
-    const context = {session_id: `bounded-session-${index}`,
-      turn_id: `bounded-turn-${index}`, call_id: `bounded-call-${index}`};
-    boundaryTurns.push(context);
-    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': context};
-    await handleRpc({type: 'execute', method: 'list_apps', args: []});
-  }
-  const rpcCountAtCapacity = globalThis.originalRpcCount;
-  const overflow = {session_id: 'bounded-overflow-session',
-    turn_id: 'bounded-overflow-turn', call_id: 'bounded-overflow-call'};
-  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': overflow};
-  await assert.rejects(handleRpc({type: 'execute', method: 'list_apps', args: []}),
-    /Too many active macOS turn metadata contexts/);
-  assert.equal(globalThis.originalRpcCount, rpcCountAtCapacity,
-    'a new Sky request must not dispatch if its cleanup metadata cannot be retained');
-  await turnEnded.run({session_id: boundaryTurns[0].session_id,
-    turn_id: boundaryTurns[0].turn_id});
-  await handleRpc({type: 'execute', method: 'list_apps', args: []});
-  assert.equal(globalThis.originalRpcCount, rpcCountAtCapacity + 1,
-    'a new Sky request should dispatch after turn cleanup frees a metadata slot');
-
   // A native-pipe startup failure names a stale Computer Use service when the
   // private host finds one, and is otherwise reported exactly as the original.
   globalThis.nodeRepl.requestMeta = {};
@@ -429,6 +412,51 @@ try {
   // A frozen error object cannot be extended, and is still thrown unchanged.
   diagnoseReply = JSON.stringify({ok: true, stale: [321], message: staleNote});
   assert.equal((await failure(startupFailure, {freeze: true})).message, startupFailure);
+
+  // Retried turn cleanup uses the same pipe and fails the same way: that error is
+  // explained too, and once even when two requests wait on the same retry.
+  const cleanupMetadata = {session_id: 'cleanup-session', turn_id: 'cleanup-turn', call_id: 'cleanup-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': cleanupMetadata};
+  assert.deepEqual(await handleRpc({type: 'execute', method: 'list_apps', args: []}), {ok: true});
+  diagnoseReply = JSON.stringify({ok: true, stale: [321], message: staleNote});
+  globalThis.failTurnEndedMessage = startupFailure;
+  globalThis.failTurnEndedCount = 2;
+  await assert.rejects(turnEnded.run({session_id: cleanupMetadata.session_id,
+    turn_id: cleanupMetadata.turn_id}), error => error.message === startupFailure);
+  const diagnosesBeforeRetry = diagnoseRequests.length;
+  globalThis.nodeRepl.requestMeta = {};
+  const retries = await Promise.allSettled([
+    handleRpc({type: 'execute', method: 'list_apps', args: []}),
+    handleRpc({type: 'execute', method: 'list_apps', args: []}),
+  ]);
+  assert.deepEqual(retries.map(retry => retry.status), ['rejected', 'rejected']);
+  assert.deepEqual(retries.map(retry => retry.reason.message),
+    [`${startupFailure} ${staleNote}`, `${startupFailure} ${staleNote}`]);
+  assert.equal(diagnoseRequests.length, diagnosesBeforeRetry + 1);
+  assert.deepEqual(await handleRpc({type: 'execute', method: 'list_apps', args: []}), {ok: true});
+  globalThis.failTurnEndedMessage = undefined;
+
+  const boundaryTurns = [];
+  for (let index = 0; index < 127; index++) {
+    const context = {session_id: `bounded-session-${index}`,
+      turn_id: `bounded-turn-${index}`, call_id: `bounded-call-${index}`};
+    boundaryTurns.push(context);
+    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': context};
+    await handleRpc({type: 'execute', method: 'list_apps', args: []});
+  }
+  const rpcCountAtCapacity = globalThis.originalRpcCount;
+  const overflow = {session_id: 'bounded-overflow-session',
+    turn_id: 'bounded-overflow-turn', call_id: 'bounded-overflow-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': overflow};
+  await assert.rejects(handleRpc({type: 'execute', method: 'list_apps', args: []}),
+    /Too many active macOS turn metadata contexts/);
+  assert.equal(globalThis.originalRpcCount, rpcCountAtCapacity,
+    'a new Sky request must not dispatch if its cleanup metadata cannot be retained');
+  await turnEnded.run({session_id: boundaryTurns[0].session_id,
+    turn_id: boundaryTurns[0].turn_id});
+  await handleRpc({type: 'execute', method: 'list_apps', args: []});
+  assert.equal(globalThis.originalRpcCount, rpcCountAtCapacity + 1,
+    'a new Sky request should dispatch after turn cleanup frees a metadata slot');
 
   for (const raw of [undefined, '{bad metadata']) {
     globalThis.nodeRepl.requestMeta = raw === undefined ? {} : {'x-codex-turn-metadata': raw};

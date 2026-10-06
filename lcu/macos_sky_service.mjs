@@ -113,12 +113,20 @@ function staleServiceNote(runtime) {
 
 // Keep the original error, its class and fields; only extend the message when
 // the host found a stale service. Any failure to diagnose leaves it untouched.
+// Concurrent requests can await one shared failure, so each error is explained once
+// and every waiter sees the finished message.
+const explainedErrors = new WeakMap();
 async function explainNativePipeFailure(runtime, error) {
   try {
     const message = error?.message;
-    if (typeof message !== 'string' || !NATIVE_PIPE_FAILURE.test(message)) return error;
-    const note = await staleServiceNote(runtime);
-    if (note) error.message = `${message} ${note}`;
+    if (typeof message !== 'string' || !NATIVE_PIPE_FAILURE.test(message) ||
+        typeof error !== 'object') return error;
+    if (!explainedErrors.has(error)) {
+      explainedErrors.set(error, staleServiceNote(runtime).then(note => {
+        if (note) error.message = `${message} ${note}`;
+      }));
+    }
+    await explainedErrors.get(error);
   } catch {}
   return error;
 }
@@ -404,7 +412,12 @@ function finishPendingCleanup() {
 
 export async function handleRpc(request) {
   register();
-  await finishPendingCleanup();
+  try {
+    await finishPendingCleanup();
+  } catch (error) {
+    // Retried turn cleanup talks to the same native pipe and fails the same way.
+    throw await explainNativePipeFailure(globalThis.nodeRepl, error);
+  }
   original ??= import(pathToFileURL(globalThis.nodeRepl.env.LCU_MAC_SKY_SERVICE_PATH).href);
   const runtime = globalThis.nodeRepl;
   const metadata = readTurnMetadata(runtime);
