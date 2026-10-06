@@ -266,7 +266,7 @@ class UpdateTest(unittest.TestCase):
     def test_post_install_reports_a_displaced_chrome_manifest_beside_a_refresh(self):
         out, _ = self.post_install_output(('unchanged', Path('/relay/dir'), [Path('/cfg/Chrome/manifest.json')]))
         self.assertIn('Refreshed the Chrome relay at', out)
-        self.assertIn('/cfg/Chrome/manifest.json', out)
+        self.assertIn(str(Path('/cfg/Chrome/manifest.json')), out)
         self.assertIn('left alone', out)
         self.assertIn('browser install', out)
 
