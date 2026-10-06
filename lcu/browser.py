@@ -314,6 +314,7 @@ def status(root, family='chrome'):
         print(f'  Install the official extension in the profile you want to use: {browser["storeUrl"]}')
 
     connected_host = False
+    foreign_host = None
     if manifest.get('correct') and manifest.get('manifestPath'):
         try:
             data = json.loads(Path(manifest['manifestPath']).read_text())
@@ -325,6 +326,8 @@ def status(root, family='chrome'):
                             'Windows': ('windows', 'extension-host.exe')}[platform.system()]
             host = directory / 'chrome/extension-host' / system / arch / name
             relay_name = 'lcu-native-host.cmd' if system == 'windows' else 'lcu-native-host'
+            if relay.name != relay_name or not (directory / '.lcu-browser-host').is_file():
+                foreign_host = str(relay)
             source_matches = ((directory / 'lcu-native-host.py').read_bytes() ==
                               (root / 'lcu/native_host.py').read_bytes()) if system == 'windows' else (
                               relay.read_bytes() == (root / 'lcu/native_host.py').read_bytes())
@@ -339,10 +342,20 @@ def status(root, family='chrome'):
             pass
     if connected_host:
         print(f'{label} connector: configured for this LCU installation.')
+    elif foreign_host:
+        print(f'{label} connector: the native-host manifest points to {foreign_host}, not LCU\'s relay. '
+              'The ChatGPT app can re-point it at its own host. '
+              f'Run `lcu browser install`, then {_reconnect_step(browser)}')
     else:
         print(f'{label} connector: missing or outdated. Run `lcu browser install`.')
-    print(f'Live browser connection: not checked. After setup, ask your agent to use LCU to list {label} tabs.')
+    print(f'Live browser connection: not checked. After setup, {_reconnect_step(browser)} '
+          f'Then ask your agent to use LCU to list {label} tabs.')
     return enabled and connected_host
+
+
+def _reconnect_step(browser):
+    return (f'restart {browser["shortDisplayName"]}, or turn the ChatGPT extension off and on at '
+            f'{browser["extensionManagementUrl"]}, so an already-connected extension reconnects through LCU\'s relay.')
 
 
 def main(root, argv):
@@ -363,4 +376,5 @@ def main(root, argv):
     print(f'LCU browser native host configured: {destination}')
     print('Install or enable the official ChatGPT browser extension in the browser you want to use.')
     print('The extension and browser must run under this same desktop account. See docs/INSTALLATION.md.')
+    print('If the extension was already connected, restart the browser or turn the extension off and on in its extensions page so it reconnects through LCU\'s relay.')
     print('Check extension and connector setup with: lcu browser status')
