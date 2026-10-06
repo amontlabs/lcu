@@ -349,7 +349,8 @@ def refresh_chrome_relay(root):
         else:
             print(f'Refreshed the Chrome relay at {destination}.')
             if state == 'changed':
-                print('To reconnect it, restart Chrome or turn the ChatGPT extension off and on.')
+                print('If the extension was already connected, restart Chrome or turn the ChatGPT extension off and on '
+                      "so it reconnects through LCU's relay.")
     except Exception as exc:
         print(f'lcu update: could not refresh the Chrome relay ({exc}); run `{command}`.', file=sys.stderr)
 
