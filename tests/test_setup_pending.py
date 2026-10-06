@@ -50,7 +50,7 @@ class Fixture(unittest.TestCase):
     def run_main(self, *argv, agents=ALL, reconcile=False):
         out, err = io.StringIO(), io.StringIO()
         code = 0
-        patches = [patch.object(setup.sys, 'platform', setup_host.PLATFORM),
+        patches = [patch.object(setup.sys, 'platform', getattr(self, 'platform', setup_host.PLATFORM)),
                    patch.object(setup, 'installer_environment'), patch.object(setup, 'installer_paths'),
                    patch.object(setup, 'configure', side_effect=self.configure),
                    patch.object(setup.shutil, 'which', side_effect=self.which),

@@ -1081,6 +1081,11 @@ def main(argv=None):
                 print('Pending (not installed): ' + (', '.join(pending) or 'none')
                       + f'. Install them, then run `{setup_command} setup --reconcile` (safe at every login).')
         print('Configuration prepared. Restart/reconnect the selected agent, then ask it to use LCU to inspect the desktop.')
+        if sys.platform == 'darwin':
+            from .platforms import mac_socket_path_problem
+            problem = mac_socket_path_problem()
+            if problem:
+                print(f'Warning: {problem}')
         if args.chrome:
             try:
                 browser_status = subprocess.run(direct_runtime + ['browser', 'status'],
