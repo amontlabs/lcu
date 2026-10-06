@@ -1,8 +1,13 @@
 """Native-host setup tests use only disposable homes and a fake upstream installer."""
+import ast
 import json
 import io
 import os
 from pathlib import Path
+import platform
+import shlex
+import stat
+import struct
 import sys
 import shutil
 import tempfile
@@ -12,7 +17,7 @@ from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.browser import _manifest_paths, install, status
+from lcu.browser import _manifest_paths, _posix_wrapper, _write_private, install, status
 
 
 class BrowserSetupTests(unittest.TestCase):
@@ -123,6 +128,12 @@ class BrowserSetupTests(unittest.TestCase):
             self.assertEqual(json.loads(chrome_manifest.read_text())['allowed_origins'],
                              ['chrome-extension://fixture/'])
             self.assertEqual((destination / '.lcu-browser-host').read_text(), str((root / 'app').resolve()) + '\n')
+            self.assertEqual((destination / 'lcu-native-host.py').read_bytes(), relay_source.read_bytes())
+            wrapper = expected_relay.read_text()
+            self.assertTrue(wrapper.startswith('#!/bin/sh\n'))
+            self.assertIn(f'python={shlex.quote(sys.executable)}\n', wrapper)
+            self.assertIn(f'script={shlex.quote(str(destination / "lcu-native-host.py"))}\n', wrapper)
+            self.assertTrue(wrapper.endswith('exec "$python" -B -u "$script" "$@"\n'))
             if os.name != 'nt':  # Windows has no POSIX mode bits.
                 self.assertEqual(expected_relay.stat().st_mode & 0o777, 0o700)
             self.assertEqual(run.call_count, 1)
@@ -174,7 +185,8 @@ class BrowserSetupTests(unittest.TestCase):
             self.assertEqual((second / 'chrome/scripts/installManifest.mjs').read_text(), 'version two')
             self.assertEqual((second / 'chrome/extension-host/macos/arm64/ChatGPT for Chrome').read_text(), 'host two')
             self.assertEqual({p.name for p in second.iterdir()},
-                             {'chrome', 'lcu-native-host', '.lcu-browser-host', '.lcu-browser-plugin'})
+                             {'chrome', 'lcu-native-host', 'lcu-native-host.py', '.lcu-browser-host',
+                              '.lcu-browser-plugin'})
 
     def test_macos_missing_original_manifest_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -389,11 +401,13 @@ class BrowserStatusTests(unittest.TestCase):
         (self.host_dir / '.lcu-browser-plugin').write_text(_plugin_digest(
             resources / 'plugins/openai-bundled/plugins/chrome') + '\n')
         self.relay = self.host_dir / 'lcu-native-host'
-        self.relay.write_text('fixture relay')
+        self.relay.write_text('#!/bin/sh\nexec true\n')
         self.relay.chmod(0o700)
+        self.script = self.host_dir / 'lcu-native-host.py'
+        self.script.write_text('fixture relay')
         source = self.root / 'lcu/native_host.py'
         source.parent.mkdir()
-        source.write_bytes(self.relay.read_bytes())
+        source.write_bytes(self.script.read_bytes())
         host = self.host_dir / 'chrome/extension-host/macos/arm64/ChatGPT for Chrome'
         host.parent.mkdir(parents=True)
         host.write_text('fixture host')
@@ -464,8 +478,19 @@ class BrowserStatusTests(unittest.TestCase):
         self.assertIn('lcu browser install', self.output.getvalue())
 
     def test_outdated_relay_requires_refresh(self):
-        self.relay.write_text('old relay')
+        self.script.write_text('old relay')
         self.assertFalse(self.run_status())
+        self.assertIn('missing or outdated', self.output.getvalue())
+
+    def test_single_file_install_without_the_script_requires_refresh(self):
+        self.script.unlink()
+        self.assertFalse(self.run_status())
+        self.assertIn('missing or outdated', self.output.getvalue())
+
+    def test_missing_wrapper_requires_refresh(self):
+        self.relay.unlink()
+        self.assertFalse(self.run_status())
+        self.assertIn('missing or outdated', self.output.getvalue())
 
     def test_missing_extension_has_store_link_and_profile(self):
         self.extension.update(enabled=False, installed=False)
@@ -477,6 +502,93 @@ class BrowserStatusTests(unittest.TestCase):
         self.extension['enabled'] = False
         self.assertFalse(self.run_status())
         self.assertIn('Enable it at chrome://extensions', self.output.getvalue())
+
+
+def _fake_python(path, record, version_ok=True):
+    """An interpreter stand-in that logs its use, then delegates to the real one."""
+    path.write_text(
+        '#!/bin/sh\n'
+        f'if [ "$1" = -c ]; then exit {0 if version_ok else 1}; fi\n'
+        f'echo "$0" >> {shlex.quote(str(record))}\n'
+        f'exec {shlex.quote(sys.executable)} "$@"\n')
+    path.chmod(0o700)
+
+
+@unittest.skipIf(os.name == 'nt', 'The POSIX launcher is a shell script.')
+class PosixRelayLauncherTests(unittest.TestCase):
+    """Chrome launches native hosts with launchd's short PATH; run the launcher the same way."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        # Spaces in the path, as in macOS "Application Support".
+        self.directory = Path(temporary.name).resolve() / 'Application Support/lcu/browser'
+        self.directory.mkdir(parents=True)
+        self.record = self.directory / 'used'
+        self.script = self.directory / 'lcu-native-host.py'
+        _write_private(self.directory, self.script,
+                       (Path(__file__).resolve().parents[1] / 'lcu/native_host.py').read_bytes())
+        system, name = {'Darwin': ('macos', 'ChatGPT for Chrome'),
+                        'Linux': ('linux', 'extension-host')}[platform.system()]
+        arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'x64', 'amd64': 'x64'}[platform.machine().lower()]
+        host = self.directory / 'chrome/extension-host' / system / arch / name
+        host.parent.mkdir(parents=True)
+        host.write_text('#!/bin/sh\nexec cat\n')  # Echoes the relayed frames back.
+        host.chmod(0o700)
+        self.relay = self.directory / 'lcu-native-host'
+
+    def install_wrapper(self, python):
+        _write_private(self.directory, self.relay, _posix_wrapper(str(python), self.script).encode())
+        self.assertEqual(self.relay.stat().st_mode & 0o777, 0o700)
+
+    def launch(self, path):
+        message = json.dumps({'result': {'type': 'extension', 'agentRequestHeaderEnabled': False}}).encode()
+        result = subprocess.run(['/usr/bin/env', '-i', f'PATH={path}', str(self.relay)],
+                                input=struct.pack('<I', len(message)) + message,
+                                capture_output=True, timeout=60)
+        return result, message
+
+    def assert_round_trip(self, result):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, b'')
+        size = struct.unpack('<I', result.stdout[:4])[0]
+        self.assertEqual(len(result.stdout), 4 + size)  # Nothing but the framed reply on stdout.
+        self.assertEqual(json.loads(result.stdout[4:])['result']['agentRequestHeaderEnabled'], True)
+
+    def used(self):
+        return self.record.read_text().splitlines() if self.record.exists() else []
+
+    def test_runs_under_the_selected_interpreter_not_the_path_python(self):
+        python = self.directory / 'selected python'
+        _fake_python(python, self.record)
+        self.install_wrapper(python)
+        result, _ = self.launch('/usr/bin:/bin')
+        self.assert_round_trip(result)
+        self.assertEqual(self.used(), [str(python)])
+
+    def test_missing_interpreter_falls_back_to_a_python_found_on_the_path(self):
+        bin_dir = self.directory / 'bin'
+        bin_dir.mkdir()
+        _fake_python(bin_dir / 'python3', self.record, version_ok=False)  # Too old.
+        _fake_python(bin_dir / 'python3.14', self.record)
+        self.install_wrapper(self.directory / 'removed/python3.12')
+        result, _ = self.launch(f'{bin_dir}:/usr/bin:/bin')
+        self.assert_round_trip(result)
+        self.assertEqual(self.used(), [str(bin_dir / 'python3.14')])
+
+    def test_wrapper_quotes_unusual_paths(self):
+        python = self.directory / "it's $HOME `x` python"
+        _fake_python(python, self.record)
+        self.install_wrapper(python)
+        result, _ = self.launch('/usr/bin:/bin')
+        self.assert_round_trip(result)
+        self.assertEqual(self.used(), [str(python)])
+
+
+class RelaySourceCompatibilityTests(unittest.TestCase):
+    def test_relay_source_stays_parseable_by_python_3_8(self):
+        source = (Path(__file__).resolve().parents[1] / 'lcu/native_host.py').read_text()
+        ast.parse(source, feature_version=(3, 8))
 
 
 if __name__ == '__main__':

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -167,6 +168,60 @@ def install(root, directory=None):
         return _install_locked(root, system, destination, selected_app)
 
 
+def _write_private(directory, path, data):
+    """Publish `path` atomically with owner-only permissions."""
+    with tempfile.NamedTemporaryFile(dir=directory, prefix='.lcu-native-host-', delete=False) as staged:
+        staged_path = Path(staged.name)
+        staged.write(data)
+    try:
+        staged_path.chmod(0o700)
+        staged_path.replace(path)
+    finally:
+        staged_path.unlink(missing_ok=True)
+
+
+def _posix_wrapper(python, script):
+    """Shell launcher for the relay: LCU's interpreter, else the same search as lcu/interpreter.py.
+
+    It prints nothing to stdout, which carries Chrome's native-messaging frames.
+    """
+    from . import interpreter
+
+    names = ' '.join(shlex.quote(name) for name in interpreter.NAMES)
+    extra = ':'.join(interpreter.EXTRA_DIRS)
+    return f"""#!/bin/sh
+# Written by `lcu browser install`. Chrome starts native hosts with a minimal PATH.
+script={shlex.quote(str(script))}
+python={shlex.quote(python)}
+if [ ! -x "$python" ]; then
+  python=
+  search="$PATH:"{shlex.quote(extra)}
+  set -f
+  for name in {names}; do
+    old_ifs=$IFS
+    IFS=:
+    for dir in $search; do
+      IFS=$old_ifs
+      if [ -x "$dir/$name" ] && "$dir/$name" -c {shlex.quote(interpreter.CHECK)} >/dev/null 2>&1; then
+        python=$dir/$name
+        break 2
+      fi
+    done
+    IFS=$old_ifs
+  done
+  set +f
+  if [ -z "$python" ] && [ -x /usr/bin/python3 ]; then
+    python=/usr/bin/python3
+  fi
+  if [ -z "$python" ]; then
+    echo 'LCU Chrome native-host relay failed: Python 3.12 or newer was not found.' >&2
+    exit 127
+  fi
+fi
+exec "$python" -B -u "$script" "$@"
+"""
+
+
 def _install_locked(root, system, destination, selected_app):
     from .runtime import environment, paths
 
@@ -202,15 +257,13 @@ def _install_locked(root, system, destination, selected_app):
     relay_source = root / 'lcu/native_host.py'
     if not relay_source.is_file():
         raise ValueError('The LCU Chrome native-host relay is missing from this release.')
-    relay = destination / ('lcu-native-host.py' if system == 'Windows' else 'lcu-native-host')
-    with tempfile.NamedTemporaryFile(dir=destination, prefix='.lcu-native-host-', delete=False) as staged:
-        staged_path = Path(staged.name)
-    try:
-        shutil.copyfile(relay_source, staged_path)
-        staged_path.chmod(0o700)
-        staged_path.replace(relay)
-    finally:
-        staged_path.unlink(missing_ok=True)
+    relay_script = destination / 'lcu-native-host.py'
+    _write_private(destination, relay_script, relay_source.read_bytes())
+    relay = destination / 'lcu-native-host'
+    if system != 'Windows':
+        # Chrome starts native hosts with launchd's short PATH, so pin the interpreter
+        # LCU runs on instead of letting a shebang find whatever python3 comes first.
+        _write_private(destination, relay, _posix_wrapper(sys.executable, relay_script).encode())
     if system == 'Windows':
         # Chromium uses cmd.exe for a non-.exe native host. The wrapper emits
         # no text before Python's binary native-messaging frames.
@@ -326,8 +379,7 @@ def status(root, family='chrome'):
             host = directory / 'chrome/extension-host' / system / arch / name
             relay_name = 'lcu-native-host.cmd' if system == 'windows' else 'lcu-native-host'
             source_matches = ((directory / 'lcu-native-host.py').read_bytes() ==
-                              (root / 'lcu/native_host.py').read_bytes()) if system == 'windows' else (
-                              relay.read_bytes() == (root / 'lcu/native_host.py').read_bytes())
+                              (root / 'lcu/native_host.py').read_bytes())
             connected_host = (
                 relay.name == relay_name and relay.is_file() and os.access(relay, os.X_OK)
                 and source_matches
