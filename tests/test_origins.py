@@ -90,14 +90,37 @@ class OriginsTests(unittest.TestCase):
         self.session('good')
         self.session('broken', 'not = [valid')
         code, out, err = self.run_origins('list')
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
         self.assertIn('session good', out)
         self.assertIn('broken.toml', err)
-        document = json.loads(self.run_origins('list', '--json')[1])
+        code, out, _ = self.run_origins('list', '--json')
+        self.assertEqual(code, 1)
+        document = json.loads(out)
         self.assertEqual([p['session'] for p in document['problems']], ['broken'])
         code, _, err = self.run_origins('list', '--session', 'broken')
         self.assertEqual(code, 1)
         self.assertIn('not valid TOML', err)
+
+    def test_list_does_not_call_an_unreadable_store_empty(self):
+        self.session('broken', 'not = [valid')
+        code, out, err = self.run_origins('list')
+        self.assertEqual(code, 1)
+        self.assertNotIn('No saved', out)
+        self.assertIn('broken.toml', err)
+
+    def test_list_does_not_call_an_unfamiliar_layout_empty(self):
+        for text in ('[history]\nurls = ["https://x.example"]\n', 'version = 1\n', '[origins]\nblocked = ["https://x.example"]\n'):
+            self.session('odd', text)
+            code, out, err = self.run_origins('list')
+            self.assertEqual(code, 1, text)
+            self.assertNotIn('No saved', out)
+            self.assertIn('expected [origins] allowed/denied', err)
+            code, _, err = self.run_origins('forget', 'https://x.example', '--session', 'odd')
+            self.assertEqual(code, 1, text)
+            self.assertEqual((self.sessions / 'odd.toml').read_text(), text)
+        for text in ('', '[origins]\n', '[origins]\ndenied = []\n', '[origins]\nallowed = ["https://a.example"]\n'):
+            self.session('odd', text)
+            self.assertEqual(self.run_origins('list', '--session', 'odd')[0], 0, text)
 
     def test_list_ignores_files_that_are_not_session_files(self):
         self.session('abc')
@@ -328,6 +351,43 @@ class OriginsTests(unittest.TestCase):
         self.assertTrue((self.sessions / origins.LOCK_NAME).exists())
         sessions = json.loads(self.run_origins('list', '--json')[1])['sessions']
         self.assertEqual([entry['session'] for entry in sessions], ['abc'])
+
+    def test_file_system_errors_become_messages_and_do_not_stop_other_sessions(self):
+        self.session('one')
+        self.session('two')
+        real = origins.write_atomically
+
+        def failing(target, text, mode):
+            if target.stem == 'one':
+                raise PermissionError(13, 'Permission denied')
+            return real(target, text, mode)
+
+        with mock.patch.object(origins, 'write_atomically', failing):
+            code, out, err = self.run_origins('forget', 'https://bad.example')
+            self.assertEqual(code, 1)
+            self.assertIn('cannot update', err)
+            self.assertIn('Permission denied', err)
+            self.assertNotIn('Traceback', err)
+            self.assertEqual(self.state('two')['denied'], ['http://localhost:3000'])
+            self.assertEqual(self.state('one')['denied'], ['https://bad.example', 'http://localhost:3000'])
+            code, _, err = self.run_origins('forget', 'https://bad.example', '--session', 'one')
+            self.assertEqual(code, 1)
+            self.assertIn('Permission denied', err)
+
+    def test_a_session_file_that_vanishes_is_reported(self):
+        path = self.session('abc')
+        real = origins.read
+
+        def vanishing(target):
+            result = real(target)
+            target.unlink()
+            return result
+
+        with mock.patch.object(origins, 'read', vanishing):
+            code, _, err = self.run_origins('forget', 'https://bad.example', '--session', 'abc')
+        self.assertEqual(code, 1)
+        self.assertIn('cannot update', err)
+        self.assertFalse(path.exists())
 
     def test_forget_gives_up_when_the_file_never_settles(self):
         path = self.session('abc')

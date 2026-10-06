@@ -149,6 +149,10 @@ def parse(raw, path):
     table = document.get('origins', {})
     if not isinstance(table, dict):
         raise OriginsError(f'{path} has an "origins" entry that is not a table; leaving it untouched.')
+    if (document and 'origins' not in document) or (table and not any(kind in table for kind in KINDS)):
+        raise OriginsError(f'{path} does not have the expected [origins] allowed/denied lists (found '
+                           f'{", ".join(sorted(table or document))}); it may be from a different runtime '
+                           'version, so it is neither listed as empty nor changed.')
     origins = {}
     for kind in KINDS:
         entries = table.get(kind, [])
@@ -275,10 +279,15 @@ def forget_in(path, origin, kinds, *, attempts=WRITE_ATTEMPTS):
     before the replace, and the change is recomputed if the runtime wrote before that read, and once
     more afterwards to report a write that landed after the replace. A runtime write between the
     last pre-replace read and the replace itself is overwritten without being noticed; no check
-    without a lock the runtime shares can close that window, which is microseconds wide.
+    without a lock the runtime shares can close that window, which is microseconds wide. What is
+    lost then is a saved answer, so the runtime asks about that site again; a lost entry never
+    grants access.
     """
     with locked(Path(path).parent):
-        return _forget_in(path, origin, kinds, attempts=attempts)
+        try:
+            return _forget_in(path, origin, kinds, attempts=attempts)
+        except OSError as exc:
+            raise OriginsError(f'cannot update {path}: {exc.strerror or exc}') from None
 
 
 def _forget_in(path, origin, kinds, *, attempts):
@@ -328,21 +337,21 @@ def command_list(args, *, home):
             problems.append({'session': session, 'file': str(path), 'error': str(exc)})
             continue
         sessions.append({'session': session, 'file': str(path), **origins})
+    status = 1 if problems else 0
     if args.json:
         print(json.dumps({'codexHome': str(home), 'sessions': sessions, 'problems': problems}, indent=2))
-        return 0
+        return status
     for problem in problems:
         print(f'lcu origins: skipped {problem["file"]}: {problem["error"]}', file=sys.stderr)
     shown = [entry for entry in sessions if entry['allowed'] or entry['denied']]
-    if not shown:
+    if not shown and not problems:
         print(f'No saved Chrome site decisions in {directory}.')
-        return 0
     for entry in shown:
         print(f'session {entry["session"]}')
         for kind in KINDS:
             for origin in entry[kind]:
                 print(f'  {kind:<7} {origin}')
-    return 0
+    return status
 
 
 def command_forget(args, *, home):
@@ -416,7 +425,7 @@ def main(argv, *, env=None, windows=None):
         home = codex_home(env, windows=windows)
         handler = {'list': command_list, 'forget': command_forget}[args.action]
         status = handler(args, home=home)
-    except OriginsError as exc:
+    except (OriginsError, OSError) as exc:
         print(f'lcu origins: {exc}', file=sys.stderr)
         raise SystemExit(1) from None
     if status:
