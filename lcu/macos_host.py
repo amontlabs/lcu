@@ -300,9 +300,10 @@ class PeerLock:
     def record(self, outcome):
         """Keep the outcome of this recovery for the next holder of the lock."""
         try:
+            data = json.dumps(outcome).encode('utf-8')
             os.ftruncate(self.descriptor, 0)
-            os.pwrite(self.descriptor, json.dumps(outcome).encode('utf-8'), 0)
-            return True
+            # A short write (a file size limit) would leave a record nobody can read.
+            return os.pwrite(self.descriptor, data, 0) == len(data) and os.pread(self.descriptor, len(data) + 1, 0) == data
         except (OSError, TypeError, ValueError):
             return False
 
@@ -376,7 +377,7 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
                           verify=verify_service_signature, holders=lock_holders,
                           kernel_path=executable_path, kill=os.kill, exists=_process_exists,
                           realpath=os.path.realpath, sleep=time.sleep, monotonic=time.monotonic,
-                          wallclock=time.time, exclusive=_NoPeerLock, signal_deadline=None, log=None):
+                          wallclock=time.time, exclusive=_NoPeerLock, deadline_seconds=None, log=None):
     """Quit the one Computer Use service that is provably stale and holds the connection.
 
     Every one of these must hold, otherwise nothing is signaled:
@@ -446,38 +447,51 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             if reason:
                 return nothing(reason)
             pid = service['pid']
-            if (previous.get('recovered') is False and previous.get('pid') == pid and
+            # An attempt is recorded (and a wall-clock step backward counts as recent) so that no
+            # host signals the same instance twice within a minute.
+            if (previous.get('signaled') is True and previous.get('pid') == pid and
                     previous.get('started') == service['started'] and
-                    0 <= wallclock() - float(previous.get('at', 0)) <= RETRY_SUPPRESSION_SECONDS):
+                    wallclock() - float(previous.get('at', 0)) <= RETRY_SUPPRESSION_SECONDS):
                 return nothing('this service was already asked to quit and did not')
             if holders(lock_path) != {pid}:
                 return nothing('the stale service is not the only holder of the socket lock')
             if verify(pid) != 'invalid':
                 return nothing('the running service passes signature verification, or it could not be checked')
-            # The slow evidence again (the lock last of it), then the process itself, last.
+            # The slow evidence again (the lock last of it).
             if verify(pid) != 'invalid' or holders(lock_path) != {pid}:
                 return nothing('the service changed while it was being checked')
-            final = diagnose(pid=pid)
-            if final.get('unparsed') or [identity(item) for item in final['services'] if item['stale']] != [
-                    identity(service)] or len(final['services']) != 1:
-                return nothing('the service changed while it was being checked')
-            if eligible(final['services'][0]):
-                return nothing('the service changed while it was being checked')
-            if monotonic() - started > PRE_SIGNAL_BUDGET_SECONDS:
-                return nothing('the checks took too long to act on')
-            if signal_deadline is not None and wallclock() >= signal_deadline:
-                return nothing('the request stopped waiting for the recovery')
-            # Written down before the signal, so no host can signal this instance again even if
-            # this one stops before it records the result; no record, no signal.
-            if not peer.record({'recovered': False, 'pid': pid, 'started': service['started'], 'at': wallclock()}):
+            # Written down before the last reads and the signal, so no host can signal this
+            # instance again even if this one stops first, and nothing slow sits between the last
+            # read and the signal. No record, no signal. Not signaling clears the record again.
+            attempt = {'signaled': True, 'recovered': False, 'pid': pid, 'started': service['started'],
+                       'at': wallclock()}
+            if not peer.record(attempt):
                 return nothing('the attempt could not be recorded')
+
+            def abort(reason):
+                peer.record({**attempt, 'signaled': False})
+                return nothing(reason)
+
+            try:
+                final = diagnose(pid=pid)  # the process itself, read last
+                changed = (final.get('unparsed') or len(final['services']) != 1 or
+                           identity(final['services'][0]) != identity(service) or not final['services'][0]['stale'])
+                reason = 'the service changed while it was being checked' if changed else eligible(final['services'][0])
+                if not reason and monotonic() - started > PRE_SIGNAL_BUDGET_SECONDS:
+                    reason = 'the checks took too long to act on'
+                if not reason and deadline_seconds is not None and monotonic() - started >= deadline_seconds:
+                    reason = 'the request stopped waiting for the recovery'
+            except Exception as exc:
+                return abort(f'check failed: {str(exc)[:200]}')
+            if reason:
+                return abort(reason)
             kill(pid, signal.SIGTERM)
             deadline = monotonic() + TERMINATE_WAIT_SECONDS
             while exists(pid):
                 if monotonic() >= deadline:
                     return nothing(f'pid {pid} did not exit within {TERMINATE_WAIT_SECONDS} seconds of SIGTERM')
                 sleep(TERMINATE_POLL_SECONDS)
-            peer.record({'recovered': True, 'pid': pid, 'started': service['started'], 'at': wallclock()})
+            peer.record({**attempt, 'recovered': True, 'at': wallclock()})
     except Exception as exc:
         return nothing(f'check failed: {str(exc)[:200]}')
     elapsed_ms = int((monotonic() - started) * 1000)
@@ -487,14 +501,18 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
     return {'ok': True, 'recovered': True, 'pid': pid, 'path': service['path'], 'elapsed_ms': elapsed_ms}
 
 
-def requested_signal_deadline(request, now_ms=None):
-    """The wall-clock second after which nothing may be signaled, from a request's deadline."""
+def requested_deadline_seconds(request, now_ms=None):
+    """Seconds from now after which nothing may be signaled, from a request's deadline.
+
+    A missing, malformed, expired or implausibly distant deadline allows no signal at all
+    (0). The caller measures the rest on the monotonic clock, which a wall-clock change
+    cannot move.
+    """
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    ceiling = now_ms + RECOVERY_WAIT_SECONDS * 1000
     deadline = request.get('deadline_unix_ms') if isinstance(request, dict) else None
-    if type(deadline) is int and now_ms <= deadline <= ceiling:
-        return deadline / 1000
-    return now_ms / 1000  # a missing or invalid deadline allows no signal at all
+    if type(deadline) is int and now_ms <= deadline <= now_ms + RECOVERY_WAIT_SECONDS * 1000:
+        return (deadline - now_ms) / 1000
+    return 0.0
 
 
 def recover_response(request=None):
@@ -502,7 +520,7 @@ def recover_response(request=None):
         return {'ok': True, 'recovered': False, 'reason': 'not macOS'}
     return recover_stale_service(
         lock_path=os.environ.get('LCU_MAC_SERVICE_LOCK'), executables=known_service_executables(),
-        exclusive=PeerLock, signal_deadline=requested_signal_deadline(request),
+        exclusive=PeerLock, deadline_seconds=requested_deadline_seconds(request),
         log=lambda line: print(line, file=sys.stderr, flush=True))
 
 

@@ -17,7 +17,7 @@ if sys.platform == 'win32':
 from lcu.macos_host import (CODESIGN, LSOF, PS, SKY_SERVICE_NAME, SingleFlight, bundle_replaced_at, diagnose_response,
                             diagnose_sky_services, parse_process_start, parse_process_table,
                             SIGNATURE_MISMATCH_MARKERS, PeerLock, executable_path, known_service_executables, lock_holders,
-                            recover_response, recover_stale_service, requested_signal_deadline,
+                            recover_response, recover_stale_service, requested_deadline_seconds,
                             verify_service_signature)
 
 BUNDLE = '/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app'
@@ -448,7 +448,7 @@ class RecoveryTests(unittest.TestCase):
             self.assertNothingSignaled(world, world.run(), 'kernel')
         world = FakeWorld()
         world.after_check = lambda: setattr(world, 'kernel', '/bin/sleep')
-        self.assertNothingSignaled(world, world.run(), 'changed while')
+        self.assertNothingSignaled(world, world.run(), 'kernel')
 
     def test_a_lock_that_changes_hands_during_the_slow_checks_is_not_signaled(self):
         world = FakeWorld()
@@ -504,7 +504,7 @@ class RecoveryTests(unittest.TestCase):
         peer = self.Peer()
         world.run(exclusive=lambda: peer, wallclock=lambda: 1000.0)
         started = epoch(STALE_START)
-        attempt = {'recovered': False, 'pid': 4242, 'started': started, 'at': 1000.0}
+        attempt = {'signaled': True, 'recovered': False, 'pid': 4242, 'started': started, 'at': 1000.0}
         self.assertEqual(peer.recorded, [attempt, {**attempt, 'recovered': True}],
                          'the attempt is recorded before the signal, the success after the exit')
         stuck = FakeWorld(exits_after=10 ** 9)
@@ -555,7 +555,7 @@ class RecoveryTests(unittest.TestCase):
             calls.append(pid)
             return world.kernel if len(calls) < 2 else '/usr/bin/other'
 
-        self.assertNothingSignaled(world, world.run(kernel_path=kernel_path), 'changed while')
+        self.assertNothingSignaled(world, world.run(kernel_path=kernel_path), 'kernel')
         order = []
         world = FakeWorld()
         world.on_holders = lambda call: order.append(f'holders{call}')
@@ -573,6 +573,13 @@ class RecoveryTests(unittest.TestCase):
             world.on_holders = lambda call, world=world, start=start: (
                 setattr(world, 'table', [world.line(4242, 501, start, EXECUTABLE)]) if call == 2 else None)
             self.assertNothingSignaled(world, world.run(), 'changed while')
+
+    def test_an_attempt_that_ends_without_a_signal_is_cleared_again(self):
+        world = FakeWorld()
+        world.on_holders = lambda call: setattr(world, 'table', []) if call == 2 else None
+        peer = self.Peer()
+        self.assertNothingSignaled(world, world.run(exclusive=lambda: peer), 'changed while')
+        self.assertEqual([item['signaled'] for item in peer.recorded], [True, False])
 
     def test_no_record_no_signal(self):
         class Unwritable(self.Peer):
@@ -602,10 +609,13 @@ class RecoveryTests(unittest.TestCase):
         def peer(previous):
             return lambda: self.Peer(True, False, previous)
 
-        stuck = {'recovered': False, 'pid': 4242, 'started': epoch(STALE_START), 'at': 1000.0}
+        stuck = {'signaled': True, 'recovered': False, 'pid': 4242, 'started': epoch(STALE_START), 'at': 1000.0}
         world = FakeWorld()
         self.assertNothingSignaled(world, world.run(exclusive=peer(stuck), wallclock=lambda: 1030.0), 'already asked')
-        for other in ({**stuck, 'pid': 9999}, {**stuck, 'started': 1.0}, {**stuck, 'at': 900.0}, {**stuck, 'recovered': True}):
+        # A wall clock that stepped backward makes the record look newer, not older.
+        world = FakeWorld()
+        self.assertNothingSignaled(world, world.run(exclusive=peer({**stuck, 'at': 5000.0}), wallclock=lambda: 1030.0), 'already asked')
+        for other in ({**stuck, 'pid': 9999}, {**stuck, 'started': 1.0}, {**stuck, 'at': 900.0}, {**stuck, 'signaled': False}):
             world = FakeWorld()
             self.assertTrue(world.run(exclusive=peer(other), wallclock=lambda: 1030.0)['recovered'], other)
 
@@ -632,21 +642,26 @@ class RecoveryTests(unittest.TestCase):
 
     def test_nothing_is_signaled_after_the_requesters_deadline(self):
         world = FakeWorld()
-        result = world.run(signal_deadline=1000.0, wallclock=lambda: 1000.5)
+        self.assertNothingSignaled(world, world.run(deadline_seconds=0), 'stopped waiting')
+        # Checks that run past the deadline on the monotonic clock end it, whatever the wall clock does.
+        world = FakeWorld()
+        world.after_check = lambda: setattr(world, 'clock', world.clock + 3)
+        result = world.run(deadline_seconds=5, wallclock=lambda: -1e9)
         self.assertNothingSignaled(world, result, 'stopped waiting')
         world = FakeWorld()
-        self.assertTrue(world.run(signal_deadline=1000.0, wallclock=lambda: 990.0)['recovered'])
+        self.assertTrue(world.run(deadline_seconds=5)['recovered'])
         world = FakeWorld()
-        self.assertTrue(world.run(signal_deadline=None)['recovered'])
+        self.assertTrue(world.run(deadline_seconds=None)['recovered'])
 
     def test_the_requests_deadline_is_validated(self):
         now = 1_000_000
-        self.assertEqual(requested_signal_deadline({'deadline_unix_ms': now + 5000}, now), (now + 5000) / 1000)
+        self.assertEqual(requested_deadline_seconds({'deadline_unix_ms': now + 5000}, now), 5.0)
+        self.assertEqual(requested_deadline_seconds({'deadline_unix_ms': now}, now), 0.0)
         # No valid deadline means the requester is not known to be waiting: nothing may be signaled.
         for request in ({}, None, 'recover', {'deadline_unix_ms': None}):
-            self.assertEqual(requested_signal_deadline(request, now), now / 1000, request)
+            self.assertEqual(requested_deadline_seconds(request, now), 0.0, request)
         for bad in (now - 1, now + 17_000, 'soon', 1.5, True, [], 10 ** 18):
-            self.assertEqual(requested_signal_deadline({'deadline_unix_ms': bad}, now), now / 1000, bad)
+            self.assertEqual(requested_deadline_seconds({'deadline_unix_ms': bad}, now), 0.0, bad)
 
     def test_a_service_that_does_not_exit_is_waited_for_a_bounded_time_and_never_force_killed(self):
         import signal
@@ -701,7 +716,7 @@ class RecoveryTests(unittest.TestCase):
             recover_response(None)
         first, second = (call.kwargs for call in recover.call_args_list)
         self.assertEqual((first['lock_path'], first['exclusive']), (LOCK, PeerLock))
-        self.assertLessEqual(first['signal_deadline'], time.time(), 'a request without a deadline allows no signal')
+        self.assertEqual(first['deadline_seconds'], 0.0, 'a request without a deadline allows no signal')
         self.assertIsNone(second['lock_path'])
 
     def test_system_tools_are_used_by_absolute_path(self):
@@ -846,6 +861,16 @@ class PeerLockTests(unittest.TestCase):
             self.assertIsNone(PeerLock.default_path())
             with PeerLock() as lock:
                 self.assertFalse(lock.acquired)
+
+    def test_a_short_write_is_not_a_record(self):
+        with tempfile.TemporaryDirectory() as base:
+            with PeerLock(os.path.join(base, 'recovery.lock')) as lock:
+                real = os.pwrite
+                with patch('lcu.macos_host.os.pwrite', side_effect=lambda fd, data, offset: real(fd, data[:5], offset)):
+                    self.assertFalse(lock.record({'signaled': True, 'recovered': False, 'pid': 4242}))
+                self.assertTrue(lock.record({'signaled': True}))
+            with PeerLock(os.path.join(base, 'recovery.lock')) as again:
+                self.assertEqual(again.previous, {'signaled': True})
 
     def test_an_unusable_lock_file_means_not_acquired(self):
         with tempfile.TemporaryDirectory() as base:
