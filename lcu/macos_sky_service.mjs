@@ -541,7 +541,9 @@ async function dispatch(runtime, request, metadata, context, turnKey, state) {
   // ended (Stop or Interrupt) meanwhile; the error that led to the recovery is thrown instead.
   const turnActive = () => !state.ended;
   const retryIfActive = async error => {
+    // Each recovery restarts "nothing sent since": only a send after it sets `resent` again.
     state.recoveryError = error;
+    state.resent = false;
     return turnActive();
   };
   // Retried turn cleanup talks to the same native pipe and fails the same way.
