@@ -248,7 +248,7 @@ class PeerLock:
     def __init__(self, path=None, wait_seconds=PEER_LOCK_WAIT_SECONDS, sleep=time.sleep, monotonic=time.monotonic):
         self.path = path or self.default_path()
         self.wait_seconds, self.sleep, self.monotonic = wait_seconds, sleep, monotonic
-        self.descriptor, self.acquired, self.waited, self.previous = None, False, False, None
+        self.descriptor, self.acquired, self.previous = None, False, None
 
     @staticmethod
     def default_path():
@@ -275,7 +275,6 @@ class PeerLock:
                     self.previous = self._read()
                     return self
                 except BlockingIOError:
-                    self.waited = True
                     if self.monotonic() >= deadline:
                         break
                     self.sleep(0.05)
@@ -347,7 +346,7 @@ def _process_exists(pid):
 
 
 class _NoPeerLock:
-    acquired, waited, previous = True, False, None
+    acquired, previous = True, None
 
     def __enter__(self):
         return self
@@ -414,14 +413,7 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             if diagnosis.get('unparsed'):
                 return nothing('the process listing was incomplete')
             stale = [item for item in diagnosis['services'] if item['stale']]
-            previous = peer.previous or {}
             if not stale:
-                running = {(item['pid'], item['started']) for item in diagnosis['services']}
-                if (peer.waited and type(previous.get('pid')) is int and
-                        (previous['pid'], previous.get('started')) not in running):
-                    # This host waited for another one, which asked an instance to quit that is
-                    # now gone, and no stale service is left: the request may be tried once more.
-                    return {'ok': True, 'recovered': True, 'reason': 'recovered by another LCU process'}
                 return nothing('no stale service')
             if len(stale) != 1:
                 return nothing('more than one stale service')
@@ -434,6 +426,7 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             if os.path.basename(path) != SKY_SERVICE_NAME or realpath(path) not in executables:
                 return nothing('the stale service is not in a known Computer Use bundle')
             kernel = kernel_path(pid)
+            previous = peer.previous or {}
             if not (kernel and os.path.basename(kernel) == SKY_SERVICE_NAME and realpath(kernel) == realpath(path)):
                 return nothing('the kernel does not report the known executable for the stale service')
             if previous.get('pid') == pid and previous.get('started') == start:

@@ -551,8 +551,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertNothingSignaled(world, world.run(), 'bundle changed')
 
     class Peer:
-        def __init__(self, acquired=True, waited=False, previous=None, events=None):
-            self.acquired, self.waited, self.previous = acquired, waited, previous
+        def __init__(self, acquired=True, previous=None, events=None):
+            self.acquired, self.previous = acquired, previous
             self.events, self.recorded = events if events is not None else [], []
 
         def __enter__(self):
@@ -576,7 +576,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_a_refused_peer_lock_does_nothing(self):
         world = FakeWorld()
-        self.assertNothingSignaled(world, world.run(exclusive=lambda: self.Peer(False, True)), 'another LCU')
+        self.assertNothingSignaled(world, world.run(exclusive=lambda: self.Peer(False)), 'another LCU')
 
     def test_the_instance_is_recorded_before_the_signal_and_kept(self):
         world = FakeWorld()
@@ -589,33 +589,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(peer.recorded, [{'pid': 4242, 'started': epoch(STALE_START)}],
                          'a service that did not exit stays recorded as asked')
 
-    def test_a_host_that_waited_retries_only_when_the_instance_another_asked_is_gone(self):
-        asked = {'pid': 4242, 'started': epoch(STALE_START)}
-
-        def attempt(waited, previous, table=()):
-            world = FakeWorld()
-            world.table = list(table)
-            result = world.run(exclusive=lambda: self.Peer(True, waited, previous))
-            self.assertEqual(world.kills, [])
-            return result['recovered']
-
-        self.assertTrue(attempt(True, asked))
-        fresh = FakeWorld.line(5151, 501, 'Wed Oct  7 00:34:53 2026', EXECUTABLE)
-        self.assertTrue(attempt(True, asked, [fresh]), 'a current service replaced it')
-        self.assertFalse(attempt(False, asked), 'a host that did not wait has no link to another recovery')
-        for previous in (None, {}, {'pid': '4242'}):
-            self.assertFalse(attempt(True, previous), 'nothing was asked to quit')
-        still = FakeWorld.line(4242, 501, STALE_START, EXECUTABLE)
+    def test_a_host_that_waited_for_another_does_not_claim_its_recovery(self):
+        # An old record says nothing about what the other host did; nothing is retried on it.
         world = FakeWorld()
-        world.stat = stat_with(whole_bundle(EXECUTABLE, 'Mon Oct  5 00:00:00 2026'))  # no longer reads as stale
-        world.table = [still]
-        self.assertFalse(world.run(exclusive=lambda: self.Peer(True, True, asked))['recovered'],
-                         'the asked instance is still running')
+        world.table = []
+        peer = self.Peer(previous={'pid': 500, 'started': 5.0})
+        peer.waited = True  # however long it waited for the other host
+        result = world.run(exclusive=lambda: peer)
+        self.assertNothingSignaled(world, result, 'no stale service')
 
-    def test_a_host_that_waited_still_runs_every_check_when_a_service_is_stale(self):
-        world = FakeWorld()
-        world.verdict = 'valid'
-        self.assertNothingSignaled(world, world.run(exclusive=lambda: self.Peer(True, True)))
 
     def test_an_attempt_that_ends_without_a_signal_is_cleared_again(self):
         for hook in ('on_holders', 'on_times'):
@@ -658,12 +640,12 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(peer.recorded, [{'pid': 4242, 'started': epoch(STALE_START)}])
         # The next host sees that record and does not signal this instance again.
         world = FakeWorld()
-        self.assertNothingSignaled(world, world.run(exclusive=lambda: self.Peer(True, False, peer.recorded[0])),
+        self.assertNothingSignaled(world, world.run(exclusive=lambda: self.Peer(True, peer.recorded[0])),
                                    'already asked')
 
     def test_one_instance_is_never_signaled_twice_whatever_the_clocks_say(self):
         def peer(previous):
-            return lambda: self.Peer(True, False, previous)
+            return lambda: self.Peer(True, previous)
 
         asked = {'pid': 4242, 'started': epoch(STALE_START)}
         for wallclock in (0.0, 1e12, -1e12):
@@ -852,12 +834,10 @@ class PeerLockTests(unittest.TestCase):
             clock, sleeps = [0.0], []
             with PeerLock(path) as first:
                 self.assertTrue(first.acquired)
-                self.assertFalse(first.waited)
                 second = PeerLock(path, wait_seconds=1, sleep=lambda seconds: (sleeps.append(seconds), clock.__setitem__(0, clock[0] + seconds)),
                                   monotonic=lambda: clock[0])
                 with second as held:
                     self.assertFalse(held.acquired)
-                    self.assertTrue(held.waited)
                 self.assertLessEqual(clock[0], 1.1)
             with PeerLock(path) as later:
                 self.assertTrue(later.acquired)
