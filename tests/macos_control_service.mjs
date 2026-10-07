@@ -559,6 +559,32 @@ try {
   assert.equal(recoverRequests.length, recoveriesBefore + 1, 'concurrent requests share one recovery');
   assert.equal(countOriginal(), rpcBefore + 6);
 
+  // A turn that ends (Stop or Interrupt) while its request waits for the recovery is not
+  // acted on afterwards: the original error comes back and the request is not sent again.
+  reset();
+  const endedMetadata = {session_id: 'ended-session', turn_id: 'ended-turn', call_id: 'ended-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': endedMetadata};
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  rpcBefore = countOriginal();
+  const endedRequest = failure({failUntilRecovered: true});
+  await waitFor(() => countOriginal() === rpcBefore + 1, 'the request did not fail first');
+  await turnEnded.run({session_id: endedMetadata.session_id, turn_id: endedMetadata.turn_id});
+  releaseRecovery();
+  assert.equal((await endedRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore + 1, 'nothing is sent for a turn that has ended');
+  globalThis.nodeRepl.requestMeta = {};
+  // A turn that is still active is retried, after the pending turn cleanup.
+  reset();
+  const activeMetadata = {session_id: 'active-session', turn_id: 'active-turn', call_id: 'active-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': activeMetadata};
+  rpcBefore = countOriginal();
+  assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
+  assert.equal(countOriginal(), rpcBefore + 2);
+  await turnEnded.run({session_id: activeMetadata.session_id, turn_id: activeMetadata.turn_id});
+  globalThis.nodeRepl.requestMeta = {};
+
   // An unreachable host, or none configured, leaves the original error, immediately.
   reset();
   recoverDelayMs = 0;

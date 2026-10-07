@@ -139,10 +139,11 @@ function recoverOnce(runtime) {
   return recovering;
 }
 
-// Run `attempt`. When it fails with a native pipe startup failure and the host recovered
-// from a provably stale service, run it once more. In every other case the original error
-// is thrown unchanged, and a failure of the single retry is the retry's own error.
-async function withStaleServiceRecovery(runtime, attempt) {
+// Run `attempt`. When it fails with a native pipe startup failure, the host recovered from a
+// provably stale service and `beforeRetry` still allows it, run it once more. In every other
+// case the original error is thrown unchanged, and a failure of the single retry (or of
+// `beforeRetry`) is that failure's own error.
+async function withStaleServiceRecovery(runtime, attempt, beforeRetry = async () => true) {
   try {
     return await attempt();
   } catch (error) {
@@ -151,7 +152,7 @@ async function withStaleServiceRecovery(runtime, attempt) {
       recovered = typeof error?.message === 'string' && error.message === NATIVE_PIPE_FAILURE &&
         await recoverOnce(runtime);
     } catch {}
-    if (!recovered) throw error;
+    if (!recovered || !(await beforeRetry())) throw error;
   }
   return attempt();
 }
@@ -507,8 +508,9 @@ export async function handleRpc(request) {
   original ??= import(pathToFileURL(globalThis.nodeRepl.env.LCU_MAC_SKY_SERVICE_PATH).href);
   const runtime = globalThis.nodeRepl;
   const metadata = readTurnMetadata(runtime);
+  const turnKey = metadata && JSON.stringify([metadata.session_id, metadata.turn_id]);
   if (metadata) {
-    const key = JSON.stringify([metadata.session_id, metadata.turn_id]);
+    const key = turnKey;
     if (!turnMetadata.has(key) && turnMetadata.size >= TURN_METADATA_LIMIT) {
       throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
     }
@@ -525,5 +527,12 @@ export async function handleRpc(request) {
     }
   }
   const service = await original;
-  return withStaleServiceRecovery(runtime, () => service.handleRpc(request));
+  // A turn that ended (Stop or Interrupt) during the recovery is not acted on afterwards, and
+  // the retry, like any request, first waits for pending turn cleanup.
+  const turnActive = () => !turnKey || turnMetadata.has(turnKey);
+  return withStaleServiceRecovery(runtime, () => service.handleRpc(request), async () => {
+    if (!turnActive()) return false;
+    await gateOnCleanup();
+    return turnActive();
+  });
 }
