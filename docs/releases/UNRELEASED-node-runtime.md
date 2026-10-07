@@ -1,7 +1,7 @@
 # LCU (unreleased): Node runtime, no Python on Linux and macOS
 
 Draft release notes. The version is not bumped here. Everything below is intentional; the black-box differential
-(`tests/blackbox`, oracle = the Python 0.9.6 release at `tests/blackbox/BASE`) lists each difference as a reviewed entry in
+(`tests/blackbox`, oracle = the Python implementation at `tests/blackbox/BASE`) lists each difference as a reviewed entry in
 `tests/blackbox/deviations.json` with its justification, and every other scenario is byte-identical.
 
 ## What changed

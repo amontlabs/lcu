@@ -724,7 +724,7 @@ describe('update', () => {
     assert.equal(await hook('UserPromptSubmit', '{"session_id": "s3"}'), null);
     const data = announcedFile();
     assert.deepEqual(Object.keys(data).sort(), ['s1', 's2', update.ANNOUNCE_ACCOUNT].sort());
-    assert.ok(Math.abs(data.s1.at - (now - 3600)) < 1e-6);
+    assert.equal(data.s1.at, now - 3600);
   });
 
   test('notice --json --announce for agent integrations', async () => {
