@@ -513,7 +513,7 @@ describe('OriginsTests', () => {
   it('default codex home on posix', () => {
     const host = (p) => (process.platform === 'win32' ? p.replaceAll('/', '\\') : p); // a Windows host spells the POSIX flavour with its own separator
     assert.equal(origins.codex_home({ HOME: '/home/a' }, { windows: false }), host('/home/a/.codex'));
-    assert.equal(origins.codex_home({ HOME: '//home/a' }, { windows: false }), host('/home/a/.codex'));
+    if (process.platform !== 'win32') assert.equal(origins.codex_home({ HOME: '//home/a' }, { windows: false }), '/home/a/.codex'); // '//' is a UNC root on Windows
   });
 
   it('empty or relative CODEX_HOME is rejected', () => {

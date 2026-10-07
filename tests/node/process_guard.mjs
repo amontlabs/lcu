@@ -35,6 +35,10 @@ export function own(handle) {
   const child = handle.child ?? handle;
   assert.ok(Number.isInteger(child.pid) && child.pid > 1 && child.pid !== process.pid);
   const recorded = identity(child.pid);
+  if (!recorded && process.platform === 'win32') { // a short-lived child can be gone before PowerShell answers: never signalled
+    owned.set(child.pid, 'exited');
+    return handle;
+  }
   assert.ok(recorded, `pid ${child.pid} vanished before it could be registered`);
   owned.set(child.pid, recorded);
   return handle;

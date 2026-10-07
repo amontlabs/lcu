@@ -20,6 +20,7 @@ import * as tested from '../../lcu/tested.mjs';
 import { ALIASES, CLIENTS } from '../../lcu/setup_clients.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
 import { python312 } from './runtime_support.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const REPO = path.resolve(import.meta.dirname, '../..');
 const PYTHON_SOURCE = path.join(ORACLE_ROOT, 'lcu/setup.py');
@@ -36,11 +37,14 @@ const UID = process.getuid?.() ?? 1000; // Windows has no uids: any non-root num
 const IS_ROOT = UID === 0;
 const USERNAME = os.userInfo().username;
 
+if (!process.getuid) setup.impl.getuid = () => UID; // Windows has no uids
 const SAVED_IMPL = { ...setup.impl, approvals: { ...setup.impl.approvals } };
 const SAVED_IO = { ...setup.io };
 const SAVED_ARGPARSE_IO = { ...argparseIo };
 const SAVED_ENV = { ...process.env };
 
+// The default cases are the POSIX behaviour: a Windows host runs them as 'linux' (the cases about Windows set 'win32' themselves).
+beforeEach(() => { if (process.platform === 'win32') setup.impl.platform = 'linux'; });
 afterEach(() => {
   for (const key of Object.keys(setup.impl)) if (!(key in SAVED_IMPL)) delete setup.impl[key];
   Object.assign(setup.impl, SAVED_IMPL, { approvals: { ...SAVED_IMPL.approvals } });
@@ -96,7 +100,7 @@ function makeRuntime(prefix) {
     put(path.join(prefix, name), 'fixture', 0o755);
   }
 }
-const account = (home) => ({ pw_name: 'fixture', pw_uid: UID, pw_gid: process.getgid(), pw_dir: home });
+const account = (home) => ({ pw_name: 'fixture', pw_uid: UID, pw_gid: process.getgid?.() ?? 1000, pw_dir: home });
 const nullLock = () => ({ release() {} });
 
 // ------------------------------------------------------------------------------------------- test_setup_failures
@@ -642,7 +646,7 @@ describe('InstalledInstructionTests', () => {
     for (const name of fs.readdirSync(destination)) assert.equal(fs.statSync(path.join(destination, name)).mode & 0o777, 0o600);
   });
 
-  test('exported command resolves destination prefix and session', async () => {
+  test('exported command resolves destination prefix and session', { skip: skipOnWindows('spawns /bin/sh, #! scripts or shell-script fakes (and ENOEXEC/POSIX descendants); Windows runs .exe programs') }, async () => {
     const t = new Installed();
     const destination = path.join(t.root, 'export');
     await exportWith(t, destination, ['/producer/private/lcu']);
@@ -990,7 +994,7 @@ describe('InstalledInstructionTests', () => {
 
 // ------------------------------------------------------------------------------------------- test_windows_setup
 describe('WindowsSetupTests', () => {
-  test('node installer output decodes (non-UTF-8-safe stderr bytes)', async () => {
+  test('node installer output decodes (non-UTF-8-safe stderr bytes)', { skip: skipOnWindows('spawns /bin/sh, #! scripts or shell-script fakes (and ENOEXEC/POSIX descendants); Windows runs .exe programs') }, async () => {
     const base = tempdir();
     const home = path.join(base, 'home');
     fs.mkdirSync(home);
@@ -1072,7 +1076,7 @@ describe('WindowsSetupTests', () => {
     fs.mkdirSync(prefix);
     setup.impl.platform = 'win32';
     process.env.SystemRoot = 'D:\\Win';
-    delete process.env.SYSTEMROOT;
+    if (process.platform !== 'win32') delete process.env.SYSTEMROOT; // one case-insensitive variable on Windows
     const args = setup.parser().parse_args(['--prefix', prefix, '--session', 'direct']);
     const [, runtime, launcher, command] = setup.runtime_paths(args, { pw_name: 'x' });
     assert.equal(runtime, path.join(prefix, 'lcu.cmd'));
@@ -1404,12 +1408,13 @@ describe('file primitives', () => {
 
   test('regular_path refuses traversal, control characters and symlinked components', async () => {
     const root = tempdir();
-    assert.throws(() => setup.regular_path(`${root}/a/../b`), (e) => e.message === `Use a path without parent traversal or control characters: ${root}/a/../b`);
+    const nat = (p) => (process.platform === 'win32' ? p.replaceAll('/', '\\') : p);
+    assert.throws(() => setup.regular_path(`${root}/a/../b`), (e) => e.message === `Use a path without parent traversal or control characters: ${nat(`${root}/a/../b`)}`);
     assert.throws(() => setup.regular_path(`${root}/a\nb`), /control characters/);
     fs.symlinkSync(root, path.join(root, 'link'));
     assert.throws(() => setup.regular_path(path.join(root, 'link/x')),
       (e) => e.message === `Refusing a symlink in setup destination: ${path.join(root, 'link')}. Use manual configuration instead.`);
-    assert.equal(setup.regular_path(`${root}//x/./y`), `${root}/x/y`);
+    assert.equal(setup.regular_path(`${root}//x/./y`), nat(`${root}/x/y`));
   });
 
   test('read_file rejects non-regular files', async () => {
@@ -1418,7 +1423,7 @@ describe('file primitives', () => {
     assert.throws(() => setup.read_file(root), (e) => e.message === `Expected a regular file: ${root}`);
   });
 
-  test('atomic_write keeps an existing mode, creates 0600 files, deletes on null', async () => {
+  test('atomic_write keeps an existing mode, creates 0600 files, deletes on null', { skip: skipOnWindows('asserts POSIX mode bits (0600/0640/exec bit) and the XDG state layout; Windows has neither') }, async () => {
     const root = tempdir();
     const file = path.join(root, 'a/b/file');
     setup.atomic_write(file, Buffer.from('one'));
@@ -1432,7 +1437,7 @@ describe('file primitives', () => {
     assert.equal(fs.existsSync(file), false);
   });
 
-  test('apply_changes rolls back earlier writes when a later write fails', async () => {
+  test('apply_changes rolls back earlier writes when a later write fails', { skip: skipOnWindows('asserts POSIX mode bits (0600/0640/exec bit) and the XDG state layout; Windows has neither') }, async () => {
     const root = tempdir();
     const first = path.join(root, 'first');
     fs.writeFileSync(first, 'before');
@@ -1472,7 +1477,7 @@ describe('file primitives', () => {
     }
   });
 
-  test('SIGINT during a transaction rolls back and removes temporary files (KeyboardInterrupt)', async () => {
+  test('SIGINT during a transaction rolls back and removes temporary files (KeyboardInterrupt)', { skip: skipOnWindows('delivers SIGINT (KeyboardInterrupt) to setup; Windows has no SIGINT delivery between processes') }, async () => {
     // The setup process signals ITSELF at the second write (no other process is ever signalled).
     const root = tempdir();
     const script = `
@@ -1497,7 +1502,7 @@ describe('file primitives', () => {
     assert.deepEqual(fs.readdirSync(root).filter((n) => n.startsWith('.lcu-setup-')), []);
   });
 
-  test('installer_environment selects the account home and strips Node startup flags', async () => {
+  test('installer_environment selects the account home and strips Node startup flags', { skip: skipOnWindows('installer_environment with POSIX absolute homes (/home/u, /c); a leading-slash path is not absolute on Windows') }, async () => {
     const env = setup.installer_environment('/home/u', ['codex'], { PATH: '/bin', NODE_OPTIONS: '--require x', NODE_PATH: '/x', CODEX_HOME: '/c' });
     assert.deepEqual(env, { PATH: '/bin', CODEX_HOME: '/c', HOME: '/home/u', DISABLE_TELEMETRY: '1', DO_NOT_TRACK: '1', NO_COLOR: '1', CI: '1' });
     assert.throws(() => setup.installer_environment('/h', ['claude-code'], { CLAUDE_CONFIG_DIR: '/x' }),
@@ -1506,7 +1511,7 @@ describe('file primitives', () => {
       ['CI', 'CLAUDE_CONFIG_DIR', 'DISABLE_TELEMETRY', 'DO_NOT_TRACK', 'HOME', 'NO_COLOR']);
   });
 
-  test('installer_paths reports what is missing', async () => {
+  test('installer_paths reports what is missing', { skip: skipOnWindows('asserts POSIX mode bits (0600/0640/exec bit) and the XDG state layout; Windows has neither') }, async () => {
     const tools = tempdir();
     assert.throws(() => setup.installer_paths(tools), (e) => e.message === `Bundled agent installer missing: ${tools}/node/bin/node. Rerun scripts/install.sh with this --prefix.`);
     put(path.join(tools, 'node/bin/node'), '', 0o644);
@@ -1524,7 +1529,7 @@ describe('file primitives', () => {
     await assert.rejects(setup.preflight_mcp('n', 'm', CLIENTS.codex, 'user', '/', {}), (e) => e.message === 'MCP configuration preflight failed');
   });
 
-  test('run follows subprocess.run semantics', async () => {
+  test('run follows subprocess.run semantics', { skip: skipOnWindows('spawns /bin/sh, #! scripts or shell-script fakes (and ENOEXEC/POSIX descendants); Windows runs .exe programs') }, async () => {
     const r = await setup.run(['/bin/sh', '-c', 'printf "a\\r\\nb"; printf err >&2; exit 3'], { capture_output: true, text: true });
     assert.deepEqual([r.returncode, r.stdout, r.stderr], [3, 'a\nb', 'err']);
     await assert.rejects(setup.run(['/bin/sh', '-c', 'exit 4'], { check: true }), (e) => e.message === "Command '['/bin/sh', '-c', 'exit 4']' returned non-zero exit status 4.");
@@ -1532,7 +1537,7 @@ describe('file primitives', () => {
     await assert.rejects(setup.run(['/bin/sleep', '5'], { timeout: 0.2 }), (e) => e instanceof setup.TimeoutExpired);
   });
 
-  test('setup_lock creates the private lock file', async () => {
+  test('setup_lock creates the private lock file', { skip: skipOnWindows('asserts POSIX mode bits (0600/0640/exec bit) and the XDG state layout; Windows has neither') }, async () => {
     const home = tempdir();
     const lock = await setup.setup_lock(home);
     lock.release();
@@ -1579,7 +1584,7 @@ describe('review regressions (port-setup.md)', () => {
     return { prefix, home };
   };
 
-  test('#6 SIGINT to setup alone during the required doctor cancels it (exit 2, the cancellation message)', () => {
+  test('#6 SIGINT to setup alone during the required doctor cancels it (exit 2, the cancellation message)', { skip: skipOnWindows('delivers SIGINT (KeyboardInterrupt) to setup; Windows has no SIGINT delivery between processes') }, () => {
     const { prefix, home } = runtimeFixture('echo DOCTOR_CHILD; sleep 2; echo DOCTOR_DONE');
     const extra = `const run = s.impl.run; s.impl.run = (argv, o) => {
         if (argv.includes('doctor')) setTimeout(() => process.kill(process.pid, 'SIGINT'), 300);
@@ -1593,7 +1598,7 @@ describe('review regressions (port-setup.md)', () => {
     assert.ok(!r.stdout.includes('DOCTOR_DONE'));
   });
 
-  test('#1 SIGINT between steps raises KeyboardInterrupt, releases the lock and keeps setup state unwritten', () => {
+  test('#1 SIGINT between steps raises KeyboardInterrupt, releases the lock and keeps setup state unwritten', { skip: skipOnWindows('delivers SIGINT (KeyboardInterrupt) to setup; Windows has no SIGINT delivery between processes') }, () => {
     const { prefix, home } = runtimeFixture('exit 0');
     const extra = `s.impl.configure = () => { process.kill(process.pid, 'SIGINT'); return []; };`;
     const r = spawnSync(process.execPath, ['--input-type=module', '-e', mainScript(prefix, home, [], extra)], { encoding: 'utf8' });
@@ -1603,7 +1608,7 @@ describe('review regressions (port-setup.md)', () => {
     assert.equal(fs.existsSync(path.join(home, '.local/state/lcu/setup.json')), false);
   });
 
-  test('#9 a closed stdout makes setup finish, then report BrokenPipeError and exit 120', async () => {
+  test('#9 a closed stdout makes setup finish, then report BrokenPipeError and exit 120', { skip: skipOnWindows('a closed stdout pipe is EPIPE and exit 120 on POSIX; Windows reports a different error') }, async () => {
     const closedReader = (script) => new Promise((resolve) => {
       const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
       child.stdout.destroy(); // the reader goes away before setup writes anything
@@ -1622,7 +1627,7 @@ describe('review regressions (port-setup.md)', () => {
     assert.ok(fs.existsSync(path.join(home, '.local/state/lcu/setup.json')), 'setup ran to completion');
   });
 
-  test('#13 SIGINT at a prompt raises KeyboardInterrupt (unwinding), then the process ends by SIGINT; EOF raises EOFError', async () => {
+  test('#13 SIGINT at a prompt raises KeyboardInterrupt (unwinding), then the process ends by SIGINT; EOF raises EOFError', { skip: skipOnWindows('delivers SIGINT (KeyboardInterrupt) to setup; Windows has no SIGINT delivery between processes') }, async () => {
     // The process asks a helper to signal the process itself (its own pid) while it awaits the line in input().
     const script = `
       const s = await import(${JSON.stringify(setupUrl)});
@@ -1644,7 +1649,7 @@ describe('review regressions (port-setup.md)', () => {
     assert.equal(eof.stdout, 'Q? |EOFError:');
   });
 
-  test('#7 text decoding is strict unless errors=replace, with universal newlines in every text mode', async () => {
+  test('#7 text decoding is strict unless errors=replace, with universal newlines in every text mode', { skip: skipOnWindows('spawns /bin/sh, #! scripts or shell-script fakes (and ENOEXEC/POSIX descendants); Windows runs .exe programs') }, async () => {
     const r = await setup.run(['/bin/sh', '-c', 'printf "a\\r\\nb\\rc"'], { capture_output: true, text: true, encoding: 'utf-8', errors: 'replace' });
     assert.equal(r.stdout, 'a\nb\nc');
     await assert.rejects(setup.run(['/bin/sh', '-c', 'printf "\\377"'], { capture_output: true, text: true }),
@@ -1814,7 +1819,7 @@ describe('round-2 review regressions (round2-config.md)', () => {
 
   // R1: SIGINT while the OMP/Hermes installer runs must restore the previous package (Python's _package).
   for (const harness of ['omp', 'hermes']) {
-    test(`R1 SIGINT during ${harness} registration rolls the previous package back`, () => {
+    test(`R1 SIGINT during ${harness} registration rolls the previous package back`, { skip: skipOnWindows('delivers SIGINT (KeyboardInterrupt) to setup; Windows has no SIGINT delivery between processes') }, () => {
       const root = tempdir();
       const home = path.join(root, 'home');
       const release = path.join(root, 'release');
@@ -1851,7 +1856,7 @@ describe('round-2 review regressions (round2-config.md)', () => {
     });
   }
 
-  test('R2 the async runner refuses a shebang-less executable (ENOEXEC) and its body never runs, also in the Pi phase', async () => {
+  test('R2 the async runner refuses a shebang-less executable (ENOEXEC) and its body never runs, also in the Pi phase', { skip: skipOnWindows('spawns /bin/sh, #! scripts or shell-script fakes (and ENOEXEC/POSIX descendants); Windows runs .exe programs') }, async () => {
     const root = tempdir();
     const sentinel = path.join(root, 'sentinel');
     const file = path.join(root, 'pi');
@@ -1868,7 +1873,7 @@ describe('round-2 review regressions (round2-config.md)', () => {
     assert.equal(fs.existsSync(sentinel), false);
   });
 
-  test('R3 a timeout settles when the child has exited even if a descendant keeps its pipes', async () => {
+  test('R3 a timeout settles when the child has exited even if a descendant keeps its pipes', { skip: skipOnWindows('spawns /bin/sh, #! scripts or shell-script fakes (and ENOEXEC/POSIX descendants); Windows runs .exe programs') }, async () => {
     const root = tempdir();
     const child = path.join(root, 'inherited-pipe.cjs');
     // The descendant ends by itself after 700 ms; nothing is signalled.
@@ -1966,7 +1971,7 @@ describe('round-2 review regressions (round2-config.md)', () => {
 });
 
 // ------------------------------------------------------------------------------------------- Python differentials
-describe('Python differential (lcu/setup.py still present)', { skip: !havePython && pythonSkip }, () => {
+describe('Python differential (lcu/setup.py still present)', { skip: skipOnWindows('compares the CLI help and validate() messages, POSIX paths (/opt, /tmp) and the portable export with the Python oracle; Windows has no portable export and CPython text mode differs') || (!havePython && pythonSkip) }, () => {
   const pythonSource = havePython ? fs.readFileSync(PYTHON_SOURCE, 'utf8') : '';
   const pyRun = (code, env = {}) => spawnSync(PYTHON, ['-c', code], { cwd: ORACLE_ROOT, env: { ...process.env, ...env }, encoding: 'utf8' });
 

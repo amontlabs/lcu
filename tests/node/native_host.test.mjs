@@ -265,7 +265,7 @@ process.stdin.on('end', () => {
       assert.deepEqual(result.node.stdout, result.python.stdout, 'stdout bytes');
       assert.equal(result.node.code, result.python.code, 'exit status');
       assert.equal(result.node.signal, result.python.signal, 'signal');
-      assert.equal(result.node.stderr, result.python.stderr, 'stderr');
+      assert.equal(result.node.stderr, result.python.stderr.replace(/\r\n/g, '\n'), 'stderr'); // CPython text mode writes CRLF on Windows
       assert.deepEqual(result.nodeLog, result.pythonLog, 'bytes the host received');
       assert.equal(result.nodeArgv, result.pythonArgv, 'host argv');
     };
@@ -277,7 +277,7 @@ process.stdin.on('end', () => {
       const hostArgs = WINDOWS ? ['host-arg', '--flag'] : ['chrome-extension://x/', '--flag'];
       const result = await run(inbound, { LCU_FAKE_HELLO: hello.toString(), LCU_FAKE_EXIT: '3' }, hostArgs);
       assert.deepEqual(result.node.stdout, frame(hello)); // host to browser is never transformed
-      assert.equal(result.node.code, 3);
+      assert.equal(result.node.code, 3, result.node.stderr);
       assert.deepEqual(result.nodeLog, frames('{"a":1}', hello2, ...tail));
       assert.equal(result.nodeArgv, WINDOWS ? '["--flag"]' : '["chrome-extension://x/","--flag"]');
       same(result);

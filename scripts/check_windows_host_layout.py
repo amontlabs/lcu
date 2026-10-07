@@ -19,7 +19,12 @@ def main(argv=None):
     if not node:
         raise SystemExit('check_windows_host_layout: a Node >= 22 on PATH is required')
     argv = list(sys.argv[1:] if argv is None else argv)
-    os.execv(node, [node, '--disable-warning=ExperimentalWarning', str(SCRIPT), *argv])
+    command = [node, '--disable-warning=ExperimentalWarning', str(SCRIPT), *argv]
+    if os.name == 'nt':
+        # os.execv on Windows starts the new program and exits at once (status 0): run it and pass its status on.
+        import subprocess
+        raise SystemExit(subprocess.call(command))
+    os.execv(node, command)
 
 
 if __name__ == '__main__':

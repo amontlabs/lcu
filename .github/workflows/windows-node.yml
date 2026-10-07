@@ -26,7 +26,7 @@ jobs:
   windows-node:
     name: tests/node and top-level tests (windows-latest)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       # The repository's bytes, not the runner's autocrlf rewrite: shell scripts, JSON and hashed files are LF.
       - run: git config --global core.autocrlf false
@@ -50,6 +50,8 @@ jobs:
         # The Python oracles print UTF-8 like they do on the Linux runners (not the console code page).
         env:
           PYTHONUTF8: '1'
+          # Each lock on Windows starts a PowerShell holder (about two seconds): the suite needs more than the default 15 minutes.
+          LCU_TEST_OVERALL_SECONDS: '2700'
         run: |
           set -o pipefail
           LCU_TEST_PYTHON="$(command -v python)" LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh 2>&1 | tee "$RUNNER_TEMP/node-tests.log"

@@ -340,7 +340,7 @@ describe('PruneTests', () => {
     // Independent oracle: os.walk + lstat in CPython when available (portable; no GNU/BSD stat syntax),
     // otherwise the per-entry lstat sizes listed explicitly.
     let expected;
-    if (PYTHON) {
+    if (PYTHON && !WINDOWS) { // CPython reports the target length as the size of an NTFS symlink, Node (libuv) reports 0
       const oracle = spawnSync(PYTHON, ['-c', 'import os, sys\nroot = sys.argv[1]\ntotal = os.lstat(root).st_size\n'
         + 'for parent, dirs, files in os.walk(root):\n    for name in dirs + files:\n        total += os.lstat(os.path.join(parent, name)).st_size\n'
         + 'print(total)', dir], { encoding: 'utf8' });

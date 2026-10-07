@@ -100,7 +100,7 @@ jobs:
     # layouts, fcntl, mode bits, Unix sockets) skip themselves on Windows.
     name: Windows build and tests
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       # The repository's bytes, not the runner's autocrlf rewrite: shell scripts, JSON and hashed files are LF.
       - run: git config --global core.autocrlf false
@@ -129,6 +129,8 @@ jobs:
         # The Python oracles print UTF-8 like they do on the Linux runners (not the console code page).
         env:
           PYTHONUTF8: '1'
+          # Each lock on Windows starts a PowerShell holder (about two seconds): the suite needs more than the default 15 minutes.
+          LCU_TEST_OVERALL_SECONDS: '2700'
         run: LCU_TEST_PYTHON="$(command -v python)" LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
       - run: python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"
       - run: python scripts/check_archive.py (Get-ChildItem "$env:RUNNER_TEMP\dist\*.zip").FullName

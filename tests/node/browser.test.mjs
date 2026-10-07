@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
 import * as browser from '../../lcu/browser.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 const RELAY_CLOSURE = browser._relay_implementation(fileURLToPath(new URL('../..', import.meta.url)).replace(/[\\/]$/, ''));
 import { io, PySystemExit } from '../../lcu/compat/argparse.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
@@ -117,11 +118,11 @@ describe('BrowserSetupTests', () => {
     const command = readFileSync(join(destination, 'lcu-native-host.cmd'));
     assert.ok(command.includes('@echo off'));
     assert.equal(command.toString(), WINDOWS_CMD('C:\\LCU\\lcu.cmd'));
-    assert.equal(readFileSync(join(destination, '.lcu-browser-host'), 'utf8'), `${app}\n`);
+    assert.equal(readFileSync(join(destination, '.lcu-browser-host'), 'utf8'), `${app}${process.platform === 'win32' ? '\r\n' : '\n'}`); // text mode
     assert.equal(calls.length, 2);
   });
 
-  it('macos manifest locations match original installer', () => {
+  it('macos manifest locations match original installer', { skip: skipOnWindows('macOS Chrome manifest locations and rewrite (Library/Application Support under HOME); never runs on Windows') }, () => {
     const home = '/private/tmp/disposable-home';
     const found = browser._manifest_paths({ HOME: home }, 'Darwin');
     assert.equal(found.size, 8);
@@ -146,7 +147,7 @@ describe('BrowserSetupTests', () => {
     return { root, home, resources, source, host, env };
   }
 
-  it('macos setup rewrites only manifests for selected original host', () => {
+  it('macos setup rewrites only manifests for selected original host', { skip: skipOnWindows('macOS Chrome manifest locations and rewrite (Library/Application Support under HOME); never runs on Windows') }, () => {
     const { root, home, resources, env } = macFixture(scratch());
     const support = join(home, 'Library/Application Support');
     const chrome = join(support, 'Google/Chrome/NativeMessagingHosts/com.openai.codexextension.json');
