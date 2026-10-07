@@ -8,7 +8,7 @@
 // start children with a disposition already set to SIG_IGN by their own (spawned) parent.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { exit_status } from '../../lcu/entry.mjs';
 import { QUARANTINED, quarantine_environment, restore_environment } from '../../lcu/startup_vars.mjs';
 import { HELP_SUFFIX, USAGE } from '../../lcu/runtime.mjs';
+import { hostileEnvironments, standIns } from './path_hijack.mjs';
 import { DISPOSITION_SCRIPT, python312, tempDir } from './runtime_support.mjs';
 
 const PYTHON = python312();
@@ -743,5 +744,157 @@ describe('entry error mapping and exit statuses', () => {
     } finally {
       temporary.cleanup();
     }
+  });
+});
+
+// Greptile P1 (security): everything the pre-Node shell code runs must be a builtin or an absolute system path. A root
+// installer or launcher inheriting a PATH with an untrusted directory must never run that directory's `cat`, `ls`...
+describe('PATH hijack: the pre-Node shell code never looks a command up through PATH', () => {
+  let temporary;
+  let hijack;
+  beforeEach(() => {
+    temporary = tempDir();
+    hijack = standIns(temporary.path);
+  });
+  afterEach(() => temporary.cleanup());
+
+  const environments = (extra = {}) => hostileEnvironments(hijack.dir, extra);
+  const launch = (file, args, env, options = {}) => spawnSync(file, args, { encoding: 'utf8', env, cwd: temporary.path, ...options });
+  const noHits = (label) => assert.deepEqual(hijack.hits(), [], `${label}: a PATH stand-in ran`);
+
+  it('the stand-ins themselves are found through PATH (the harness can see a hijack)', () => {
+    const result = spawnSync('/bin/sh', ['-c', 'cat; ls'], { env: { PATH: hijack.dir }, encoding: 'utf8' });
+    assert.equal(result.status, 0);
+    assert.equal(hijack.hits().length, 2);
+  });
+
+  it('--help, -h and the registration forms with a missing Node: static help, no stand-in runs', () => {
+    const root = release(temporary.path, null);
+    for (const env of environments()) {
+      for (const args of [['--help'], ['-h'], ['--chrome', '--help'], ['--audio', '--chrome', '-h']]) {
+        const result = launch(join(root, 'bin/lcu'), args, env);
+        assert.equal(result.status, 0, `${env.PATH} ${args}: ${result.stderr}`);
+        assert.equal(result.stdout, `${USAGE}${HELP_SUFFIX}\n`);
+      }
+      noHits(`missing Node, PATH=${env.PATH}`);
+    }
+  });
+
+  it('every launcher with a missing, non-executable or refused Node: the diagnostic, no stand-in runs', () => {
+    const missing = release(temporary.path, null, { name: 'missing' });
+    const plain = release(temporary.path, null, { name: 'plain' });
+    writeFileSync(join(plain, 'agent-tools/node/bin/node'), '#!/bin/sh\n');
+    chmodSync(join(plain, 'agent-tools/node/bin/node'), 0o644);
+    const writable = release(temporary.path, null, { name: 'writable' });
+    writeFileSync(join(writable, 'agent-tools/node/bin/node'), '#!/bin/sh\n');
+    chmodSync(join(writable, 'agent-tools/node/bin/node'), 0o755);
+    chmodSync(join(writable, 'agent-tools/node'), 0o777);
+    const loop = release(temporary.path, null, { name: 'loop' });
+    symlinkSync(join(loop, 'agent-tools/node/bin/node'), join(loop, 'agent-tools/node/bin/node'));
+    for (const env of environments()) {
+      for (const root of [missing, plain, writable, loop]) {
+        for (const shim of SHIMS) {
+          for (const args of [[], ['--version'], ['--help'], ['sandbox']]) {
+            const result = launch(join(root, 'bin', shim), args, env);
+            assert.ok([0, 1].includes(result.status), `${shim} ${args}: ${result.stderr}`);
+            if (result.status === 1) assert.match(result.stderr, /Cannot run the ChatGPT app's bundled Node|cannot be read|too many levels/);
+          }
+        }
+      }
+      noHits(`refused Node, PATH=${env.PATH}`);
+    }
+    // Invoked through a symlink and by a bare relative name (the self-location code).
+    const link = join(temporary.path, 'lcu-link');
+    symlinkSync(join(missing, 'bin/lcu'), link);
+    for (const env of environments()) {
+      assert.equal(launch(link, ['--help'], env).status, 0);
+      assert.equal(launch('bin/lcu', ['--version'], env, { cwd: missing }).status, 1);
+    }
+    noHits('symlinked and relative invocation');
+  });
+
+  it('a normal launch (real Node, probe entry) runs no stand-in, and the children keep the caller PATH', (t) => {
+    const node = trustedNode();
+    if (!node) return t.skip('the ChatGPT app is not installed');
+    const root = release(temporary.path, node, { entry: PROBE });
+    for (const env of environments({ NODE_OPTIONS: '--no-warnings', CDPATH: '/' })) {
+      for (const shim of SHIMS) {
+        const result = launch(join(root, 'bin', shim), ['--version'], env);
+        assert.equal(result.status, 0, `${shim} PATH=${env.PATH}: ${result.stderr}`);
+        assert.equal(JSON.parse(result.stdout).env.PATH, env.PATH, 'the caller PATH is passed on untouched');
+      }
+      noHits(`normal launch, PATH=${env.PATH}`);
+    }
+  });
+
+  it('the Chrome relay launcher template (browser.mjs) runs no stand-in', async () => {
+    const { _relay_launcher } = await import('../../lcu/browser.mjs');
+    const lcu = join(temporary.path, 'stable lcu');
+    const relay = join(temporary.path, 'lcu-native-host');
+    writeFileSync(relay, _relay_launcher(lcu, temporary.path, 'Linux'));
+    chmodSync(relay, 0o700);
+    for (const env of environments()) {
+      const refused = launch(relay, ['chrome-extension://x/'], env);
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /is missing; reinstall LCU/);
+      assert.equal(refused.stdout, '');
+    }
+    writeFileSync(lcu, '#!/bin/sh\nprintf "%s|" "$@"\n');
+    chmodSync(lcu, 0o755);
+    for (const env of environments()) {
+      const ok = launch(relay, ['origin'], env);
+      assert.equal(ok.status, 0, ok.stderr);
+      assert.equal(ok.stdout, `browser|__native-host|${temporary.path}|origin|`);
+    }
+    noHits('relay launcher');
+  });
+
+  it('adapters/claude-plugin/scripts/ensure-lcu.sh: every early exit runs no stand-in', () => {
+    const hook = join(REPO, 'adapters/claude-plugin/scripts/ensure-lcu.sh');
+    assert.equal(run('/bin/sh', ['-n', hook]).status, 0);
+    const home = join(temporary.path, 'home');
+    mkdirSync(home);
+    mkdirSync(join(temporary.path, 'app-without-node'));
+    const cases = [
+      { LCU_APP: join(temporary.path, 'no-app') }, // never the default app: that would reach the network
+      { CLAUDE_CONFIG_DIR: '/somewhere', LCU_APP: join(temporary.path, 'no-app') },
+      { LCU_APP: join(temporary.path, 'app-without-node') },
+    ];
+    let n = 0;
+    for (const extra of cases) {
+      for (const env of environments({ HOME: home, ...extra })) {
+        n += 1;
+        const state = join(temporary.path, `state-${n}`);
+        const full = { ...env, CLAUDE_PLUGIN_DATA: state, TMPDIR: temporary.path };
+        const result = launch('/bin/sh', [hook], full);
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.stdout, /^\{"systemMessage": "LCU plugin: /);
+        // A stale lock (older than the hook's timeout) is taken over with find/rmdir/mkdir.
+        mkdirSync(join(state, 'lock'), { recursive: true });
+        utimesSync(join(state, 'lock'), new Date(0), new Date(0));
+        assert.equal(launch('/bin/sh', [hook], full).status, 0);
+      }
+    }
+    noHits('plugin hook');
+  });
+
+  it('the Python trampolines hand over to an absolute /bin/sh and read no PATH', () => {
+    for (const name of ['install.py', 'install_macos.py']) {
+      const text = readFileSync(join(REPO, 'scripts', name), 'utf8');
+      assert.match(text, /os\.execv\('\/bin\/sh', \['\/bin\/sh', '-p', script, \*sys\.argv\[1:\]\]\)/, name);
+      assert.ok(!/subprocess|os\.system|os\.exec[lv]p|shutil\.which|os\.environ/.test(text), name);
+    }
+  });
+
+  it('the Windows launcher templates only use cmd builtins or absolute paths', async () => {
+    const { command_file_text } = await import('../../scripts/install_windows.mjs');
+    const text = command_file_text({ prefix: 'C:\\p', generation: 'C:\\p\\apps\\g', node: 'C:\\p\\apps\\g\\app\\n.exe', sha256: 'a'.repeat(64) });
+    // Programs started by the template: the private node.exe by absolute (%LCU_NODE%) path, certutil under %SystemRoot%.
+    assert.match(text, /^"%LCU_NODE%" /m);
+    assert.match(text, /"%SystemRoot%\\System32\\certutil\.exe"/);
+    const bare = text.split('\r\n').filter((line) => /(^|[(&|] *)(certutil|powershell|pwsh|where|findstr|find|sort|more|type|node|python)(\.exe)?\b/i
+      .test(line.replace(/%SystemRoot%\\System32\\certutil\.exe/i, '')));
+    assert.deepEqual(bare, [], 'no bare command name is looked up through PATH');
+    assert.match(readFileSync(join(REPO, 'bin/lcu.cmd'), 'utf8'), /^call "%~dp0\.\.\\\.\.\\\.\.\\lcu\.cmd" %\*$/m);
   });
 });

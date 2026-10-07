@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { hostileEnvironments, standIns } from './path_hijack.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SCRIPT = path.join(ROOT, 'scripts/install.sh');
@@ -19,8 +20,8 @@ process.umask(0o022);
 const HOST = process.platform === 'darwin' ? 'Darwin' : 'Linux';
 
 const MARKERS = {
-  Linux: ["cat <<'LCU_STATIC_HELP_LINUX'\n", '\nLCU_STATIC_HELP_LINUX\n'],
-  Darwin: ["cat <<'LCU_STATIC_HELP_DARWIN'\n", '\nLCU_STATIC_HELP_DARWIN\n'],
+  Linux: ["__lcu_emit <<'LCU_STATIC_HELP_LINUX'\n", '\nLCU_STATIC_HELP_LINUX\n'],
+  Darwin: ["__lcu_emit <<'LCU_STATIC_HELP_DARWIN'\n", '\nLCU_STATIC_HELP_DARWIN\n'],
 };
 
 /** Help text argparse prints at the default width (COLUMNS unset, no terminal: 80 columns). */
@@ -354,6 +355,62 @@ test('the old updater trampolines exec /bin/sh install.sh with the same argument
     const result = spawnSync('python3', ['-B', path.join(archive, 'scripts/install.py'), '--prefix', '/opt/x', 'a b'], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, `${path.join(archive, 'scripts/install.sh')}|--prefix|/opt/x|a b|`);
+  } finally {
+    cleanup();
+  }
+});
+
+// Greptile P1 (security): `install.sh --help` (and every other early exit) ran `cat` through the caller's PATH,
+// before any Node check. As root with an untrusted directory on PATH that executed the directory's `cat`.
+test('PATH hijack: no early-exit branch of install.sh runs a command found through PATH', async () => {
+  const { archive, base, cleanup } = sandbox();
+  try {
+    const hijack = standIns(base);
+    const expectedHelp = await generatedHelp(HOST);
+    const home = path.join(base, 'home');
+    fs.mkdirSync(home);
+    // Builtins only, so the fake Node itself never reaches for PATH.
+    const { app, node } = fakeApp(base);
+    fs.writeFileSync(node, '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+    const plain = fakeApp(path.join(base, 'plain'), { mode: 0o644 });
+    const writable = fakeApp(path.join(base, 'writable'));
+    fs.chmodSync(path.dirname(writable.node), 0o777);
+    const missing = path.join(base, 'missing');
+    const cases = [
+      // [args, expected status, expected stdout]
+      [['--help', '--existing-app', missing], 0, expectedHelp],
+      [['-h', '--existing-app', missing], 0, expectedHelp],
+      [['--he', '--existing-app', missing], 0, expectedHelp],
+      [['--existing-app', plain.app, '--help'], 0, expectedHelp],
+      [['--existing-app', writable.app, '-h'], 0, expectedHelp],
+      [['--existing-app', '~', '--help'], 0, expectedHelp],
+      [['--existing-app', '~no-such-user-lcu', '--help'], 0, expectedHelp],
+      [['--existing-app', missing, '--runtime-only'], 1, ''],
+      [[`--exi=${plain.app}`], 1, ''],
+      [['--existing-app', writable.app], 1, ''],
+      [['--existing-app', '~no-such-user-lcu'], 1, ''],
+      [['--existing-app', '~'], 1, ''],
+      [['--existing-app', `${app}/`], HOST === 'Linux' ? 0 : 1, null],
+      [['--existing-app', app, '--', '--help'], HOST === 'Linux' ? 0 : 1, null],
+    ];
+    for (const env of hostileEnvironments(hijack.dir, { HOME: home })) {
+      for (const [args, status, stdout] of cases) {
+        // `~` expands through $HOME (set) or, when HOME is unset, through the account database via `id`.
+        for (const withHome of [true, false]) {
+          const environment = { ...env };
+          if (!withHome) delete environment.HOME;
+          const result = spawnSync('/bin/sh', [path.join(archive, 'scripts/install.sh'), ...args], { encoding: 'utf8', env: environment });
+          const label = `PATH=${env.PATH} HOME=${withHome} ${args.join(' ')}: ${result.stderr}`;
+          assert.equal(result.status, status, label);
+          if (stdout !== null) assert.equal(result.stdout, stdout, label);
+        }
+      }
+      assert.deepEqual(hijack.hits(), [], `PATH=${env.PATH}: a PATH stand-in ran`);
+    }
+    // The unsupported-platform and tools-missing branches print with printf only; the source has no bare tool.
+    const code = fs.readFileSync(SCRIPT, 'utf8').split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
+    assert.ok(!/(^|[;|&(`]|\$\()\s*(cat|ls|id|uname|readlink|dirname|basename|sed|awk|grep|tr|cut|head|tail|env|stat|find|mkdir|rm|node|python3?|bash)\b/m
+      .test(code.replace(/<<'LCU_STATIC_HELP_[A-Z]+'[\s\S]*?\nLCU_STATIC_HELP_[A-Z]+\n/g, '')), 'a bare tool name in command position');
   } finally {
     cleanup();
   }

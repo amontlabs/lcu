@@ -17,9 +17,15 @@
 set -eu
 set -f
 
+# Standard input to standard output, line for line. Shell builtins only: this runs before any trusted Node exists
+# (possibly as root), so no command is ever looked up through the caller's PATH (not even `cat`).
+__lcu_emit() {
+  while IFS= read -r __LCU_LINE; do printf '%s\n' "$__LCU_LINE"; done
+}
+
 __lcu_install_help() {
   case $__LCU_OS in
-    Linux) cat <<'LCU_STATIC_HELP_LINUX'
+    Linux) __lcu_emit <<'LCU_STATIC_HELP_LINUX'
 usage: install.py [-h] [--prefix PREFIX] [--user USER] [--agent AGENT]
                   [--scope {user,project}] [--project PROJECT] [--yes]
                   [--list-agents] [--export EXPORT] [--chrome] [--no-chrome]
@@ -88,7 +94,7 @@ Run on the machine hosting the agent backend. For Codex SSH remote projects,
 that is the VM. This command never installs or authenticates the agent itself.
 LCU_STATIC_HELP_LINUX
     ;;
-    Darwin) cat <<'LCU_STATIC_HELP_DARWIN'
+    Darwin) __lcu_emit <<'LCU_STATIC_HELP_DARWIN'
 usage: install_macos.py [-h] [--prefix PREFIX] [--user USER] [--agent AGENT]
                         [--scope {user,project}] [--project PROJECT] [--yes]
                         [--list-agents] [--export EXPORT] [--chrome]
