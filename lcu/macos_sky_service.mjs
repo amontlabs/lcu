@@ -78,14 +78,13 @@ const NATIVE_PIPE_FAILURE = 'Sky Computer Use native pipe startup failed';
 // Upper bound on what a failed request waits for the host's recovery attempt: the host
 // bounds its own checks and the service's exit to under this.
 const RECOVER_TIMEOUT_MS = 15_000;
-// Time the host may still need after its signal (its wait for the service to exit).
-const RECOVER_EXIT_WAIT_MS = 3_500;
 let recovering;
 
 // Ask the private host to recover from a stale Computer Use service. It stops one only
 // when it proves that service is stale, holds the connection and is ours to stop; it
 // answers `recovered: true` once that service has exited. Resolves to true only then.
-// Never rejects, and never waits longer than RECOVER_TIMEOUT_MS.
+// Never rejects, and never waits longer than RECOVER_TIMEOUT_MS. Giving up closes the
+// connection, and the host signals nothing once it sees that.
 function askHostToRecover(runtime) {
   const address = runtime?.env?.LCU_MAC_LIFETIME_SOCKET;
   if (!address || typeof runtime.nativePipe?.createConnection !== 'function') {
@@ -94,8 +93,6 @@ function askHostToRecover(runtime) {
   // A shorter bound may be configured (tests); the wait never exceeds RECOVER_TIMEOUT_MS.
   const configured = Number(runtime.env.LCU_MAC_RECOVER_TIMEOUT_MS);
   const timeoutMs = configured > 0 ? Math.min(configured, RECOVER_TIMEOUT_MS) : RECOVER_TIMEOUT_MS;
-  // Measured from here, with the timer: the host must not signal once this request has given up.
-  const deadline_unix_ms = Date.now() + timeoutMs - RECOVER_EXIT_WAIT_MS;
   return new Promise(resolve => {
     let socket;
     let finished = false;
@@ -126,7 +123,7 @@ function askHostToRecover(runtime) {
       });
       socket.on('error', () => finish(false));
       socket.on('close', () => finish(false));
-      socket.write(Buffer.from(JSON.stringify({type: 'recover', deadline_unix_ms}) + '\n'));
+      socket.write(Buffer.from(JSON.stringify({type: 'recover'}) + '\n'));
     }).catch(() => finish(false));
   });
 }

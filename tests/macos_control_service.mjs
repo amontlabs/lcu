@@ -25,6 +25,7 @@ const pending = new Map();
 const observedContexts = [];
 const lifetimeMessages = [];
 const recoverRequests = [];
+const recoverClosed = [];
 let recoverReply;
 let recoverDelayMs = 0;
 
@@ -115,6 +116,7 @@ const controlServer = createServer(socket => consumeLines(socket, message => {
 const lifetimeServer = createServer(socket => consumeLines(socket, message => {
   if (message.type === 'recover') {
     recoverRequests.push(message);
+    socket.once('end', () => recoverClosed.push(message));
     // undefined: never answer, as a host stuck behind other work would.
     if (recoverReply === undefined) return;
     setTimeout(() => {
@@ -385,11 +387,9 @@ try {
   assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
   assert.equal(recoverRequests.length, 1);
   assert.equal(recoverRequests[0].type, 'recover');
-  // The host is told when to stop signaling: before this request gives up (15 s minus the
-  // host's 3.5 s wait for the exit), and not in the past.
-  const sentDeadline = recoverRequests[0].deadline_unix_ms;
-  assert.ok(Number.isSafeInteger(sentDeadline));
-  assert.ok(sentDeadline > Date.now() + 5_000 && sentDeadline <= Date.now() + 11_500, String(sentDeadline - Date.now()));
+  // No wall-clock deadline crosses processes: the host signals only while this connection
+  // is still open, and the client closes it when it gives up.
+  assert.deepEqual(recoverRequests[0], {type: 'recover'});
   assert.equal(countOriginal(), rpcBefore + 2, 'the request runs once, fails, and is retried exactly once');
 
   // The retry is the last attempt: a persisting failure is thrown after exactly one retry
@@ -423,23 +423,6 @@ try {
     assert.equal(countOriginal(), rpcBefore + 1, `no retry for ${reply}`);
     assert.equal(recoverRequests.length, recoveriesBefore + 1);
   }
-
-  // The deadline sent to the host counts from the start of the wait, however long the
-  // connection takes to come up.
-  reset();
-  recoverReply = notRecovered;
-  globalThis.nodeRepl.env.LCU_MAC_RECOVER_TIMEOUT_MS = '5000';
-  const realConnect = globalThis.nodeRepl.nativePipe.createConnection;
-  globalThis.nodeRepl.nativePipe.createConnection = async address => {
-    await new Promise(resolve => setTimeout(resolve, 600));
-    return realConnect(address);
-  };
-  const waitStarted = Date.now();
-  await failure({fail: startupFailure});
-  globalThis.nodeRepl.nativePipe.createConnection = realConnect;
-  globalThis.nodeRepl.env.LCU_MAC_RECOVER_TIMEOUT_MS = undefined;
-  const delayedDeadline = recoverRequests.at(-1).deadline_unix_ms;
-  assert.ok(delayedDeadline <= waitStarted + 5_000 - 3_500 + 100, `deadline ${delayedDeadline - waitStarted} ms after the start`);
 
   // Messages that only contain the words (a validation or approval error) are not a native
   // pipe startup failure and never reach the host.
@@ -493,6 +476,8 @@ try {
   const hangMs = Date.now() - hangStarted;
   assert.ok(hangMs >= 350 && hangMs < 2_000, `recovery wait was ${hangMs} ms`);
   assert.equal(countOriginal(), rpcBefore + 1);
+  // Giving up closes the connection, which is what tells the host to signal nothing.
+  await waitFor(() => recoverClosed.length === recoverRequests.length, 'the client closes a recovery it gave up on');
   globalThis.nodeRepl.env.LCU_MAC_RECOVER_TIMEOUT_MS = undefined;
 
   // A frozen error object is still thrown unchanged when nothing was recovered.
