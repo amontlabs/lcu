@@ -756,6 +756,20 @@ try {
   await turnEnded.run({session_id: raceTurn.session_id, turn_id: raceTurn.turn_id});
   globalThis.nodeRepl.requestMeta = {};
 
+  // A turn end the hook rejects (missing IDs) still counts as a turn end: no retry follows.
+  reset();
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const missingRequest = failure({failUntilRecovered: true});
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the request did not ask for recovery');
+  await assert.rejects(turnEnded.run({session_id: '', turn_id: ''}));
+  releaseRecovery();
+  assert.equal((await missingRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore + 1, 'nothing is sent again after any turn end');
+
   // A turn that is still active is retried, after the pending turn cleanup.
   reset();
   const activeMetadata = {session_id: 'active-session', turn_id: 'active-turn', call_id: 'active-call'};
