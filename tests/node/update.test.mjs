@@ -20,6 +20,7 @@ import { PlainOSError } from '../../lcu/compat/http.mjs';
 import { dumps, toPlain, ValueError } from '../../lcu/compat/pyjson.mjs';
 import { TimeoutExpired } from '../../lcu/compat/subprocess.mjs';
 import { _resetTempdir } from '../../lcu/compat/tempfile.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const INFO = {
@@ -50,6 +51,9 @@ beforeEach(() => {
   root = release(tmp);
   out = ''; err = ''; spawned = [];
   update._inject.io = { stdout: (t) => { out += t; }, stderr: (t) => { err += t; } };
+  // The default cases are the POSIX behaviour (LF stdio, XDG cache): a Windows host runs them as 'linux'. The
+  // Windows behaviour (CRLF text mode, LOCALAPPDATA, python preflight) has its own cases that inject 'win32'.
+  update._inject.platform = () => (process.platform === 'win32' ? 'linux' : process.platform);
   update._inject.spawn = (command, args, options) => {
     spawned.push({ command, args, options });
     return { on() {}, unref() {} };
@@ -329,7 +333,7 @@ describe('update', () => {
     assert.equal(spawned.length, 1);
   });
 
-  test('F01: a real refresh runs the launcher, which refuses an unvalidated Node', () => {
+  test('F01: a real refresh runs the launcher, which refuses an unvalidated Node', { skip: skipOnWindows('spawns the POSIX /bin/sh -p launcher shim (the Windows refresh goes through cmd.exe and has its own fixture case)') }, () => {
     // Real spawn (default seam) of an owned fixture launcher: proves the argv reaches /bin/sh -p with the release
     // launcher and that nothing else is executed. The fixture launcher records its argv and exits.
     update._inject.spawn = SAVED_INJECT.spawn;
@@ -857,6 +861,18 @@ describe('update', () => {
     spawned.length = 0;
     update.notice(root);
     assert.equal(spawned.length, 1);
+  });
+
+  test('refresh stamp tolerates clock skew', () => {
+    const stamp = siblingFile('refresh.stamp');
+    assert.equal(update.refresh_claimed(), true);
+    const mtime = fs.statSync(stamp).mtimeMs / 1000;
+    const now = mtime - 0.05; // the stamp's mtime slightly ahead of time.time()
+    assert.equal(update.refresh_claimed(now), false);
+    const future = now + update.STAMP_SKEW + 1;
+    fs.utimesSync(stamp, future, future);
+    assert.equal(update.refresh_claimed(now), true);
+    assert.equal(update.refresh_claimed(now + 3), false);
   });
 
   test('check CLI', async () => {

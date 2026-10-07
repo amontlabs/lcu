@@ -305,3 +305,23 @@ def _(sb):
         _write(sb, 'allow', query)
     sb.lcu('apps', 'list')
     sb.lcu('apps', '--json')
+
+
+@scenario('apps/plist-malformed-xml', hosts=MAC)
+def _(sb):
+    # Steam desktop shortcuts end their Info.plist with NUL bytes, which plistlib rejects with an ExpatError: such a
+    # bundle is not an app (skipped by name lookup, rejected by path), and the other apps keep working.
+    apps = _prepare(sb)
+    fm.app_bundle(apps, 'Zed', 'org.bbtest.zed')
+    steam = fm.app_bundle(apps, 'Balatro', 'org.bbtest.balatro', display='Balatro')
+    plist = steam / 'Contents/Info.plist'
+    plist.write_bytes(plist.read_bytes() + b'\0\0')
+    fixtures.write(fm.store_path(sb), json.dumps({KEY: ['org.bbtest.zed', 'org.bbtest.balatro']}))
+    sb.lcu('apps', 'list')
+    sb.lcu('apps', '--json')
+    _write(sb, 'allow', 'Zed')
+    _write(sb, 'allow', 'Balatro')
+    _write(sb, 'allow', str(steam))
+    _write(sb, 'revoke', 'Balatro')
+    _write(sb, 'revoke', 'org.bbtest.balatro')
+    sb.lcu('apps', 'list')

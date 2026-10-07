@@ -125,6 +125,20 @@ describe('AppsTests', () => {
     assert.deepEqual(calls, []);
   });
 
+  it('a bundle with an unparseable xml plist is skipped', () => {
+    // Steam desktop shortcuts end their Info.plist with NUL bytes; plistlib raises ExpatError.
+    const contents = join(applications, 'Balatro.app/Contents');
+    mkdirSync(contents, { recursive: true });
+    writeFileSync(contents + '/Info.plist', Buffer.concat([Buffer.from(plistXml({ CFBundleName: 'Balatro' })), Buffer.from([0, 0])]));
+    assert.equal(apps.bundle_info(dirname(contents)), null);
+    writeStore({ [apps.KEY]: ['dev.zed.Zed'] });
+    const [code, out] = runApps([]);
+    assert.equal(code, 0);
+    assert.ok(out.includes('dev.zed.Zed'));
+    assert.ok(!out.includes('not installed'));
+    assert.deepEqual(apps.resolve('Zed', { home }), ['dev.zed.Zed', 'Zed', true]);
+  });
+
   it('list json and empty list', () => {
     let [, out] = runApps(['list']);
     assert.ok(out.includes('No apps are always allowed'));

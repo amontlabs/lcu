@@ -678,3 +678,33 @@ def _(sb):
         sb.lcu('update', '--yes', env=env, timeout=300)
         sb.run(['readlink', sb.prefix / 'current'], label='current still points at the old release')
     fm.scrub_times(sb)
+
+
+@scenario('update/notice-refresh-skew', hosts=ANY)
+def _(sb):
+    # Windows file times can run ahead of time.time(): a stamp up to 2 s in the future still counts as claimed (no
+    # second refresh), one further ahead does not.
+    sb.place_release()
+    newer = _bump(_current())
+    with fm.server(sb) as srv:
+        env = srv.env()
+        srv.latest(f'v{newer}')
+        cache = fm.cache_dir(sb) / 'update.json'
+        stamp = fm.cache_dir(sb) / 'refresh.stamp'
+        fm.write_update_cache(sb, fm.latest_info(newer), age=10 ** 5)
+        before = cache.read_bytes()
+        fixtures.write(stamp, '')
+        later = time.time() + 1
+        os.utime(stamp, (later, later))
+        sb.lcu('update', '--notice', env=env, label='stale cache, stamp 1 s ahead: claimed, no refresh')
+        time.sleep(2)
+        _note(sb, f'--- cache unchanged: {cache.read_bytes() == before}')
+        later = time.time() + 60
+        os.utime(stamp, (later, later))
+        sb.lcu('update', '--notice', env=env, label='stale cache, stamp 60 s ahead: refresh starts')
+        ok = _wait_for(lambda: cache.read_bytes() != before)
+        time.sleep(0.5)
+        _note(sb, f'--- refresh finished: {ok}')
+        _show_cache(sb)
+        fm.show_requests(sb, srv)
+    fm.scrub_times(sb)

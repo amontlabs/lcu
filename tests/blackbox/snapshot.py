@@ -22,6 +22,9 @@ NORMALISERS = {
     # macOS lifetime socket directory `lcu-ml-<suffix>`: Python mkdtemp uses 8 characters, Node mkdtemp 6, so any
     # length is accepted (scenarios that care report the suffix length separately).
     'lcu-ml': (re.compile(r'lcu-ml-[A-Za-z0-9_]+'), 'lcu-ml-<RANDOM>'),
+    # The macOS lifetime host's `LCU macOS turn-ended command: exit=... elapsed=N ms` line (LCU 0.9.6+): the elapsed
+    # wall-clock time of the signed client varies from run to run.
+    'elapsed-ms': (re.compile(r'(turn-ended command: exit=\S+ elapsed=)\d+ ms'), r'\1<MS> ms'),
     # An uncaught exception: the traceback body is implementation detail, the exception type is not. (The Node
     # port prints the same header and `Type: message`, followed by its stack frames `    at ...`, which go too.)
     'traceback': (re.compile(r'Traceback \(most recent call last\):\n(?:[ \t][^\n]*\n)*([A-Za-z_][\w.]*)(?::[^\n]*)?(?:\n[ \t]+at [^\n]*)*'),

@@ -14,12 +14,20 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { pyStrip } from './compat/argparse.mjs';
-import { PyOSError, fromNodeError, isOSError, pyStr, spawnErrorText } from './compat/pyerr.mjs';
+import { PyOSError, fromNodeError, isOSError, pyStr, reprStr, spawnErrorText } from './compat/pyerr.mjs';
 import { TimeoutExpired, execFormatError } from './compat/subprocess.mjs';
 import { mkdtemp } from './compat/tempfile.mjs';
 import { ValueError, dumps, equal, loads } from './compat/pyjson.mjs';
 
 const SIGNALS = osConstants.signals;
+
+// The original helper starts the CUAService app and its XPC transport waits up
+// to 5 s to connect, so a healthy run takes about 5.2 s. Allow for a slower launch.
+// lcu/macos_sky_service.mjs derives its own wait from this value.
+export const TURN_ENDED_CLI_TIMEOUT_SECONDS = 10;
+// Log successful runs only when they are close to the helper's own 5 s deadline.
+export const TURN_ENDED_CLI_SLOW_SECONDS = 4.5;
+export const STDERR_LOG_BYTES = 512;
 
 // ------------------------------------------------------------------------------------------ helpers
 
@@ -602,12 +610,20 @@ export class TrustedControlBridge {
 // ------------------------------------------------------------------------------------------ lifetime host
 
 /**
- * subprocess.run([client, 'turn-ended', payload], stdin=DEVNULL, stdout/stderr=PIPE, timeout=3, check=False)
- * -> returncode. Like communicate(), completion waits for both pipes to close; on the 3 s timeout the client is
- * killed only if it has not exited yet (Popen.kill polls first), reaped, its pipes are closed and TimeoutExpired is
- * raised, even when a descendant still holds the pipes open.
+ * subprocess.run([client, 'turn-ended', payload], stdin=DEVNULL, stdout/stderr=PIPE, timeout=timeout, check=False)
+ * -> { returncode, stderr }. Like communicate(), completion waits for both pipes to close; on the timeout the client
+ * is killed only if it has not exited yet (Popen.kill polls first), reaped, its pipes are closed and TimeoutExpired
+ * (carrying the stderr read so far, as exc.stderr) is raised, even when a descendant still holds the pipes open.
  */
-function runClient(client, payload) {
+/** Popen raises an OSError for a failed spawn; keep its strerror for run_turn_ended. */
+function spawnFailure(error) {
+  const failure = new Error(spawnErrorText(error));
+  failure.isOSError = true;
+  failure.strerror = fromNodeError(error)?.strerror;
+  return failure;
+}
+
+function runClient(client, payload, timeout = TURN_ENDED_CLI_TIMEOUT_SECONDS) {
   const command = [client, 'turn-ended', payload];
   return new Promise((resolveRun, rejectRun) => {
     let child;
@@ -615,13 +631,14 @@ function runClient(client, payload) {
       exec_format_check(command[0]);
       child = spawn(command[0], command.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
-      rejectRun(error instanceof PyOSError ? error : new Error(spawnErrorText(error)));
+      rejectRun(error instanceof PyOSError ? error : spawnFailure(error));
       return;
     }
     let settled = false;
     let exited = false;
     let markExited;
     const exitedPromise = new Promise((resolveExit) => { markExited = resolveExit; });
+    const stderrChunks = [];
     child.once('exit', () => {
       exited = true;
       markExited();
@@ -633,23 +650,72 @@ function runClient(client, payload) {
       await exitedPromise;
       child.stdout.destroy();
       child.stderr.destroy();
-      rejectRun(new TimeoutExpired(command, 3000));
-    }, 3000);
+      const expired = new TimeoutExpired(command, timeout * 1000);
+      expired.stderr = Buffer.concat(stderrChunks);
+      rejectRun(expired);
+    }, timeout * 1000);
     child.stdout.resume();
-    child.stderr.resume();
+    child.stderr.on('data', (chunk) => { if (!settled) stderrChunks.push(chunk); });
     child.once('error', (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      rejectRun(new Error(spawnErrorText(error)));
+      rejectRun(spawnFailure(error));
     });
     child.once('close', (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolveRun(code !== null ? code : -(SIGNALS[signal] ?? 0));
+      resolveRun({ returncode: code !== null ? code : -(SIGNALS[signal] ?? 0), stderr: Buffer.concat(stderrChunks) });
     });
   });
+}
+
+/** round(x) with Python's round-half-to-even. */
+function pyRound(x) {
+  const floor = Math.floor(x);
+  const diff = x - floor;
+  if (diff < 0.5) return floor;
+  if (diff > 0.5) return floor + 1;
+  return floor % 2 === 0 ? floor : floor + 1;
+}
+
+/**
+ * Run the original turn-ended command; report slow or failed runs on stderr.
+ *
+ * The helper exits 0 even when it cannot reach the service (it only writes to
+ * os_log), so a zero status does not prove delivery.
+ */
+export async function run_turn_ended(client, payload, timeout = TURN_ENDED_CLI_TIMEOUT_SECONDS) {
+  const started = monotonic();
+  let status = 'timeout';
+  let stderr = Buffer.alloc(0);
+  let failure = null;
+  try {
+    const result = await runClient(client, payload, timeout);
+    status = result.returncode;
+    stderr = result.stderr ?? Buffer.alloc(0);
+    if (status !== 0) failure = new RuntimeError(`Original turn-ended command exited with status ${status}.`);
+  } catch (exc) {
+    if (exc instanceof TimeoutExpired) {
+      stderr = exc.stderr ?? Buffer.alloc(0);
+      failure = new RuntimeError(`Original turn-ended command timed out after ${timeout} seconds.`);
+    } else if (isOSError(exc)) {
+      status = 'launch-failed';
+      stderr = Buffer.from(excStr(exc), 'utf8');
+      failure = new RuntimeError(`Original turn-ended command could not start: ${exc.strerror || excStr(exc)}.`);
+    } else {
+      throw exc;
+    }
+  }
+  const elapsed = monotonic() - started;
+  if (failure !== null || elapsed >= TURN_ENDED_CLI_SLOW_SECONDS) {
+    const text = pyStrip(new TextDecoder('utf-8').decode(stderr.subarray(0, STDERR_LOG_BYTES)));
+    writeFd(2, `LCU macOS turn-ended command: exit=${status} elapsed=${pyRound(elapsed * 1000)} ms`
+      + `${text ? ` stderr=${reprStr(text)}` : ''}
+`);
+  }
+  if (failure !== null) throw failure;
 }
 
 // Connections accepted while one is being handled wait here unread, like the kernel backlog of Python's
@@ -767,8 +833,7 @@ export async function serve(address, client, control_address = null, { stdin = p
         const turn_id = request instanceof Map ? request.get('turn_id') : null;
         if (!nonBlank(session_id) || !nonBlank(turn_id)) throw new ValueError('Original macOS turn IDs are missing.');
         const payload = turn_ended_payload(session_id, turn_id);
-        const returncode = await runClient(client, payload);
-        if (returncode !== 0) throw new RuntimeError(`Original turn-ended command exited with status ${returncode}.`);
+        await run_turn_ended(client, payload);
         response = { notified: true };
       } catch (exc) {
         response = { notified: false, error: cpSlice(excStr(exc), 512) };

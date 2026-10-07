@@ -9,7 +9,9 @@ import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { own, send as sendSignal, verify } from './process_guard.mjs';
-import { internals, start_original_host, stop_original_host, turn_ended_payload } from '../../lcu/macos_host.mjs';
+import {
+  TURN_ENDED_CLI_TIMEOUT_SECONDS, internals, run_turn_ended, start_original_host, stop_original_host, turn_ended_payload,
+} from '../../lcu/macos_host.mjs';
 
 // SAFETY (.port/BRIEF.md): every host this file starts runs in its own session (detached => setsid), its identity
 // is recorded at spawn, and the module may only signal it after process_guard.verify() re-checks that identity.
@@ -22,8 +24,8 @@ const CONTROL_SERVICE = fileURLToPath(new URL('../macos_control_service.mjs', im
 const skip = process.platform === 'win32' ? 'macOS launcher and its Unix-socket lifecycle host' : false;
 
 let root;
-before(() => { root = mkdtempSync('/tmp/lcu-mh-'); });
-after(() => rmSync(root, { recursive: true, force: true }));
+before(() => { if (!skip) root = mkdtempSync('/tmp/lcu-mh-'); });
+after(() => { if (root) rmSync(root, { recursive: true, force: true }); });
 
 const clientScript = (body) => `#!${process.execPath}\n${body}\n`;
 function writeClient(name, body) {
@@ -168,16 +170,94 @@ describe('macos_host', { skip }, () => {
     }
   });
 
-  test('lifecycle host kills a client after 3 seconds', async () => {
-    const client = writeClient('slow-client', 'setTimeout(() => {}, 20000);');
+  test('lifecycle host kills a client after 10 seconds', async () => {
+    const client = writeClient('slow-client', 'setTimeout(() => {}, 30000);');
     const h = await host(client);
     try {
-      const result = await request(h.address, '{"session_id":"a","turn_id":"b"}\n', { timeout: 9000 });
+      const result = await request(h.address, '{"session_id":"a","turn_id":"b"}\n', { timeout: 14000 });
       assert.equal(result.notified, false);
-      assert.match(result.error, /^Command '\['.*slow-client', 'turn-ended', '\{"type":"agent-turn-complete","thread-id":"a","turn-id":"b"\}'\]' timed out after 3 seconds$/);
+      assert.equal(result.error, 'Original turn-ended command timed out after 10 seconds.');
     } finally {
       await h.stop();
     }
+  });
+
+  // ---- #24: the original helper takes about 5.2 s, so the host allows 10 s and logs slow or failed runs
+
+  test('lifecycle host waits for the original helper runtime', async () => {
+    assert.ok(TURN_ENDED_CLI_TIMEOUT_SECONDS > 6);
+    const client = writeClient('slow-5s-client', 'setTimeout(() => {}, 5200);');
+    const h = await host(client);
+    try {
+      const started = Date.now();
+      const result = await request(h.address, '{"session_id":"session","turn_id":"turn"}\n', { timeout: TURN_ENDED_CLI_TIMEOUT_SECONDS * 1000 + 3000 });
+      assert.deepEqual(result, { notified: true });
+      assert.ok(Date.now() - started >= 5200);
+    } finally {
+      await h.stop();
+    }
+  });
+
+  /** run_turn_ended with the host's stderr line captured. */
+  async function runTurnEnded(client, options = {}) {
+    // writeFd writes to fd 2 directly, so run it in a child and capture that child's stderr.
+    const script = `
+      import { run_turn_ended } from ${JSON.stringify(new URL('../../lcu/macos_host.mjs', import.meta.url).href)};
+      const started = Date.now();
+      let error = null;
+      try { await run_turn_ended(${JSON.stringify(String(client))}, '{}'${options.timeout !== undefined ? `, ${options.timeout}` : ''}); }
+      catch (exc) { error = exc.message; }
+      process.stdout.write(JSON.stringify({ error, elapsed: Date.now() - started }));
+    `;
+    const run = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 30000 });
+    assert.equal(run.status, 0, run.stderr);
+    return { ...JSON.parse(run.stdout), log: run.stderr };
+  }
+
+  test('turn-ended command past its timeout fails within bounds', async () => {
+    const client = join(root, 'hung-client');
+    writeFileSync(client, '#!/bin/sh\nexec sleep 30\n');
+    chmodSync(client, 0o755);
+    const { error, log, elapsed } = await runTurnEnded(client, { timeout: 1 });
+    assert.equal(error, 'Original turn-ended command timed out after 1 seconds.');
+    assert.ok(elapsed < 5000, `elapsed ${elapsed}`);
+    assert.match(log, /exit=timeout/);
+    assert.match(log, /elapsed=\d{4} ms/);
+  });
+
+  test('turn-ended timeout logs the stderr captured so far', async () => {
+    const client = writeClient('pending-client', `process.stderr.write('connect pending'); setTimeout(() => {}, 30000);`);
+    const { error, log } = await runTurnEnded(client, { timeout: 1 });
+    assert.equal(error, 'Original turn-ended command timed out after 1 seconds.');
+    assert.match(log, /exit=timeout/);
+    assert.match(log, /connect pending/);
+  });
+
+  test('turn-ended command failure logs the exit code and bounded stderr', async () => {
+    const client = writeClient('noisy-client', `process.stderr.write('e'.repeat(2000)); process.exit(7);`);
+    const { error, log } = await runTurnEnded(client);
+    assert.equal(error, 'Original turn-ended command exited with status 7.');
+    assert.match(log, /exit=7 /);
+    assert.ok(log.includes('e'.repeat(512)));
+    assert.ok(!log.includes('e'.repeat(513)));
+  });
+
+  test('turn-ended command that cannot start is logged', async () => {
+    const { error, log } = await runTurnEnded(join(root, 'missing-client'));
+    assert.equal(error, 'Original turn-ended command could not start: No such file or directory.');
+    assert.match(log, /exit=launch-failed/);
+  });
+
+  test('turn-ended command logs a slow success but not a fast one', async () => {
+    // TURN_ENDED_CLI_SLOW_SECONDS is 4.5: use a client that really takes that long.
+    const slow = writeClient('slow-ok-client', 'setTimeout(() => {}, 4600);');
+    const slowRun = await runTurnEnded(slow);
+    assert.equal(slowRun.error, null);
+    assert.match(slowRun.log, /exit=0 elapsed=\d+ ms/);
+    const fast = writeClient('fast-ok-client', '');
+    const fastRun = await runTurnEnded(fast);
+    assert.equal(fastRun.error, null);
+    assert.equal(fastRun.log, '');
   });
 
   test('stdin EOF stops the host, removes the socket and the temp dir', async () => {
@@ -360,16 +440,16 @@ describe('macos_host', { skip }, () => {
 
   // ---- regressions for .port/reviews/port-hosts.md (probes in .port/reviews/probes-hosts/macos/)
 
-  test('R1: client exited but a descendant holds its pipes: timeout reply at 3 s, host keeps serving and stops', async () => {
+  test('R1: client exited but a descendant holds its pipes: timeout reply at 10 s, host keeps serving and stops', async () => {
     const client = writeClient('descendant-client',
-      `require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 4000)'], { stdio: 'inherit', detached: false }).unref(); process.exit(0);`);
+      `require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 13000)'], { stdio: ['ignore', 'inherit', 'inherit'], detached: false }).unref(); process.exit(0);`);
     const h = await host(client);
     try {
       const started = Date.now();
-      const reply = await exchange(h.address, '{"session_id":"session-exact","turn_id":"turn-exact"}\n', { timeout: 6000 });
+      const reply = await exchange(h.address, '{"session_id":"session-exact","turn_id":"turn-exact"}\n', { timeout: 14000 });
       const elapsed = Date.now() - started;
-      assert.match(reply.toString(), /^\{"notified":false,"error":"Command '\[.*\]' timed out after 3 seconds"\}\n$/);
-      assert.ok(elapsed >= 2900 && elapsed < 4500, `elapsed ${elapsed}`);
+      assert.equal(reply.toString(), '{"notified":false,"error":"Original turn-ended command timed out after 10 seconds."}\n');
+      assert.ok(elapsed >= 9900 && elapsed < 11500, `elapsed ${elapsed}`);
       // The lifetime queue is free again: the next request is handled at once.
       assert.equal((await exchange(h.address, 'null\n', { timeout: 1000 })).toString(),
         '{"notified":false,"error":"Original macOS turn IDs are missing."}\n');
@@ -389,7 +469,7 @@ describe('macos_host', { skip }, () => {
     const h = await host(client);
     try {
       const reply = await exchange(h.address, '{"session_id":"s","turn_id":"t"}\n');
-      assert.equal(reply.toString(), `{"notified":false,"error":"[Errno 8] Exec format error: '${client}'"}\n`);
+      assert.equal(reply.toString(), '{"notified":false,"error":"Original turn-ended command could not start: Exec format error."}\n');
       assert.equal(existsSync(marker), false);
     } finally {
       await h.stop();

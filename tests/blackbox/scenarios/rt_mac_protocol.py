@@ -99,7 +99,7 @@ def _(sb):
     _mac(sb, ctx, 'connections', script, client=client, timeout=60)
 
 
-@rt_scenario('rt/mac/lifetime-client', hosts=DARWIN, normalise=STATUSES)
+@rt_scenario('rt/mac/lifetime-client', hosts=DARWIN, normalise=STATUSES + ('elapsed-ms',))
 def _(sb):
     # What the signed client is given (argv, cwd, env, stdin) and how its failures are reported.
     ctx = place(sb, 'darwin')
@@ -128,6 +128,23 @@ def _(sb):
         if moved.exists():
             moved.rename(client_path)
         client_path.chmod(0o755)
+
+
+@rt_scenario('rt/mac/lifetime-helper-timeout', hosts=DARWIN, normalise=STATUSES + ('elapsed-ms',))
+def _(sb):
+    # The signed helper takes about 5.2 s (its XPC connect deadline is 5 s), so the host allows it 10 s: a 5.2 s run
+    # is delivered (and logged as slow), a run past 10 s is killed and reported, and a failing run's stderr is
+    # logged, bounded to 512 bytes. A later request still works after each.
+    ctx = place(sb, 'darwin')
+    client = {'rules': [
+        {'match': '"turn-id":"helper"', 'sleepMs': 5200},
+        {'match': '"turn-id":"hung"', 'sleepMs': 30000, 'say': 'connect pending\n'},
+        {'match': '"turn-id":"loud"', 'exit': 7, 'stderr': 3000},
+    ]}
+    script = []
+    for turn in ('helper', 'hung', 'loud', 't1'):
+        script += lifetime(turn, {'json': {'session_id': 's1', 'turn_id': turn}}, timeout=15000)
+    _mac(sb, ctx, 'helper runtimes', script, client=client, timeout=90)
 
 
 def _control(sb, name='control.sock'):

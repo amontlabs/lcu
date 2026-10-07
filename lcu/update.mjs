@@ -35,6 +35,7 @@ export const NOTES_URL = `https://raw.githubusercontent.com/${REPO}/%s/docs/rele
 export const INTERVAL = 600;
 export const RETRY = 3600;
 export const STAMP_TTL = 120;
+export const STAMP_SKEW = 2; // Windows file times can run ahead of time.time()
 export const ANNOUNCE_TTL = 7 * 24 * 3600;
 export const ANNOUNCE_COOLDOWN = 24 * 3600;
 export const ANNOUNCE_ACCOUNT = '*';
@@ -194,8 +195,8 @@ function isDir(file) {
 // Path flavour of the running platform: PurePosixPath via compat/pathlib, PureWindowsPath via compat/winpath.
 export const P = (p) => (WIN() ? winPathStr(String(p)) : pathStr(String(p)));
 export const pjoin = (...parts) => (WIN() ? winPathStr(...parts.map(String)) : pathStr(...parts.map(String)));
-export const pparent = (p) => (WIN() ? winParent(String(p)) : path.posix.dirname(pathStr(String(p))));
-export const pname = (p) => (WIN() ? winName(String(p)) : path.posix.basename(pathStr(String(p))));
+export const pparent = (p) => (WIN() ? winParent(String(p)) : path.dirname(pathStr(String(p))));
+export const pname = (p) => (WIN() ? winName(String(p)) : path.basename(pathStr(String(p))));
 
 /** Path.home(): ntpath.expanduser rules on Windows (USERPROFILE, else HOMEDRIVE+HOMEPATH), posixpath elsewhere. */
 export function home_() {
@@ -377,7 +378,7 @@ export function refresh_claimed(now = null) {
     now = now ?? _inject.now() + 0.001;
     try {
       const age = toFloat(now) - fs.statSync(stamp).mtimeMs / 1000;
-      if (age >= 0 && age < STAMP_TTL) return false;
+      if (-STAMP_SKEW <= age && age < STAMP_TTL) return false;
     } catch { /* no usable stamp */ }
     fs.mkdirSync(pparent(stamp), { recursive: true });
     try {

@@ -15,7 +15,7 @@ import { ArgumentParser, io, PySystemExit, pySplitlines, pyStrip, RawDescription
 import { pathExpanduser, expanduser, pathStr } from './compat/pathlib.mjs';
 import { fromNodeError, pyStr } from './compat/pyerr.mjs';
 import { dumps, isDict, loads, UnicodeEncodeError, ValueError } from './compat/pyjson.mjs';
-import { loads as plistLoads, InvalidFileException } from './compat/plist.mjs';
+import { loads as plistLoads, ExpatError, InvalidFileException } from './compat/plist.mjs';
 import { mkstemp } from './compat/tempfile.mjs';
 import { execError, preflight } from './compat/execve.mjs';
 import { TimeoutExpired } from './compat/subprocess.mjs';
@@ -228,7 +228,8 @@ export function bundle_info(app) {
   try {
     info = plistLoads(readFileSync(`${pathStr(app)}/Contents/Info.plist`));
   } catch (error) {
-    if (error instanceof InvalidFileException || error instanceof ValueError || fromNodeError(error)) return null;
+    if (error instanceof InvalidFileException || error instanceof ValueError || error instanceof ExpatError
+        || fromNodeError(error)) return null;
     throw error;
   }
   if (!(info instanceof Map)) return null; // plistlib would raise AttributeError (a traceback) for a non-dict root
