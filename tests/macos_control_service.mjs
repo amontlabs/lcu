@@ -781,6 +781,30 @@ try {
   assert.equal(parityNewEnded(), 1, 'the request registered the turn current after the gate, as on main');
   globalThis.nodeRepl.requestMeta = {};
 
+  // A request whose turn ended while it waited in the gate (no recovery) is registered as on
+  // main, but that does not reopen the turn: a later request of it is not retried either.
+  reset();
+  const racePrior = {session_id: 'race-prior-session', turn_id: 'race-prior-turn', call_id: 'race-prior-call'};
+  const raceTurn = {session_id: 'race-session', turn_id: 'race-turn', call_id: 'race-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': racePrior};
+  assert.deepEqual(await rpc(), {ok: true});
+  let releaseRace;
+  globalThis.turnEndedGate = new Promise(resolve => { releaseRace = resolve; });
+  const racePriorEnded = turnEnded.run({session_id: racePrior.session_id, turn_id: racePrior.turn_id});
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': raceTurn};
+  const raceRequest = rpc();
+  await turnEnded.run({session_id: raceTurn.session_id, turn_id: raceTurn.turn_id}).catch(() => {});
+  globalThis.turnEndedGate = undefined;
+  releaseRace();
+  await racePriorEnded;
+  assert.deepEqual(await raceRequest, {ok: true});
+  recoverReply = recovered;
+  rpcBefore = countOriginal();
+  assert.equal((await failure({failUntilRecovered: true})).message, startupFailure);
+  assert.equal(countOriginal(), rpcBefore + 1, 'a later request of the ended turn is not sent again');
+  await turnEnded.run({session_id: raceTurn.session_id, turn_id: raceTurn.turn_id});
+  globalThis.nodeRepl.requestMeta = {};
+
   // A turn that is still active is retried, after the pending turn cleanup.
   reset();
   const activeMetadata = {session_id: 'active-session', turn_id: 'active-turn', call_id: 'active-call'};

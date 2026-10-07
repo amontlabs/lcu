@@ -37,6 +37,7 @@ const turnMetadata = new Map();
 const inFlightTurns = new Map();
 // Recently ended turns, so a later request of one is not retried after a recovery either.
 // Bounded: an evicted turn only falls back to the request being sent once, as without recovery.
+// Never cleared otherwise: a turn ID used again is simply not retried after a recovery.
 const endedTurns = new Set();
 const ENDED_TURNS_LIMIT = 1024;
 
@@ -552,6 +553,8 @@ async function dispatch(runtime, request, metadata, context, state) {
   // Without a recovery, registration is exactly as before: the turn and control context are
   // read now, after the cleanup gate (a turn ID a harness uses again is registered again).
   // After a recovery, this request's own turn is registered, and nothing for a turn that ended.
+  // Registration never clears the ended-turn record, so a reused turn ID is not retried after
+  // a recovery (its original error is returned) rather than risk retrying an ended turn.
   const recovered = Boolean(state.recoveryError);
   const register = recovered ? (state.ended ? undefined : metadata) : readTurnMetadata(runtime);
   const registerContext = recovered ? (state.ended ? undefined : context) : controlContext(runtime, request);
@@ -561,7 +564,6 @@ async function dispatch(runtime, request, metadata, context, state) {
       throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
     }
     turnMetadata.set(key, register);
-    endedTurns.delete(key);
   }
   const controlReady = await startControlChannel(runtime);
   if (registerContext && controlReady && !(state.recoveryError && state.ended)) {
