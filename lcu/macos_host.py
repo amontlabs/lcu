@@ -126,7 +126,8 @@ def bounded_run(args, *, timeout, env=None, popen=subprocess.Popen, **_options):
 def list_sky_services(*, run=bounded_run, pid=None):
     """Running Sky services (or just `pid`) from `ps`, and how many service rows could not be read."""
     selection = ['-axo'] if pid is None else ['-p', str(pid), '-o']
-    result = run([PS, *selection, 'pid=,uid=,lstart=,comm='], stdin=subprocess.DEVNULL,
+    # -ww: unlimited width; without a terminal `ps` would cut long paths and hide services.
+    result = run([PS, '-ww', *selection, 'pid=,uid=,lstart=,comm='], stdin=subprocess.DEVNULL,
                  capture_output=True, timeout=2, check=False,
                  encoding='utf-8', errors='replace', env=_ps_environment())
     # `ps -p` exits 1 with no output when that process is gone.

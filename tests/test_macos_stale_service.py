@@ -160,7 +160,7 @@ class StartTimeTests(unittest.TestCase):
     def test_one_pid_can_be_read_with_ps_p_and_a_vanished_one_is_just_absent(self):
         run = ps(f'4242 501 Tue Oct  6 11:00:00 2026 {EXECUTABLE}')
         services, unparsed = list_sky_services(run=run, pid=4242)
-        self.assertEqual(run.call_args.args[0], ['/bin/ps', '-p', '4242', '-o', 'pid=,uid=,lstart=,comm='])
+        self.assertEqual(run.call_args.args[0], ['/bin/ps', '-ww', '-p', '4242', '-o', 'pid=,uid=,lstart=,comm='])
         self.assertEqual(([service['pid'] for service in services], unparsed), ([4242], 0))
         gone = Mock(return_value=SimpleNamespace(returncode=1, stdout='', stderr=''))
         self.assertEqual(list_sky_services(run=gone, pid=4242), ([], 0))
@@ -192,7 +192,7 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(stale_pids(diagnosis), [45404])
         self.assertTrue(diagnosis['services'][0]['stale'])
         self.assertNotIn('message', diagnosis)
-        self.assertEqual(run.call_args.args[0], ['/bin/ps', '-axo', 'pid=,uid=,lstart=,comm='])
+        self.assertEqual(run.call_args.args[0], ['/bin/ps', '-ww', '-axo', 'pid=,uid=,lstart=,comm='])
         env = run.call_args.kwargs['env']
         self.assertEqual((env['LC_TIME'], env['LC_CTYPE'], env['TZ']), ('C', 'UTF-8', 'UTC'))
         self.assertNotIn('LC_ALL', env)
