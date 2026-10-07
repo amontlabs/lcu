@@ -114,11 +114,11 @@ Node by absolute path (never one found on `PATH`) after a check that runs before
   `msvcrt.locking` took, so each lock (setup, `lcu browser`, `lcu origins forget`, `lcu prune`, the install lock) starts
   `powershell.exe` (`-NoProfile`), which holds `FileStream.Lock(0, 1)` until the command releases it. The lock is
   therefore as slow as a PowerShell start-up per acquisition, and `lcu setup`, `lcu browser ...`, `lcu origins forget` and
-  `lcu prune` take that long more per lock than with 0.9.x. Measured on the hosted `windows-latest` runner with four test
-  files running at once: a single `lcu origins forget` (one lock) took 22 to 32 seconds there. CI's
-  `windows-node.yml` also prints the same measurement on an idle runner (`lock cost` step, five consecutive
-  acquisitions); the figure for an idle desktop is expected to be a few seconds at most, and is not yet measured on real
-  hardware. Correctness is unchanged (same file, same byte, interoperable with 0.9.x), and read-only commands take no lock.
+  `lcu prune` take that long more per lock than with 0.9.x. Measured on the idle hosted `windows-latest` runner (the
+  `lock cost` step of `windows-node.yml`, five consecutive acquisitions in one process): 34.5 s for the first and 22.5 to
+  24.4 s for the next four, acquire and release together. These figures are being investigated (a bare PowerShell start-up
+  should take about a second); they are not yet measured on real hardware. Correctness is unchanged (same file, same byte,
+  interoperable with 0.9.x), and read-only commands take no lock.
 
 ## Output and diagnostics
 

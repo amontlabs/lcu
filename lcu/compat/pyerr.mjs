@@ -14,12 +14,14 @@
 //     would: exists, is a directory, searchable); otherwise the executable keeps the blame, as in Python.
 //   * reprStr() decides printability from Python 3.12's own table (Unicode 15.0.0, NONPRINTABLE in
 //     pyerr_tables.mjs), not from the ICU data of whichever Node runs LCU. New export isPrintable().
-import { accessSync, constants as fsConstants, statSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, statSync } from 'node:fs';
+import { win32 as ntpath } from 'node:path';
 
 import { darwin, linux, NONPRINTABLE } from './pyerr_tables.mjs';
+import { win32, WINERROR, WINERROR_OF_CODE } from './pyerr_win32.mjs';
 import { reprFloat } from './pyjson.mjs';
 
-const TABLES = { darwin, linux };
+const TABLES = { darwin, linux, win32 };
 
 function table(platform = process.platform) {
   // Everything Unix that is not macOS follows the glibc table (the only Linux libc LCU supports).
@@ -169,9 +171,10 @@ export function errorClassName(name, platform) {
 }
 
 /** str() of an OSError built the way the C runtime builds one: errno, strerror, filename(s). */
-export function formatOSError({ errno, strerror: message, filename, filename2 } = {}) {
+export function formatOSError({ errno, strerror: message, filename, filename2, winerror } = {}) {
   if (errno === undefined || errno === null) return message ?? '';
-  let text = `[Errno ${errno}] ${message}`;
+  // CPython on Windows: OSError raised from a Win32 call prints `[WinError N] text` (errno is the mapped C errno).
+  let text = winerror === undefined || winerror === null ? `[Errno ${errno}] ${message}` : `[WinError ${winerror}] ${message}`;
   if (filename !== undefined && filename !== null) {
     text += `: ${reprValue(filename)}`;
     if (filename2 !== undefined && filename2 !== null) text += ` -> ${reprValue(filename2)}`;
@@ -208,6 +211,7 @@ export class PyOSError extends Error {
     this.name = fields.className ?? 'OSError';
     this.errno = fields.errno;
     this.strerror = fields.strerror;
+    this.winerror = fields.winerror ?? null;
     this.filename = fields.filename ?? null;
     this.filename2 = fields.filename2 ?? null;
     this.code = fields.code;
@@ -247,7 +251,11 @@ export function isOSError(err) {
  * toPyOSError/pyfs do that for a name the caller did not give). Returns a PyOSError whose `message` is Python's str(exc), or null when the error has no
  * errno (it is not a system error).
  */
-export function fromNodeError(err, { filename, filename2, platform = process.platform } = {}) {
+export function fromNodeError(err, { filename, filename2, platform = process.platform, parentExists } = {}) {
+  if (platform === 'win32' && !(err instanceof PyOSError)) {
+    const windows = windowsError(err, { filename, filename2, parentExists });
+    if (windows) return windows;
+  }
   if (err instanceof PyOSError) {
     if (filename === undefined && filename2 === undefined) return err;
     return new PyOSError(
@@ -258,6 +266,7 @@ export function fromNodeError(err, { filename, filename2, platform = process.pla
         filename2: filename2 !== undefined ? filename2 : err.filename2,
         className: err.name,
         code: err.code,
+        winerror: err.winerror,
       },
       err.platform ?? platform,
     );
@@ -280,6 +289,48 @@ export function fromNodeError(err, { filename, filename2, platform = process.pla
   );
 }
 
+// Node syscalls that CPython reaches through the C runtime on Windows (open(), os.open, read, write): their OSError
+// text is `[Errno N] strerror`.  Every other call goes through the Win32 API and prints `[WinError N] message`.
+const CRT_SYSCALLS = new Set(['open', 'read', 'write', 'close', 'fstat', 'ftruncate', 'fsync', 'fdatasync', 'futime',
+  'fchmod', 'fchown', 'dup', 'lseek']);
+
+/**
+ * The OSError CPython raises on Windows for a Node system error, or null (not a system error / not a call we map).
+ * Win32-API calls become `[WinError N] <FormatMessage text>: 'path'` (errno = CPython's winerror_to_errno, so the
+ * exception class follows it); C-runtime calls keep `[Errno N]` with the Microsoft strerror text, and a directory
+ * opened for reading is EACCES (`open()` of a directory fails with "Permission denied" on Windows).
+ */
+function windowsError(err, { filename, filename2, parentExists }) {
+  let code = err?.code;
+  const syscall = typeof err?.syscall === 'string' ? err.syscall : '';
+  if (typeof code !== 'string' || errnoNumber(code, 'win32') === undefined && WINERROR_OF_CODE[code] === undefined) return null;
+  const name = filename !== undefined ? filename : err.path;
+  const second = filename2 !== undefined ? filename2 : err.dest;
+  const call = syscall.split(' ')[0];
+  if (call === '' || CRT_SYSCALLS.has(call)) {
+    if (code === 'EISDIR' && (call === 'read' || call === 'open')) code = 'EACCES';
+    const number = errnoNumber(code, 'win32');
+    if (number === undefined) return null;
+    return new PyOSError({ errno: number, strerror: strerror(number, 'win32'), filename: name, filename2: second,
+      className: errorClassName(code, 'win32'), code }, 'win32');
+  }
+  let winerror = WINERROR_OF_CODE[code];
+  if (winerror === undefined) return null;
+  if (code === 'ENOENT') {
+    // ERROR_FILE_NOT_FOUND (2) unless the directory part is missing too (ERROR_PATH_NOT_FOUND, 3); a directory
+    // listing (FindFirstFile on `dir\*`) reports 3 for a missing directory.
+    if (call === 'scandir') winerror = 3;
+    else if (call !== 'spawn' && typeof name === 'string' && name !== '') {
+      const parent = ntpath.dirname(name);
+      const exists = parentExists ?? ((p) => existsSync(p));
+      if (parent !== name && parent !== '' && parent !== '.' && !exists(parent)) winerror = 3;
+    }
+  }
+  const [message, mapped] = WINERROR[winerror];
+  return new PyOSError({ errno: errnoNumber(mapped, 'win32'), strerror: message, filename: name, filename2: second,
+    className: errorClassName(mapped, 'win32'), code: mapped, winerror }, 'win32');
+}
+
 /** str(exc) for a Node error: Python's text for system errors, the plain message otherwise. */
 export function pyStr(err, options) {
   return fromNodeError(err, options)?.message ?? (err instanceof Error ? err.message : String(err));
@@ -292,6 +343,11 @@ export function spawnErrorText(err, { cwd, platform } = {}) {
   // way chdir(2) would. (Checked after the fact: a cwd changed in between is a race, not a contract.)
   if (cwd !== undefined && cwd !== null) {
     const failure = chdirFailure(String(cwd));
+    if (failure && (platform ?? process.platform) === 'win32') {
+      // CreateProcess with a bad lpCurrentDirectory: ERROR_DIRECTORY, whatever the reason.
+      return new PyOSError({ errno: 20, strerror: WINERROR[267][0], winerror: 267, filename: cwd,
+        className: 'NotADirectoryError', code: 'ENOTDIR' }, 'win32').message;
+    }
     if (failure) return pyStr({ code: failure }, { filename: cwd, platform });
   }
   return pyStr(err, { platform });

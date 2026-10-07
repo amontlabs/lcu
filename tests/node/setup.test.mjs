@@ -39,13 +39,14 @@ const IS_ROOT = UID === 0;
 const USERNAME = os.userInfo().username;
 
 if (!process.getuid) setup.impl.getuid = () => UID; // Windows has no uids
+// The default cases are the POSIX behaviour: a Windows host runs them as 'linux' (the cases about Windows set 'win32' themselves).
+// Done before the baseline below is saved: the fixtures restore it after every run.
+if (process.platform === 'win32') setup.impl.platform = 'linux';
 const SAVED_IMPL = { ...setup.impl, approvals: { ...setup.impl.approvals } };
 const SAVED_IO = { ...setup.io };
 const SAVED_ARGPARSE_IO = { ...argparseIo };
 const SAVED_ENV = { ...process.env };
 
-// The default cases are the POSIX behaviour: a Windows host runs them as 'linux' (the cases about Windows set 'win32' themselves).
-beforeEach(() => { if (process.platform === 'win32') setup.impl.platform = 'linux'; });
 afterEach(() => {
   for (const key of Object.keys(setup.impl)) if (!(key in SAVED_IMPL)) delete setup.impl[key];
   Object.assign(setup.impl, SAVED_IMPL, { approvals: { ...SAVED_IMPL.approvals } });
@@ -463,7 +464,7 @@ describe('ReconcileTests', () => {
     assert.deepEqual(f.registered[0].names, ['hermes']);
   });
 
-  test('binary in a user directory outside PATH is found', async () => {
+  test('binary in a user directory outside PATH is found', { skip: skipOnWindows('creates the harness executable with a mode bit; Windows finds .exe/.cmd files') }, async () => {
     const f = new Fixture();
     pend(f, ['pi']);
     put(path.join(f.home, '.bun/bin/pi'), '#!/bin/sh\n', 0o755);
@@ -663,7 +664,7 @@ describe('InstalledInstructionTests', () => {
     assert.equal(result.stdout, `--user\n${USERNAME}\n--\n${path.join(binDir, 'lcu')}\ndoctor\n`);
   });
 
-  test('codex export routes through bundled node and audio relay', async () => {
+  test('codex export routes through bundled node and audio relay', { skip: skipOnWindows('the fixture release is a Linux/macOS app layout (resources, Contents/Resources) run through POSIX command lines and the portable export; setup on Windows registers the cmd.exe launcher (windows cases)') }, async () => {
     const t = new Installed();
     const destination = path.join(t.root, 'codex-export');
     const captured = {};
@@ -773,7 +774,7 @@ describe('InstalledInstructionTests', () => {
     assert.ok(fs.statSync(path.join(project, '.claude/skills/lcu-approve/hooks/register.tsx')).isFile());
   });
 
-  test('codex setup wraps original lcu command and retains host policy', async () => {
+  test('codex setup wraps original lcu command and retains host policy', { skip: skipOnWindows('the fixture release is a Linux/macOS app layout (resources, Contents/Resources) run through POSIX command lines and the portable export; setup on Windows registers the cmd.exe launcher (windows cases)') }, async () => {
     const t = new Installed();
     const originalCodex = path.join(t.resources, 'codex-cli/bin/codex');
     put(originalCodex, 'original Codex CLI');
@@ -810,7 +811,7 @@ describe('InstalledInstructionTests', () => {
     assert.equal(hooks[0][1], config);
   });
 
-  test('pi registration removes old skill and uses offline local package', async () => {
+  test('pi registration removes old skill and uses offline local package', { skip: skipOnWindows('the fixture release is a Linux/macOS app layout (resources, Contents/Resources) run through POSIX command lines and the portable export; setup on Windows registers the cmd.exe launcher (windows cases)') }, async () => {
     assert.deepEqual(new Set(Object.keys(CLIENTS)), new Set(['codex', 'claude-code', 'pi', 'omp', 'hermes']));
     const t = new Installed();
     const toolRoot = path.join(t.root, 'agent-tools');
@@ -842,7 +843,7 @@ describe('InstalledInstructionTests', () => {
       + '  "preserved": true,\n  "user": [\n    "/usr/bin/lcu",\n    "--audio"\n  ]\n}\n');
   });
 
-  test('pi project scope keys the resolved project and passes -l', async () => {
+  test('pi project scope keys the resolved project and passes -l', { skip: skipOnWindows('the fixture release is a Linux/macOS app layout (resources, Contents/Resources) run through POSIX command lines and the portable export; setup on Windows registers the cmd.exe launcher (windows cases)') }, async () => {
     const t = new Installed();
     const toolRoot = path.join(t.root, 'agent-tools');
     put(path.join(t.release, 'adapters/pi/index.ts'), 'fixture');
@@ -867,7 +868,7 @@ describe('InstalledInstructionTests', () => {
     assert.equal(err, 'Pi: extension failed: Pi is not on the target account PATH. Install Pi, then run `/x/lcu setup --agent pi --yes` from that account shell.\n');
   });
 
-  test('selected app descriptor and resources are required', async () => {
+  test('selected app descriptor and resources are required', { skip: skipOnWindows('the fixture release is a Linux/macOS app layout (resources, Contents/Resources) run through POSIX command lines and the portable export; setup on Windows registers the cmd.exe launcher (windows cases)') }, async () => {
     const t = new Installed();
     assert.equal(setup.installed_app_resources(t.release), fs.realpathSync(t.resources));
     assert.deepEqual([...setup.host_policy(t.release)], [['type', 'stdio']]);
@@ -875,7 +876,7 @@ describe('InstalledInstructionTests', () => {
     assert.throws(() => setup.installed_app_resources(t.release), /descriptor missing/);
   });
 
-  test('installed_app_resources error messages', async () => {
+  test('installed_app_resources error messages', { skip: skipOnWindows('the fixture release is a Linux/macOS app layout (resources, Contents/Resources) run through POSIX command lines and the portable export; setup on Windows registers the cmd.exe launcher (windows cases)') }, async () => {
     const t = new Installed();
     const descriptor = path.join(t.release, 'installation.json');
     const cases = [
@@ -1131,7 +1132,7 @@ describe('WindowsSetupTests', () => {
     });
     const { code, err } = await capture(() => setup.main(['--prefix', prefix, '--session', 'direct', '--yes', '--no-chrome']));
     assert.equal(code, 1);
-    assert.match(err, /^Setup failed: The Windows command processor cannot run .*a&b\/lcu\.cmd safely/);
+    assert.match(err, /^Setup failed: The Windows command processor cannot run .*a&b[\\/]lcu\.cmd safely/);
     assert.equal(configured, false);
     assert.equal(fs.existsSync(path.join(prefix, 'launcher-pins.json')), false);
   });
@@ -1173,7 +1174,7 @@ describe('setup approval behaviour (test_approval.py)', () => {
     }
   });
 
-  test('export cannot carry an approval mode', async () => {
+  test('export cannot carry an approval mode', { skip: skipOnWindows('uses a POSIX absolute prefix (/opt/...), which is not absolute on Windows') }, async () => {
     const argv = ['--export', '/tmp/new-export', '--approval', 'auto', ...(IS_ROOT ? ['--user', 'root'] : [])];
     assert.throws(() => setup.validate(setup.parser().parse_args(argv)), /cannot be combined with --export/);
   });
@@ -1262,7 +1263,7 @@ describe('HarnessSetupTests (setup side)', () => {
     assert.deepEqual(setup.detect(home), ['codex', 'omp']);
   });
 
-  test('validate rejects profile-scoped agents for project scope', async () => {
+  test('validate rejects profile-scoped agents for project scope', { skip: skipOnWindows('validate() looks accounts up with getent (POSIX account database); Windows setup only configures the signed-in account') }, async () => {
     const root = tempdir();
     const project = path.join(root, 'project with spaces');
     fs.mkdirSync(project);
@@ -1362,7 +1363,7 @@ describe('SetupReadinessTests', () => {
   test('deferred readiness prints the shell-quoted doctor command', async () => {
     const f = new Fixture();
     const [, out] = await f.runMain([], { agents: ['codex'] });
-    assert.ok(out.endsWith(`Desktop readiness was not checked. Reconnect your agent, then run:\n  ${path.join(f.prefix, 'current/bin/lcu')} doctor\n`));
+    assert.ok(out.endsWith(`Desktop readiness was not checked. Reconnect your agent, then run:\n  ${quote(path.join(f.prefix, 'current/bin/lcu'))} doctor\n`));
   });
 });
 
@@ -1775,7 +1776,7 @@ describe('SetupSocketTests (test_macos_socket_path.py, setup side)', () => {
     return f.runMain(['--agent', 'codex'], { agents: ['codex'] });
   });
 
-  test('too long home warns at the end without failing setup', async () => {
+  test('too long home warns at the end without failing setup', { skip: skipOnWindows('the macOS Unix-socket path warning (getuid, sun_path length); never produced on Windows') }, async () => {
     const f = new Fixture();
     const [code, out, err] = await runDarwin(f, homeOfLength(104));
     assert.equal(code, 0, err);
@@ -1784,7 +1785,7 @@ describe('SetupSocketTests (test_macos_socket_path.py, setup side)', () => {
     assert.deepEqual(f.registered[0].names, ['codex']);
   });
 
-  test('export setup warns too', async () => {
+  test('export setup warns too', { skip: skipOnWindows('the macOS Unix-socket path warning (getuid, sun_path length); never produced on Windows') }, async () => {
     const f = new Fixture();
     f.platform = 'darwin';
     setup.impl.export_bundle = async () => {};
@@ -1798,7 +1799,7 @@ describe('SetupSocketTests (test_macos_socket_path.py, setup side)', () => {
     }
   });
 
-  test('short home prints no warning', async () => {
+  test('short home prints no warning', { skip: skipOnWindows('the macOS Unix-socket path warning (getuid, sun_path length); never produced on Windows') }, async () => {
     const f = new Fixture();
     const [code, out, err] = await runDarwin(f, homeOfLength(103));
     assert.equal(code, 0, err);

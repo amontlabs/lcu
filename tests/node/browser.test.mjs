@@ -707,7 +707,7 @@ describe('relay launcher', () => {
     const text = browser._relay_launcher('/p q/current/bin/lcu', "/h o'st", 'Linux').toString();
     assert.equal(text, POSIX_LAUNCHER('/p q/current/bin/lcu', "/h o'st"));
     assert.ok(!/node/.test(text.replace('native-host', '')), text);
-    assert.equal(spawnSync('/bin/sh', ['-n', '-c', text]).status, 0);
+    if (process.platform !== 'win32') assert.equal(spawnSync('/bin/sh', ['-n', '-c', text]).status, 0); // no sh on Windows
     assert.equal(browser._relay_launcher('C:\\P\\lcu.cmd', 'C:\\h', 'Windows').toString(), WINDOWS_CMD('C:\\P\\lcu.cmd'));
   });
 
@@ -1469,7 +1469,7 @@ describe('RefreshTests', () => {
     const moved = browser.refresh(winRoot);
     assert.equal(moved.status, 'changed');
     assert.notEqual(moved.destination, destination);
-    assert.equal(readFileSync(join(moved.destination, '.lcu-browser-host'), 'utf8'), `${generations.gen2[0]}\n`);
+    assert.equal(readFileSync(join(moved.destination, '.lcu-browser-host'), 'utf8'), `${generations.gen2[0]}${process.platform === 'win32' ? '\r\n' : '\n'}`); // text mode
     assert.equal(JSON.parse(readFileSync(manifest, 'utf8')).path, join(moved.destination, 'lcu-native-host.cmd'));
     assert.deepEqual(tuple(browser.refresh(winRoot)), ['unchanged', moved.destination, []]);
     writeFileSync(manifest, JSON.stringify({ path: 'C:\\ChatGPT\\extension-host.exe' }));
