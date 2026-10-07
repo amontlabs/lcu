@@ -25,10 +25,6 @@ class DoctorTests(unittest.TestCase):
         patcher = patch('lcu.platforms.mac_socket_path_problem', return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
-        # Nor about whichever Computer Use services happen to run on this machine.
-        patcher = patch('lcu.macos_host.diagnose_sky_services', return_value={'services': [], 'stale': []})
-        self.diagnose = patcher.start()
-        self.addCleanup(patcher.stop)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         base = Path(temporary.name)
@@ -124,38 +120,6 @@ class DoctorTests(unittest.TestCase):
         self.assertIn('System Settings > Privacy & Security', output.getvalue())
         self.assertIn('reconnect your agent', output.getvalue())
         open_settings.assert_not_called()
-
-    def test_mac_doctor_warns_about_a_stale_service_without_failing(self):
-        from lcu.macos_host import stale_service_message
-        self.diagnose.return_value = {'services': [], 'stale': [321],
-                                      'message': stale_service_message([321])}
-        output = io.StringIO()
-        with patch('lcu.doctor.sys.platform', 'darwin'), \
-             patch('lcu.doctor._probe', return_value=self._mac_probe()), \
-             patch('lcu.doctor.sys.stdin', io.StringIO()), \
-             patch('sys.stdout', output):
-            status = doctor.main(self.root, ['--non-interactive'],
-                                 resolved=self.resolved, env=self.env)
-        self.assertEqual(status, 0)
-        self.assertIn('Warning: A Computer Use service (pid 321) started before ChatGPT was updated '
-                      'still holds the connection. It quits on its own about a minute after it is '
-                      'last used: wait, or quit it, then retry.', output.getvalue())
-
-    def test_mac_doctor_is_silent_without_a_stale_service_or_when_ps_fails(self):
-        for outcome in ({'services': [], 'stale': []}, subprocess.TimeoutExpired('ps', 2), ValueError('ps')):
-            self.diagnose.reset_mock()
-            self.diagnose.side_effect = outcome if isinstance(outcome, Exception) else None
-            self.diagnose.return_value = outcome if not isinstance(outcome, Exception) else None
-            output = io.StringIO()
-            with patch('lcu.doctor.sys.platform', 'darwin'), \
-                 patch('lcu.doctor._probe', return_value=self._mac_probe()), \
-                 patch('lcu.doctor.sys.stdin', io.StringIO()), \
-                 patch('sys.stdout', output):
-                status = doctor.main(self.root, ['--non-interactive'],
-                                     resolved=self.resolved, env=self.env)
-            self.assertEqual(status, 0)
-            self.assertNotIn('Computer Use service', output.getvalue())
-            self.diagnose.assert_called_once()
 
     def test_linux_screenshot_failure_never_reports_ready(self):
         self._linux()

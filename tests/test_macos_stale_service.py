@@ -16,7 +16,8 @@ if sys.platform == 'win32':
 
 from lcu.macos_host import (SKY_SERVICE_NAME, SingleFlight, bundle_replaced_at, diagnose_response,
                             diagnose_sky_services, parse_process_start, parse_process_table,
-                            stale_service_message)
+                            SIGNATURE_BROKEN_MARKERS, known_service_executables, lock_holders,
+                            recover_response, recover_stale_service, verify_service_signature)
 
 BUNDLE = '/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app'
 EXECUTABLE = f'{BUNDLE}/Contents/MacOS/{SKY_SERVICE_NAME}'
@@ -51,31 +52,32 @@ def whole_bundle(executable, when):
 class ProcessTableTests(unittest.TestCase):
     def test_parses_pid_start_and_a_path_with_spaces(self):
         services, unparsed = parse_process_table('\n'.join([
-            '    1 Tue Oct  6 08:00:00 2026     /sbin/launchd',
-            f'45404 Wed Oct  7 00:34:53 2026     {EXECUTABLE}',
-            '  999 Wed Oct  7 01:00:00 2026     /usr/bin/ssh',
+            '    1 501 Tue Oct  6 08:00:00 2026     /sbin/launchd',
+            f'45404 501 Wed Oct  7 00:34:53 2026     {EXECUTABLE}',
+            '  999 501 Wed Oct  7 01:00:00 2026     /usr/bin/ssh',
         ]))
         self.assertEqual(unparsed, 0)
-        self.assertEqual(services, [{'pid': 45404, 'path': EXECUTABLE,
+        self.assertEqual(services, [{'pid': 45404, 'uid': 501, 'path': EXECUTABLE,
                                      'started': epoch('Wed Oct 7 00:34:53 2026')}])
 
     def test_keeps_non_ascii_path_characters(self):
         path = f'/Users/Jos\u00e9/ChatGPT.app/Contents/MacOS/{SKY_SERVICE_NAME}'
-        services, _ = parse_process_table(f'7 Wed Oct  7 00:34:53 2026 {path}')
+        services, _ = parse_process_table(f'7 501 Wed Oct  7 00:34:53 2026 {path}')
         self.assertEqual(services[0]['path'], path)
 
     def test_counts_unparseable_service_lines_instead_of_guessing(self):
         services, unparsed = parse_process_table('\n'.join([
             f'oops Wed Oct  7 00:34:53 2026 {EXECUTABLE}',
-            f'45404 Wed Smarch  7 00:34:53 2026 {EXECUTABLE}',
-            f'45405 Wed Oct  7 25:34:53 2026 {EXECUTABLE}',
-            f'45406 Wed Oct  7 00:34:53 2026 relative/{SKY_SERVICE_NAME}',
-            f'45407 Wed Oct  7 00:34:53 2026 /x/{SKY_SERVICE_NAME}Helper',
+            f'45404 501 Wed Smarch  7 00:34:53 2026 {EXECUTABLE}',
+            f'45405 501 Wed Oct  7 25:34:53 2026 {EXECUTABLE}',
+            f'45406 501 Wed Oct  7 00:34:53 2026 relative/{SKY_SERVICE_NAME}',
+            f'45407 501 Wed Oct  7 00:34:53 2026 /x/{SKY_SERVICE_NAME}Helper',
             f'45408 {SKY_SERVICE_NAME}',
+            f'45409 x Wed Oct  7 00:34:53 2026 {EXECUTABLE}',
             'garbage with no service name',
         ]))
         self.assertEqual(services, [])
-        self.assertEqual(unparsed, 6)
+        self.assertEqual(unparsed, 7)
 
 
 class BundleTimeTests(unittest.TestCase):
@@ -87,14 +89,14 @@ class BundleTimeTests(unittest.TestCase):
         # chmod or an extended attribute on the executable alone: the plist and seal keep their old ctime.
         stat = stat_with({EXECUTABLE: 900.0, PLIST: 100.0, SEAL: 100.0})
         self.assertEqual(bundle_replaced_at(EXECUTABLE, stat), 100.0)
-        run = ps(f'45404 Thu Jan  1 00:10:00 1970 {EXECUTABLE}')
+        run = ps(f'45404 501 Thu Jan  1 00:10:00 1970 {EXECUTABLE}')
         self.assertEqual(diagnose_sky_services(run=run, stat=stat)['stale'], [])
 
     def test_a_missing_or_unreadable_file_makes_the_time_unknown_not_a_guess(self):
         for present in ({EXECUTABLE: 900.0}, {EXECUTABLE: 900.0, PLIST: 900.0},
                         {EXECUTABLE: 900.0, SEAL: 900.0}, {PLIST: 250.0, SEAL: 250.0}):
             self.assertIsNone(bundle_replaced_at(EXECUTABLE, stat_with(present)), present)
-        run = ps(f'45404 Thu Jan  1 00:10:00 1970 {EXECUTABLE}')
+        run = ps(f'45404 501 Thu Jan  1 00:10:00 1970 {EXECUTABLE}')
         diagnosis = diagnose_sky_services(run=run, stat=stat_with({EXECUTABLE: 900.0}))
         self.assertEqual(diagnosis['stale'], [])
         self.assertTrue(diagnosis['services'][0]['bundle_missing'])
@@ -122,22 +124,19 @@ class StartTimeTests(unittest.TestCase):
 
 class DiagnoseTests(unittest.TestCase):
     def test_flags_a_service_started_before_its_bundle_was_replaced(self):
-        run = ps(f'45404 Tue Oct  6 11:00:00 2026   {EXECUTABLE}')
+        run = ps(f'45404 501 Tue Oct  6 11:00:00 2026   {EXECUTABLE}')
         stat = stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026'))
         diagnosis = diagnose_sky_services(run=run, stat=stat)
         self.assertEqual(diagnosis['stale'], [45404])
         self.assertTrue(diagnosis['services'][0]['stale'])
-        self.assertEqual(diagnosis['message'], stale_service_message([45404]))
-        self.assertTrue(diagnosis['message'].startswith('A Computer Use service (pid 45404) started before '
-                                                        'ChatGPT was updated still holds the connection. '))
-        self.assertTrue(diagnosis['message'].endswith('wait, or quit it, then retry.'))
-        self.assertEqual(run.call_args.args[0], ['ps', '-axo', 'pid=,lstart=,comm='])
+        self.assertNotIn('message', diagnosis)
+        self.assertEqual(run.call_args.args[0], ['ps', '-axo', 'pid=,uid=,lstart=,comm='])
         env = run.call_args.kwargs['env']
         self.assertEqual((env['LC_TIME'], env['LC_CTYPE'], env['TZ']), ('C', 'UTF-8', 'UTC'))
         self.assertNotIn('LC_ALL', env)
 
     def test_a_service_started_after_the_replacement_is_fresh(self):
-        run = ps(f'45404 Wed Oct  7 00:34:53 2026   {EXECUTABLE}')
+        run = ps(f'45404 501 Wed Oct  7 00:34:53 2026   {EXECUTABLE}')
         stat = stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026'))
         diagnosis = diagnose_sky_services(run=run, stat=stat)
         self.assertEqual(diagnosis['stale'], [])
@@ -146,18 +145,18 @@ class DiagnoseTests(unittest.TestCase):
 
     def test_a_change_within_the_start_time_resolution_is_not_stale(self):
         start = epoch('Wed Oct 7 00:34:53 2026')
-        run = ps(f'45404 Wed Oct  7 00:34:53 2026   {EXECUTABLE}')
+        run = ps(f'45404 501 Wed Oct  7 00:34:53 2026   {EXECUTABLE}')
         for replaced, stale in ((start + 1.9, False), (start + 2.5, True)):
             diagnosis = diagnose_sky_services(run=run, stat=stat_with(whole_bundle(EXECUTABLE, replaced)))
             self.assertEqual(diagnosis['stale'] == [45404], stale, replaced)
 
     def test_no_service_running(self):
-        diagnosis = diagnose_sky_services(run=ps('    1 Tue Oct  6 08:00:00 2026 /sbin/launchd'),
+        diagnosis = diagnose_sky_services(run=ps('    1 501 Tue Oct  6 08:00:00 2026 /sbin/launchd'),
                                           stat=stat_with({}))
         self.assertEqual(diagnosis, {'services': [], 'stale': [], 'unparsed': 0})
 
     def test_missing_bundle_is_reported_but_not_flagged(self):
-        diagnosis = diagnose_sky_services(run=ps(f'45404 Tue Oct  6 11:00:00 2026 {EXECUTABLE}'),
+        diagnosis = diagnose_sky_services(run=ps(f'45404 501 Tue Oct  6 11:00:00 2026 {EXECUTABLE}'),
                                           stat=stat_with({}))
         self.assertEqual(diagnosis['stale'], [])
         self.assertTrue(diagnosis['services'][0]['bundle_missing'])
@@ -170,20 +169,13 @@ class DiagnoseTests(unittest.TestCase):
 
     def test_only_the_older_of_two_services_is_flagged(self):
         other = '/Users/x/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/' + SKY_SERVICE_NAME
-        run = ps(f'45404 Wed Oct  7 00:34:53 2026 {other}',
-                 f'  200 Tue Oct  6 11:00:00 2026 {EXECUTABLE}')
+        run = ps(f'45404 501 Wed Oct  7 00:34:53 2026 {other}',
+                 f'  200 501 Tue Oct  6 11:00:00 2026 {EXECUTABLE}')
         stat = stat_with({**whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026'),
                           **whole_bundle(other, 'Wed Oct 7 00:34:50 2026')})
         diagnosis = diagnose_sky_services(run=run, stat=stat)
         self.assertEqual(diagnosis['stale'], [200])
         self.assertEqual([service['pid'] for service in diagnosis['services']], [45404, 200])
-
-    def test_several_stale_services_are_all_named(self):
-        message = stale_service_message([7, 9])
-        self.assertIn('(pids 7, 9)', message)
-        self.assertEqual(message, 'Computer Use services (pids 7, 9) started before ChatGPT was updated '
-                                  'still hold the connection. They quit on their own about a minute after '
-                                  'they are last used: wait, or quit them, then retry.')
 
     def test_ps_failure_is_an_error_response_not_a_guess(self):
         with self.assertRaises(ValueError):
@@ -204,16 +196,302 @@ class DiagnoseTests(unittest.TestCase):
             changed = os.stat(executable).st_ctime
             older = time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(changed - 600))
             newer = time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(changed + 600))
-            self.assertEqual(diagnose_sky_services(run=ps(f'10 {older} {executable}'))['stale'], [10])
-            self.assertEqual(diagnose_sky_services(run=ps(f'10 {newer} {executable}'))['stale'], [])
+            self.assertEqual(diagnose_sky_services(run=ps(f'10 501 {older} {executable}'))['stale'], [10])
+            self.assertEqual(diagnose_sky_services(run=ps(f'10 501 {newer} {executable}'))['stale'], [])
 
     def test_the_diagnosis_only_lists_processes_and_never_signals_one(self):
-        run = ps(f'45404 Tue Oct  6 11:00:00 2026 {EXECUTABLE}')
+        run = ps(f'45404 501 Tue Oct  6 11:00:00 2026 {EXECUTABLE}')
         with patch('os.kill') as kill, patch('os.killpg') as killpg:
             diagnose_sky_services(run=run, stat=stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026')))
         kill.assert_not_called()
         killpg.assert_not_called()
         run.assert_called_once()
+
+
+HOME_BUNDLE = '/Users/x/.codex/computer-use/Codex Computer Use.app'
+HOME_EXECUTABLE = f'{HOME_BUNDLE}/Contents/MacOS/{SKY_SERVICE_NAME}'
+LOCK = '/Users/x/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/IPC/computeruse.sock.lock'
+EXECUTABLES = {EXECUTABLE, HOME_EXECUTABLE}
+STALE_START = 'Tue Oct  6 11:00:00 2026'
+REPLACED = 'Wed Oct 7 00:21:00 2026'
+
+
+class FakeWorld:
+    """A process table, file times, lock holders, codesign and a kill that only records."""
+
+    def __init__(self, *, pid=4242, uid=501, path=EXECUTABLE, start=STALE_START, holders=None,
+                 verdict='invalid', exits_after=1):
+        self.pid, self.uid, self.path, self.start = pid, uid, path, start
+        self.holder_set = {pid} if holders is None else holders
+        self.verdict = verdict
+        self.exits_after = exits_after
+        self.kills, self.polls, self.clock, self.logs, self.verified = [], 0, 0.0, [], []
+        self.table = [self.line(pid, uid, start, path)]
+        self.after_check = None
+        self.stat = stat_with(whole_bundle(path, REPLACED))
+
+    @staticmethod
+    def line(pid, uid, start, path):
+        return f'{pid} {uid} {start} {path}'
+
+    def diagnose(self):
+        diagnosis = diagnose_sky_services(run=ps(*self.table), stat=self.stat)
+        return diagnosis
+
+    def verify(self, pid):
+        self.verified.append(pid)
+        if self.after_check:
+            self.after_check()
+        if isinstance(self.verdict, Exception):
+            raise self.verdict
+        return self.verdict
+
+    def holders(self, lock_path):
+        self.lock_paths = getattr(self, 'lock_paths', []) + [lock_path]
+        return self.holder_set
+
+    def kill(self, pid, sig):
+        self.kills.append((pid, sig))
+
+    def exists(self, pid):
+        self.polls += 1
+        return self.polls <= self.exits_after
+
+    def sleep(self, seconds):
+        self.clock += seconds
+
+    def monotonic(self):
+        return self.clock
+
+    def run(self, **overrides):
+        options = dict(lock_path=LOCK, executables=EXECUTABLES, uid=501, diagnose=self.diagnose,
+                       verify=self.verify, holders=self.holders, kill=self.kill, exists=self.exists,
+                       realpath=lambda path: path, sleep=self.sleep, monotonic=self.monotonic,
+                       log=self.logs.append)
+        options.update(overrides)
+        return recover_stale_service(**options)
+
+
+class RecoveryTests(unittest.TestCase):
+    def assertNothingSignaled(self, world, result, reason=None):
+        self.assertFalse(result['recovered'], result)
+        self.assertEqual(world.kills, [], 'no process may be signaled')
+        self.assertEqual(world.logs, [])
+        if reason:
+            self.assertIn(reason, result['reason'])
+
+    def test_a_provably_stale_lock_holder_gets_one_sigterm_and_is_waited_for(self):
+        import signal
+        world = FakeWorld(exits_after=3)
+        result = world.run()
+        self.assertEqual(world.kills, [(4242, signal.SIGTERM)])
+        self.assertEqual(result['recovered'], True)
+        self.assertEqual((result['pid'], result['path']), (4242, EXECUTABLE))
+        self.assertEqual(world.verified, [4242])
+        self.assertEqual(world.lock_paths, [LOCK])
+        self.assertEqual(len(world.logs), 1)
+        self.assertIn('pid 4242', world.logs[0])
+        self.assertIn(EXECUTABLE, world.logs[0])
+        self.assertRegex(world.logs[0], r'after \d+ ms')
+
+    def test_the_apps_own_copy_is_a_known_bundle_too(self):
+        world = FakeWorld(path=HOME_EXECUTABLE)
+        self.assertTrue(world.run()['recovered'])
+        self.assertEqual(len(world.kills), 1)
+
+    def test_a_healthy_or_unverifiable_service_is_never_signaled(self):
+        for verdict in ('valid', 'unknown', RuntimeError('codesign missing'),
+                        subprocess.TimeoutExpired('codesign', 4), OSError('no codesign')):
+            world = FakeWorld(verdict=verdict)
+            self.assertNothingSignaled(world, world.run())
+
+    def test_a_fresh_service_is_never_a_candidate(self):
+        world = FakeWorld(start='Wed Oct  7 00:34:53 2026')
+        self.assertNothingSignaled(world, world.run(), 'no stale service')
+        self.assertEqual(world.verified, [], 'a fresh service is not even checked')
+
+    def test_no_service_and_a_failing_process_listing_do_nothing(self):
+        world = FakeWorld()
+        world.table = []
+        self.assertNothingSignaled(world, world.run(), 'no stale service')
+        broken = FakeWorld()
+        result = broken.run(diagnose=Mock(side_effect=subprocess.TimeoutExpired('ps', 2)))
+        self.assertNothingSignaled(broken, result, 'check failed')
+
+    def test_pid_one_or_this_process_is_never_signaled(self):
+        for pid in (1, 0, os.getpid()):
+            world = FakeWorld(pid=pid)
+            self.assertNothingSignaled(world, world.run())
+
+    def test_a_process_of_another_user_is_never_signaled(self):
+        world = FakeWorld(uid=0)
+        self.assertNothingSignaled(world, world.run(), 'another user')
+        world = FakeWorld(uid=502)
+        self.assertNothingSignaled(world, world.run(), 'another user')
+
+    def test_a_process_with_another_name_is_never_signaled(self):
+        world = FakeWorld(path=EXECUTABLE.replace(SKY_SERVICE_NAME, 'ChatGPT'))
+        world.table = [world.line(4242, 501, STALE_START, world.path)]
+        self.assertNothingSignaled(world, world.run(), 'no stale service')
+        # Even if a table somehow produced one, the executable name is checked again.
+        world = FakeWorld()
+        crafted = {'services': [{'pid': 4242, 'uid': 501, 'path': EXECUTABLE.replace(SKY_SERVICE_NAME, 'ChatGPT'),
+                                 'started': 1.0, 'stale': True}]}
+        self.assertNothingSignaled(world, world.run(diagnose=lambda: crafted), 'known Computer Use bundle')
+
+    def test_a_service_outside_the_known_bundles_is_never_signaled(self):
+        for path in ('/Applications/Other.app/Contents/MacOS/' + SKY_SERVICE_NAME,
+                     '/tmp/Codex Computer Use.app/Contents/MacOS/' + SKY_SERVICE_NAME):
+            world = FakeWorld(path=path)
+            self.assertNothingSignaled(world, world.run(), 'known Computer Use bundle')
+        world = FakeWorld()
+        self.assertNothingSignaled(world, world.run(executables=set()), 'known Computer Use bundle')
+
+    def test_a_symlinked_path_is_compared_by_real_path(self):
+        world = FakeWorld(path='/tmp/link/Contents/MacOS/' + SKY_SERVICE_NAME)
+        result = world.run(realpath=lambda path: EXECUTABLE if path.startswith('/tmp/link') else path)
+        self.assertTrue(result['recovered'])
+
+    def test_more_than_one_stale_service_does_nothing(self):
+        world = FakeWorld()
+        world.table.append(world.line(5151, 501, STALE_START, HOME_EXECUTABLE))
+        world.stat = stat_with({**whole_bundle(EXECUTABLE, REPLACED), **whole_bundle(HOME_EXECUTABLE, REPLACED)})
+        self.assertNothingSignaled(world, world.run(), 'more than one')
+
+    def test_a_healthy_second_service_does_not_stop_recovery_of_the_stale_holder(self):
+        world = FakeWorld()
+        world.table.append(world.line(5151, 501, 'Wed Oct  7 00:34:53 2026', HOME_EXECUTABLE))
+        world.stat = stat_with({**whole_bundle(EXECUTABLE, REPLACED), **whole_bundle(HOME_EXECUTABLE, 'Wed Oct 7 00:34:50 2026')})
+        self.assertTrue(world.run()['recovered'])
+        self.assertEqual([pid for pid, _ in world.kills], [4242])
+
+    def test_only_the_sole_holder_of_the_lock_is_signaled(self):
+        for holders in (set(), {4242, 9999}, {9999}, None):
+            world = FakeWorld(holders=set() if holders is None else holders)
+            result = world.run(holders=(lambda path: None) if holders is None else world.holders)
+            self.assertNothingSignaled(world, result, 'only holder')
+            self.assertEqual(world.verified, [], 'the signature is not even checked without the lock')
+
+    def test_a_missing_lock_path_does_nothing(self):
+        world = FakeWorld()
+        result = world.run(lock_path=None, holders=lock_holders)
+        self.assertNothingSignaled(world, result, 'only holder')
+
+    def test_a_reused_pid_or_a_changed_service_between_check_and_signal_is_not_signaled(self):
+        for change in (
+            lambda world: setattr(world, 'table', [world.line(4242, 501, 'Wed Oct  7 00:40:00 2026', EXECUTABLE)]),
+            lambda world: setattr(world, 'table', [world.line(4242, 501, STALE_START, HOME_EXECUTABLE)]),
+            lambda world: setattr(world, 'table', [world.line(4242, 502, STALE_START, EXECUTABLE)]),
+            lambda world: setattr(world, 'table', []),
+            lambda world: setattr(world, 'table', [world.line(7777, 501, STALE_START, EXECUTABLE)]),
+        ):
+            world = FakeWorld()
+            world.stat = stat_with({**whole_bundle(EXECUTABLE, REPLACED), **whole_bundle(HOME_EXECUTABLE, REPLACED)})
+            world.after_check = lambda world=world, change=change: change(world)
+            self.assertNothingSignaled(world, world.run(), 'changed while')
+
+    def test_a_service_that_does_not_exit_is_waited_for_a_bounded_time_and_never_force_killed(self):
+        import signal
+        world = FakeWorld(exits_after=10 ** 9)
+        result = world.run()
+        self.assertEqual(world.kills, [(4242, signal.SIGTERM)], 'one SIGTERM and no SIGKILL')
+        self.assertFalse(result['recovered'])
+        self.assertIn('did not exit', result['reason'])
+        self.assertLessEqual(world.clock, 3.2)
+        self.assertLessEqual(world.polls, 40)
+        self.assertEqual(world.logs, [])
+
+    def test_a_failing_exit_probe_is_not_a_recovery(self):
+        world = FakeWorld()
+        result = world.run(exists=Mock(side_effect=RuntimeError('probe')))
+        self.assertFalse(result['recovered'])
+        self.assertEqual(len(world.kills), 1)
+
+    def test_the_signal_is_sigterm_to_one_positive_pid_through_kill_and_nothing_else(self):
+        import signal
+        world = FakeWorld()
+        with patch('os.killpg') as killpg:
+            world.run()
+        killpg.assert_not_called()
+        (pid, sig), = world.kills
+        self.assertIs(type(pid), int)
+        self.assertGreater(pid, 1)
+        self.assertEqual(sig, signal.SIGTERM)
+        self.assertNotEqual(sig, signal.SIGKILL)
+
+    def test_the_exit_probe_refuses_pids_that_are_not_one_process(self):
+        from lcu.macos_host import _process_exists
+        for pid in (0, 1, -1, -4242, True, '4242', None):
+            with patch('os.kill') as kill:
+                with self.assertRaises(ValueError):
+                    _process_exists(pid)
+            kill.assert_not_called()
+
+    def test_non_macos_never_looks_for_or_signals_anything(self):
+        with patch('lcu.macos_host.sys.platform', 'linux'), patch('os.kill') as kill, \
+             patch('lcu.macos_host.subprocess.run') as run:
+            self.assertEqual(recover_response(), {'ok': True, 'recovered': False, 'reason': 'not macOS'})
+        kill.assert_not_called()
+        run.assert_not_called()
+
+    def test_the_default_response_without_a_lock_location_does_nothing(self):
+        with patch('lcu.macos_host.sys.platform', 'darwin'), \
+             patch('lcu.macos_host.diagnose_sky_services', return_value={'services': []}), \
+             patch('os.kill') as kill, patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('LCU_MAC_SERVICE_LOCK', None)
+            result = recover_response()
+        self.assertFalse(result['recovered'])
+        kill.assert_not_called()
+
+
+class CodesignAndLockTests(unittest.TestCase):
+    @staticmethod
+    def run_with(returncode=0, stdout='', stderr=''):
+        return Mock(return_value=SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr))
+
+    def test_a_healthy_service_is_valid(self):
+        run = self.run_with(0, stderr='4242: dynamically valid\n4242: valid on disk\n'
+                                       '4242: satisfies its Designated Requirement\n')
+        self.assertEqual(verify_service_signature(4242, run=run), 'valid')
+        self.assertEqual(run.call_args.args[0], ['codesign', '--verify', '--strict', '4242'])
+        self.assertIsInstance(run.call_args.kwargs['timeout'], int)
+
+    def test_only_a_signature_mismatch_failure_is_invalid(self):
+        for message in ('4242: invalid signature (code or signature have been modified)',
+                        '4242: a sealed resource is missing or invalid', '4242: code or signature have been modified',
+                        '4242: not valid on disk'):
+            self.assertEqual(verify_service_signature(
+                4242, run=self.run_with(1, stderr=message)), 'invalid', message)
+        for result in (self.run_with(1, stderr='4242: no such process'),
+                       self.run_with(1, stderr=''),
+                       self.run_with(2, stderr='invalid signature'),
+                       self.run_with(3, stderr='a sealed resource is missing'),
+                       Mock(side_effect=subprocess.TimeoutExpired('codesign', 4)),
+                       Mock(side_effect=OSError('missing'))):
+            self.assertEqual(verify_service_signature(4242, run=result), 'unknown')
+        self.assertTrue(SIGNATURE_BROKEN_MARKERS)
+
+    def test_lock_holders_parses_lsof_terse_output(self):
+        self.assertEqual(lock_holders(LOCK, run=self.run_with(0, stdout='4242\n')), {4242})
+        self.assertEqual(lock_holders(LOCK, run=self.run_with(0, stdout='4242\n7\n')), {4242, 7})
+        self.assertEqual(lock_holders(LOCK, run=self.run_with(1, stdout='')), set())
+        run = self.run_with(0, stdout='4242\n')
+        lock_holders(LOCK, run=run)
+        self.assertEqual(run.call_args.args[0], ['lsof', '-t', '--', LOCK])
+
+    def test_lock_holders_is_unknown_when_lsof_cannot_answer(self):
+        for run in (self.run_with(2, stdout=''), self.run_with(0, stdout='lsof: WARNING\n'),
+                    Mock(side_effect=subprocess.TimeoutExpired('lsof', 3)), Mock(side_effect=OSError('x'))):
+            self.assertIsNone(lock_holders(LOCK, run=run))
+        for path in (None, '', 'relative/computeruse.sock.lock'):
+            self.assertIsNone(lock_holders(path, run=self.run_with(0, stdout='1\n')))
+
+    def test_known_executables_are_the_configured_service_and_the_apps_copy(self):
+        environment = {'SKY_CUA_SERVICE_PATH': BUNDLE, 'CODEX_HOME': '/Users/x/.codex'}
+        self.assertEqual(known_service_executables(environment, realpath=lambda path: path),
+                         {EXECUTABLE, HOME_EXECUTABLE})
+        self.assertEqual(known_service_executables({'SKY_CUA_SERVICE_PATH': 'relative.app'}), set())
+        self.assertEqual(known_service_executables({}), set())
 
 
 class SingleFlightTests(unittest.TestCase):

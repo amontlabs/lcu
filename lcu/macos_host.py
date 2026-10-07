@@ -1,5 +1,6 @@
 """Supervise the original macOS client turn-ended command for one MCP process."""
 import calendar
+import signal
 import json
 import os
 from pathlib import Path
@@ -38,7 +39,7 @@ def parse_process_start(fields):
 
 
 def parse_process_table(text):
-    """Return running Sky services from `ps -axo pid=,lstart=,comm=` output.
+    """Return running Sky services from `ps -axo pid=,uid=,lstart=,comm=` output.
 
     Lines that name the service but cannot be parsed are counted, not guessed at.
     """
@@ -46,16 +47,16 @@ def parse_process_table(text):
     for line in text.splitlines():
         if SKY_SERVICE_NAME not in line:
             continue
-        # pid, then lstart as `Wed Oct  7 00:34:53 2026`, then the executable path
+        # pid, uid, then lstart as `Wed Oct  7 00:34:53 2026`, then the executable path
         # (which may contain spaces).
-        fields = line.split(None, 6)
-        started = parse_process_start(fields[1:6]) if len(fields) == 7 else None
-        path = fields[6].strip() if len(fields) == 7 else ''
-        if (started is None or not fields[0].isdigit() or not os.path.isabs(path) or
-                os.path.basename(path) != SKY_SERVICE_NAME):
+        fields = line.split(None, 7)
+        started = parse_process_start(fields[2:7]) if len(fields) == 8 else None
+        path = fields[7].strip() if len(fields) == 8 else ''
+        if (started is None or not fields[0].isdigit() or not fields[1].isdigit() or
+                not os.path.isabs(path) or os.path.basename(path) != SKY_SERVICE_NAME):
             unparsed += 1
             continue
-        services.append({'pid': int(fields[0]), 'path': path, 'started': started})
+        services.append({'pid': int(fields[0]), 'uid': int(fields[1]), 'path': path, 'started': started})
     return services, unparsed
 
 
@@ -79,16 +80,6 @@ def bundle_replaced_at(executable, stat=os.stat):
         return None
 
 
-def stale_service_message(pids):
-    if len(pids) == 1:
-        return (f'A Computer Use service (pid {pids[0]}) started before ChatGPT was updated still holds '
-                'the connection. It quits on its own about a minute after it is last used: '
-                'wait, or quit it, then retry.')
-    return (f'Computer Use services (pids {", ".join(str(pid) for pid in pids)}) started before ChatGPT '
-            'was updated still hold the connection. They quit on their own about a minute after they '
-            'are last used: wait, or quit them, then retry.')
-
-
 def _ps_environment():
     """English month names and UTC times; UTF-8 so `ps` does not escape non-ASCII paths."""
     environment = {key: value for key, value in os.environ.items() if key != 'LC_ALL'}
@@ -98,7 +89,7 @@ def _ps_environment():
 
 def diagnose_sky_services(*, run=subprocess.run, stat=os.stat):
     """List running Sky services and flag those older than their bundle. Kills nothing."""
-    result = run(['ps', '-axo', 'pid=,lstart=,comm='], stdin=subprocess.DEVNULL,
+    result = run(['ps', '-axo', 'pid=,uid=,lstart=,comm='], stdin=subprocess.DEVNULL,
                  capture_output=True, timeout=2, check=False,
                  encoding='utf-8', errors='replace', env=_ps_environment())
     if result.returncode != 0:
@@ -112,8 +103,6 @@ def diagnose_sky_services(*, run=subprocess.run, stat=os.stat):
             'stale': replaced is not None and replaced > service['started'] + STALE_MARGIN_SECONDS})
     stale = sorted(service['pid'] for service in services if service['stale'])
     diagnosis = {'services': services, 'stale': stale, 'unparsed': unparsed}
-    if stale:
-        diagnosis['message'] = stale_service_message(stale)
     return diagnosis
 
 
@@ -127,8 +116,8 @@ def diagnose_response():
 class SingleFlight:
     """Run `work` once at a time; callers arriving meanwhile share the running call's result."""
 
-    def __init__(self, work, wait_seconds=5):
-        self.work, self.wait_seconds = work, wait_seconds
+    def __init__(self, work, wait_seconds=5, unfinished='The Computer Use service diagnosis did not finish.'):
+        self.work, self.wait_seconds, self.unfinished = work, wait_seconds, unfinished
         self.lock = Lock()
         self.current = None
 
@@ -147,18 +136,169 @@ class SingleFlight:
                 flight['done'].set()
         else:
             flight['done'].wait(self.wait_seconds)
-        return flight['result'] or {'ok': False, 'error': 'The Computer Use service diagnosis did not finish.'}
+        return flight['result'] or {'ok': False, 'error': self.unfinished}
 
 
 shared_diagnosis = SingleFlight(diagnose_response)
 
 
-def answer_diagnose(connection):
-    """Send the diagnosis on a private duplicate of the request connection, then close it."""
+# Recovery. A Computer Use service whose bundle was replaced while it ran keeps the socket
+# lock and rejects every client. When, and only when, every check below agrees that one
+# service is that stale holder, it is asked to quit (SIGTERM) so the original client can
+# start a current one. Every step is bounded; any doubt means no action.
+CODESIGN_TIMEOUT_SECONDS = 4
+LSOF_TIMEOUT_SECONDS = 3
+TERMINATE_WAIT_SECONDS = 3
+TERMINATE_POLL_SECONDS = 0.1
+RECOVERY_WAIT_SECONDS = 16
+# Failures of `codesign --verify <pid>` that mean the running code no longer matches its
+# signature on disk. Anything else (a vanished pid, a usage error) is not proof. A healthy
+# service prints `dynamically valid`, `valid on disk` and exits 0.
+SIGNATURE_BROKEN_MARKERS = ('invalid signature', 'sealed resource', 'have been modified',
+                            'not valid on disk', 'invalid or unsupported')
+SERVICE_EXECUTABLE = Path('Contents/MacOS') / SKY_SERVICE_NAME
+
+
+def verify_service_signature(pid, *, run=subprocess.run):
+    """'valid', 'invalid' (verification failed on a changed bundle) or 'unknown'.
+
+    `codesign --verify <pid>` validates the running code against its signature on disk, so
+    a bundle replaced under a running process fails it, and a healthy service passes.
+    """
+    try:
+        result = run(['codesign', '--verify', '--strict', str(pid)], stdin=subprocess.DEVNULL,
+                     capture_output=True, timeout=CODESIGN_TIMEOUT_SECONDS, check=False,
+                     encoding='utf-8', errors='replace')
+    except (OSError, subprocess.SubprocessError):
+        return 'unknown'
+    if result.returncode == 0:
+        return 'valid'
+    detail = f'{result.stderr or ""} {result.stdout or ""}'.lower()
+    if result.returncode == 1 and any(marker in detail for marker in SIGNATURE_BROKEN_MARKERS):
+        return 'invalid'
+    return 'unknown'
+
+
+def lock_holders(lock_path, *, run=subprocess.run):
+    """Pids that have the service's socket lock file open, or None when that cannot be told."""
+    if not lock_path or not os.path.isabs(lock_path):
+        return None
+    try:
+        result = run(['lsof', '-t', '--', lock_path], stdin=subprocess.DEVNULL, capture_output=True,
+                     timeout=LSOF_TIMEOUT_SECONDS, check=False, encoding='utf-8', errors='replace')
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = (result.stdout or '').split()
+    if result.returncode not in (0, 1) or not all(line.isdigit() for line in lines):
+        return None
+    return {int(line) for line in lines}
+
+
+def known_service_executables(environment=None, realpath=os.path.realpath):
+    """Executables of the two bundles LCU may stop a service from: the one it launches and the app's copy."""
+    environment = os.environ if environment is None else environment
+    bundles = [environment.get('SKY_CUA_SERVICE_PATH')]
+    codex_home = environment.get('CODEX_HOME')
+    if codex_home:
+        bundles.append(os.path.join(codex_home, 'computer-use', 'Codex Computer Use.app'))
+    return {realpath(os.path.join(bundle, SERVICE_EXECUTABLE))
+            for bundle in bundles if bundle and os.path.isabs(bundle)}
+
+
+def _process_exists(pid):
+    """Existence probe with signal 0 (never delivers anything); pid must be a single process."""
+    if type(pid) is not int or pid <= 1:
+        raise ValueError('refusing to probe a non-process id')
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose_sky_services,
+                          verify=verify_service_signature, holders=lock_holders, kill=os.kill,
+                          exists=_process_exists, realpath=os.path.realpath, sleep=time.sleep,
+                          monotonic=time.monotonic, log=None):
+    """Quit the one Computer Use service that is provably stale and holds the connection.
+
+    Every one of these must hold, otherwise nothing is signaled:
+    - exactly one running service started before its bundle was replaced (ctime);
+    - it is a single process (pid > 1, not this one), owned by the current user, named
+      exactly SkyComputerUseService, at the executable path of a known bundle;
+    - it is the only process holding the socket lock file;
+    - `codesign --verify` rejects the running code with a signature-mismatch message.
+    It is read again right before the signal and must match pid, start time, path and owner
+    exactly. The signal is SIGTERM to that one pid, never a group, never SIGKILL: a service
+    that ignores it is left alone. Returns the reason when it did nothing.
+    """
+    def nothing(reason):
+        return {'ok': True, 'recovered': False, 'reason': reason}
+
+    uid = os.getuid() if uid is None else uid
+    started = monotonic()
+    try:
+        stale = [service for service in diagnose()['services'] if service['stale']]
+        if not stale:
+            return nothing('no stale service')
+        if len(stale) != 1:
+            return nothing('more than one stale service')
+        service = stale[0]
+        pid = service['pid']
+        if type(pid) is not int or pid <= 1 or pid == os.getpid():
+            return nothing('not a single service process')
+        if service['uid'] != uid:
+            return nothing('the stale service belongs to another user')
+        if os.path.basename(service['path']) != SKY_SERVICE_NAME or realpath(service['path']) not in executables:
+            return nothing('the stale service is not in a known Computer Use bundle')
+        if holders(lock_path) != {pid}:
+            return nothing('the stale service is not the only holder of the socket lock')
+        if verify(pid) != 'invalid':
+            return nothing('the running service passes signature verification, or it could not be checked')
+        # Guard against a recycled pid or a changed service between the checks and the signal.
+        again = [item for item in diagnose()['services'] if item['stale']]
+        if [(item['pid'], item['uid'], item['started'], item['path']) for item in again] != [
+                (pid, service['uid'], service['started'], service['path'])]:
+            return nothing('the service changed while it was being checked')
+        kill(pid, signal.SIGTERM)
+    except Exception as exc:
+        return nothing(f'check failed: {str(exc)[:200]}')
+    try:
+        deadline = monotonic() + TERMINATE_WAIT_SECONDS
+        while exists(pid):
+            if monotonic() >= deadline:
+                return nothing(f'pid {pid} did not exit within {TERMINATE_WAIT_SECONDS} seconds of SIGTERM')
+            sleep(TERMINATE_POLL_SECONDS)
+    except Exception as exc:
+        return nothing(f'could not confirm that pid {pid} exited: {str(exc)[:200]}')
+    elapsed_ms = int((monotonic() - started) * 1000)
+    if log:
+        log(f'LCU macOS stopped stale Computer Use service pid {pid} ({service["path"]}) '
+            f'after {elapsed_ms} ms; its bundle was replaced while it was running')
+    return {'ok': True, 'recovered': True, 'pid': pid, 'path': service['path'], 'elapsed_ms': elapsed_ms}
+
+
+def recover_response():
+    if sys.platform != 'darwin':
+        return {'ok': True, 'recovered': False, 'reason': 'not macOS'}
+    return recover_stale_service(
+        lock_path=os.environ.get('LCU_MAC_SERVICE_LOCK'), executables=known_service_executables(),
+        log=lambda line: print(line, file=sys.stderr, flush=True))
+
+
+shared_recovery = SingleFlight(recover_response, wait_seconds=RECOVERY_WAIT_SECONDS,
+                               unfinished='The Computer Use service recovery did not finish.')
+
+
+def answer_diagnose(connection, flight=None):
+    """Send a flight's result (the diagnosis by default) on a private duplicate, then close it."""
+    flight = flight or shared_diagnosis
     with connection:
         try:
             connection.settimeout(3)
-            connection.sendall((json.dumps(shared_diagnosis(), separators=(',', ':')) + '\n').encode())
+            connection.sendall((json.dumps(flight(), separators=(',', ':')) + '\n').encode())
         except OSError:
             pass
 
@@ -428,6 +568,11 @@ def serve(address, client, control_address=None):
                         # Read-only: list Sky services and report; never signal them. It runs on
                         # its own thread so a slow `ps` cannot hold up turn-ended cleanup.
                         Thread(target=answer_diagnose, args=(connection.dup(),), daemon=True).start()
+                        continue
+                    if isinstance(request, dict) and request.get('type') == 'recover':
+                        # Also off the accept loop: it waits on codesign, lsof and the service's exit.
+                        Thread(target=answer_diagnose, args=(connection.dup(), shared_recovery),
+                               daemon=True).start()
                         continue
                     session_id = request.get('session_id') if isinstance(request, dict) else None
                     turn_id = request.get('turn_id') if isinstance(request, dict) else None

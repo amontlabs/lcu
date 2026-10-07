@@ -24,11 +24,15 @@ let failTurnEndedOnce = false;
 const pending = new Map();
 const observedContexts = [];
 const lifetimeMessages = [];
-const diagnoseRequests = [];
-let diagnoseReply;
+const recoverRequests = [];
+let recoverReply;
+let recoverDelayMs = 0;
 
 await writeFile(servicePath, `export async function handleRpc(request) {
   globalThis.originalRpcCount = (globalThis.originalRpcCount || 0) + 1;
+  if (request.failUntilRecovered && !globalThis.hostRecovered) {
+    throw new Error('Sky Computer Use native pipe startup failed');
+  }
   if (request.fail) {
     const error = Object.assign(new Error(request.fail), {code: -10001, errorName: 'fixtureFailure'});
     throw request.freeze ? Object.freeze(error) : error;
@@ -109,10 +113,15 @@ const controlServer = createServer(socket => consumeLines(socket, message => {
   serviceSocket?.write(`${JSON.stringify(message)}\n`);
 }));
 const lifetimeServer = createServer(socket => consumeLines(socket, message => {
-  if (message.type === 'diagnose') {
-    diagnoseRequests.push(message);
+  if (message.type === 'recover') {
+    recoverRequests.push(message);
     // undefined: never answer, as a host stuck behind other work would.
-    if (diagnoseReply !== undefined) socket.end(`${diagnoseReply}\n`);
+    if (recoverReply === undefined) return;
+    setTimeout(() => {
+      // The host reports `recovered` only after the stale service has exited.
+      try { if (JSON.parse(recoverReply).recovered === true) globalThis.hostRecovered = true; } catch {}
+      socket.end(`${recoverReply}\n`);
+    }, recoverDelayMs);
     return;
   }
   lifetimeMessages.push(message);
@@ -358,83 +367,131 @@ try {
     turnID: noControlMetadata.turn_id});
   assert.deepEqual(noControlEnded.metadata, noControlMetadata);
 
-  // A native-pipe startup failure names a stale Computer Use service when the
-  // private host finds one, and is otherwise reported exactly as the original.
+  // A native pipe startup failure asks the private host to recover from a provably stale
+  // service. Only when the host reports that it stopped one is the request retried, once.
   globalThis.nodeRepl.requestMeta = {};
   const startupFailure = 'Sky Computer Use native pipe startup failed';
-  const staleNote = 'A Computer Use service (pid 321) started before ChatGPT was updated still holds ' +
-    'the connection. It quits on its own about a minute after it is last used: wait, or quit it, then retry.';
-  const failure = (message, extra) =>
-    handleRpc({type: 'execute', method: 'list_apps', args: [], fail: message, ...extra})
-      .then(() => assert.fail('the original error must be thrown'), error => error);
-  diagnoseReply = JSON.stringify({ok: true, stale: [321], message: staleNote, services: []});
-  const explained = await failure(startupFailure);
-  assert.ok(explained instanceof Error);
-  assert.equal(explained.message, `${startupFailure} ${staleNote}`);
-  assert.equal(explained.code, -10001);
-  assert.equal(explained.errorName, 'fixtureFailure');
-  assert.deepEqual(diagnoseRequests, [{type: 'diagnose'}]);
+  const recovered = JSON.stringify({ok: true, recovered: true, pid: 321, path: '/fixture', elapsed_ms: 120});
+  const notRecovered = JSON.stringify({ok: true, recovered: false, reason: 'no stale service'});
+  const rpc = extra => handleRpc({type: 'execute', method: 'list_apps', args: [], ...extra});
+  const failure = extra => rpc(extra).then(() => assert.fail('the original error must be thrown'), error => error);
+  const countOriginal = () => globalThis.originalRpcCount;
+  const reset = () => { globalThis.hostRecovered = false; recoverDelayMs = 0; };
 
+  // Recovered: one recovery request, one retry, and the retry's result is returned.
+  reset();
+  recoverReply = recovered;
+  let rpcBefore = countOriginal();
+  assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
+  assert.deepEqual(recoverRequests, [{type: 'recover'}]);
+  assert.equal(countOriginal(), rpcBefore + 2, 'the request runs once, fails, and is retried exactly once');
+
+  // The retry is the last attempt: a persisting failure is thrown after exactly one retry
+  // and one recovery, with the retry's own error object.
+  reset();
+  rpcBefore = countOriginal();
+  let recoveriesBefore = recoverRequests.length;
+  const persisting = await failure({fail: startupFailure});
+  assert.equal(persisting.message, startupFailure);
+  assert.equal(persisting.code, -10001);
+  assert.equal(countOriginal(), rpcBefore + 2);
+  assert.equal(recoverRequests.length, recoveriesBefore + 1);
+
+  // Not recovered (healthy service, failed or inconclusive check): no retry, the original
+  // error object comes back unchanged.
   for (const reply of [
-    JSON.stringify({ok: true, stale: [], services: []}),
+    notRecovered,
+    JSON.stringify({ok: true, recovered: 'yes'}),
     JSON.stringify({ok: false, error: 'ps exited with status 1.'}),
-    JSON.stringify({ok: true, stale: [321], message: '   '}),
-    JSON.stringify({ok: true, stale: [321]}),
+    JSON.stringify({recovered: true}),
     '{not json',
+    '[]',
   ]) {
-    diagnoseReply = reply;
-    const before = diagnoseRequests.length;
-    assert.equal((await failure(startupFailure)).message, startupFailure, reply);
-    assert.equal(diagnoseRequests.length, before + 1);
+    reset();
+    recoverReply = reply;
+    rpcBefore = countOriginal();
+    recoveriesBefore = recoverRequests.length;
+    const error = await failure({fail: startupFailure});
+    assert.equal(error.message, startupFailure, reply);
+    assert.equal(error.errorName, 'fixtureFailure');
+    assert.equal(countOriginal(), rpcBefore + 1, `no retry for ${reply}`);
+    assert.equal(recoverRequests.length, recoveriesBefore + 1);
   }
 
-  // Other failures are not diagnosed at all.
-  diagnoseReply = JSON.stringify({ok: true, stale: [321], message: staleNote});
-  const unrelatedCount = diagnoseRequests.length;
-  assert.equal((await failure('Sky Computer Use request failed')).message, 'Sky Computer Use request failed');
-  assert.equal(diagnoseRequests.length, unrelatedCount);
+  // Other failures never ask the host to do anything.
+  reset();
+  recoverReply = recovered;
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  assert.equal((await failure({fail: 'Sky Computer Use request failed'})).message, 'Sky Computer Use request failed');
+  assert.equal(recoverRequests.length, recoveriesBefore);
+  assert.equal(countOriginal(), rpcBefore + 1);
 
-  // An unreachable host leaves the original error, immediately.
+  // Concurrent failures share one recovery, and each is retried once.
+  reset();
+  recoverDelayMs = 150;
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const results = await Promise.all([1, 2, 3].map(() => rpc({failUntilRecovered: true})));
+  assert.deepEqual(results, [{ok: true}, {ok: true}, {ok: true}]);
+  assert.equal(recoverRequests.length, recoveriesBefore + 1, 'concurrent requests share one recovery');
+  assert.equal(countOriginal(), rpcBefore + 6);
+
+  // An unreachable host, or none configured, leaves the original error, immediately.
+  reset();
+  recoverDelayMs = 0;
   const lifetimeAddress = globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET;
-  globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET = join(root, 'missing.sock');
-  assert.equal((await failure(startupFailure)).message, startupFailure);
-  globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET = undefined;
-  assert.equal((await failure(startupFailure)).message, startupFailure);
+  for (const address of [join(root, 'missing.sock'), undefined]) {
+    globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET = address;
+    rpcBefore = countOriginal();
+    assert.equal((await failure({fail: startupFailure})).message, startupFailure);
+    assert.equal(countOriginal(), rpcBefore + 1);
+  }
   globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET = lifetimeAddress;
 
-  // A host that never answers delays the original error by a bounded time only.
-  diagnoseReply = undefined;
+  // A host that never answers delays the original error by a bounded time only, and the
+  // configured bound can only lower the default.
+  recoverReply = undefined;
+  globalThis.nodeRepl.env.LCU_MAC_RECOVER_TIMEOUT_MS = '400';
+  rpcBefore = countOriginal();
   const hangStarted = Date.now();
-  assert.equal((await failure(startupFailure)).message, startupFailure);
+  assert.equal((await failure({fail: startupFailure})).message, startupFailure);
   const hangMs = Date.now() - hangStarted;
-  assert.ok(hangMs >= 2_500 && hangMs < 4_500, `diagnosis wait was ${hangMs} ms`);
+  assert.ok(hangMs >= 350 && hangMs < 2_000, `recovery wait was ${hangMs} ms`);
+  assert.equal(countOriginal(), rpcBefore + 1);
+  globalThis.nodeRepl.env.LCU_MAC_RECOVER_TIMEOUT_MS = undefined;
 
-  // A frozen error object cannot be extended, and is still thrown unchanged.
-  diagnoseReply = JSON.stringify({ok: true, stale: [321], message: staleNote});
-  assert.equal((await failure(startupFailure, {freeze: true})).message, startupFailure);
+  // A frozen error object is still thrown unchanged when nothing was recovered.
+  reset();
+  recoverReply = notRecovered;
+  assert.equal((await failure({fail: startupFailure, freeze: true})).message, startupFailure);
 
-  // Retried turn cleanup uses the same pipe and fails the same way: that error is
-  // explained too, and once even when two requests wait on the same retry.
+  // Retried turn cleanup uses the same pipe and fails the same way: a recovery makes the
+  // cleanup retry and the request proceed; without one the original error is thrown.
   const cleanupMetadata = {session_id: 'cleanup-session', turn_id: 'cleanup-turn', call_id: 'cleanup-call'};
   globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': cleanupMetadata};
-  assert.deepEqual(await handleRpc({type: 'execute', method: 'list_apps', args: []}), {ok: true});
-  diagnoseReply = JSON.stringify({ok: true, stale: [321], message: staleNote});
+  assert.deepEqual(await rpc(), {ok: true});
   globalThis.failTurnEndedMessage = startupFailure;
   globalThis.failTurnEndedCount = 2;
   await assert.rejects(turnEnded.run({session_id: cleanupMetadata.session_id,
     turn_id: cleanupMetadata.turn_id}), error => error.message === startupFailure);
-  const diagnosesBeforeRetry = diagnoseRequests.length;
+  reset();
+  recoverReply = notRecovered;
+  recoveriesBefore = recoverRequests.length;
   globalThis.nodeRepl.requestMeta = {};
-  const retries = await Promise.allSettled([
-    handleRpc({type: 'execute', method: 'list_apps', args: []}),
-    handleRpc({type: 'execute', method: 'list_apps', args: []}),
-  ]);
-  assert.deepEqual(retries.map(retry => retry.status), ['rejected', 'rejected']);
-  assert.deepEqual(retries.map(retry => retry.reason.message),
-    [`${startupFailure} ${staleNote}`, `${startupFailure} ${staleNote}`]);
-  assert.equal(diagnoseRequests.length, diagnosesBeforeRetry + 1);
-  assert.deepEqual(await handleRpc({type: 'execute', method: 'list_apps', args: []}), {ok: true});
+  await assert.rejects(rpc(), error => error.message === startupFailure);
+  assert.equal(globalThis.failTurnEndedCount, 0, 'the failing cleanup was retried before the request failed');
+  assert.equal(recoverRequests.length, recoveriesBefore + 1);
+  // The cleanup attempt fails once; the recovery lets its single retry through.
+  globalThis.failTurnEndedCount = 1;
+  recoverReply = recovered;
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  assert.deepEqual(await rpc(), {ok: true});
+  assert.equal(recoverRequests.length, recoveriesBefore + 1);
+  assert.equal(countOriginal(), rpcBefore + 1);
   globalThis.failTurnEndedMessage = undefined;
+  globalThis.failTurnEndedCount = 0;
 
   const boundaryTurns = [];
   for (let index = 0; index < 127; index++) {

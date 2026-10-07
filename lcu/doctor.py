@@ -307,24 +307,6 @@ def _print_windows_status(probe: dict) -> bool:
     return bool(windows.get('ok'))
 
 
-def print_stale_mac_service_warning(diagnose=None) -> bool:
-    """Warn when a Computer Use service older than the installed app still runs.
-
-    It clears by itself within about a minute of last use, so this is a warning and
-    does not change the exit status; the check is skipped when `ps` cannot answer.
-    """
-    if diagnose is None:
-        from .macos_host import diagnose_sky_services as diagnose
-    try:
-        message = diagnose().get('message')
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return False
-    if not message:
-        return False
-    print(f'Warning: {message}')
-    return True
-
-
 def main(root: Path, argv=None, *, resolved=None, env=None) -> int:
     parser = argparse.ArgumentParser(description='Check the original desktop provider and guide first-use permissions.')
     parser.add_argument('--non-interactive', action='store_true',
@@ -362,7 +344,6 @@ def main(root: Path, argv=None, *, resolved=None, env=None) -> int:
         if problem:
             print(problem)
             return 2
-        print_stale_mac_service_warning()
     if target == 'linux':
         print_linux_sandbox_status(env)
     if target == 'linux' and (not env.get('DISPLAY') or not env.get('DBUS_SESSION_BUS_ADDRESS')):

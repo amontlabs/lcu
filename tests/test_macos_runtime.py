@@ -87,8 +87,27 @@ class MacRuntimeTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], [str(self.runtime / 'bin/node'), str(
             self.runtime / 'lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs')])
         self.assertEqual(run.call_args.kwargs['env']['LCU_MAC_LIFETIME_SOCKET'], '/tmp/lcu.sock')
+        # The host learns the default socket lock location before it starts, not afterwards.
+        host_env = start.call_args.kwargs['env']
+        self.assertTrue(host_env['LCU_MAC_SERVICE_LOCK'].endswith(
+            '/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/IPC/computeruse.sock.lock'))
+        self.assertEqual(run.call_args.kwargs['env']['LCU_MAC_SERVICE_LOCK'], host_env['LCU_MAC_SERVICE_LOCK'])
         self.assertEqual(json.loads(run.call_args.kwargs['env']['NODE_REPL_TRUSTED_SERVICES'])['sky'],
                          str(self.root / 'lcu/macos_sky_service.mjs'))
+
+    def test_a_custom_socket_path_leaves_the_service_lock_unknown_to_the_host(self):
+        client = self.runtime / 'lib/node_modules/@oai/sky/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient'
+        client.parent.mkdir(parents=True)
+        client.write_text('fixture')
+        client.chmod(0o755)
+        with patch('lcu.platforms.resolve_installed_mac_app', return_value=self.selected), \
+             patch('lcu.macos_host.start_original_host', return_value=(object(), object(), '/tmp/lcu.sock')) as start, \
+             patch('lcu.macos_host.stop_original_host'), \
+             patch('lcu.runtime.subprocess.run', return_value=SimpleNamespace(returncode=0)), \
+             patch.dict(os.environ, {'HOME': '/fixture', 'SKY_CUA_SERVICE_NATIVE_PIPE_PATH': '/tmp/custom.sock'}, clear=True):
+            with self.assertRaises(SystemExit):
+                main(self.root, [])
+        self.assertNotIn('LCU_MAC_SERVICE_LOCK', start.call_args.kwargs['env'])
 
     def test_reports_current_metadata_after_descriptor_and_lock_become_stale(self):
         with patch('lcu.platforms.resolve_installed_mac_app', return_value=self.selected) as resolve:

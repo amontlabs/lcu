@@ -509,6 +509,10 @@ def main(root, argv):
         client = _configure_macos_lifecycle(root, runtime, env)
         if client is not None:
             from .macos_host import start_original_host, stop_original_host
+            from .platforms import mac_socket_path
+            socket_path, overridden = mac_socket_path(env)
+            if not overridden:
+                env['LCU_MAC_SERVICE_LOCK'] = socket_path + '.lock'
             host, temporary, address = start_original_host(
                 python=Path(sys.executable), client=client, entry=root / 'lcu/macos_host.py', env=env,
                 control_address=env.get('LCU_MAC_CONTROL_SOCKET'))

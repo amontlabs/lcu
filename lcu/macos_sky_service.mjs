@@ -63,28 +63,34 @@ function lifetimeSignal(runtime, session_id, turn_id) {
 }
 
 const NATIVE_PIPE_FAILURE = /native pipe startup failed/i;
-// Upper bound on what a failed request waits for the diagnosis, connection included.
-const DIAGNOSE_TIMEOUT_MS = 3_000;
+// Upper bound on what a failed request waits for the host's recovery attempt: the host
+// bounds its own checks and the service's exit to under this.
+const RECOVER_TIMEOUT_MS = 15_000;
+let recovering;
 
-// Ask the private host whether an older Computer Use service is still running
-// from a replaced app bundle. Resolves to the host's explanation, or undefined
-// when there is none or the host cannot answer in time; it never rejects.
-function staleServiceNote(runtime) {
+// Ask the private host to recover from a stale Computer Use service. It stops one only
+// when it proves that service is stale, holds the connection and is ours to stop; it
+// answers `recovered: true` once that service has exited. Resolves to true only then.
+// Never rejects, and never waits longer than RECOVER_TIMEOUT_MS.
+function askHostToRecover(runtime) {
   const address = runtime?.env?.LCU_MAC_LIFETIME_SOCKET;
   if (!address || typeof runtime.nativePipe?.createConnection !== 'function') {
-    return Promise.resolve(undefined);
+    return Promise.resolve(false);
   }
+  // A shorter bound may be configured (tests); the wait never exceeds RECOVER_TIMEOUT_MS.
+  const configured = Number(runtime.env.LCU_MAC_RECOVER_TIMEOUT_MS);
+  const timeoutMs = configured > 0 ? Math.min(configured, RECOVER_TIMEOUT_MS) : RECOVER_TIMEOUT_MS;
   return new Promise(resolve => {
     let socket;
     let finished = false;
     let data = Buffer.alloc(0);
-    const timer = setTimeout(() => finish(), DIAGNOSE_TIMEOUT_MS);
-    function finish(note) {
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    function finish(recovered) {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
       try { socket?.end(); } catch {}
-      resolve(note);
+      resolve(recovered === true);
     }
     Promise.resolve().then(() => runtime.nativePipe.createConnection(address)).then(connection => {
       if (finished) {
@@ -94,41 +100,42 @@ function staleServiceNote(runtime) {
       socket = connection;
       socket.on('data', chunk => {
         data = Buffer.concat([data, Buffer.from(chunk)]);
-        if (data.length > 65536) return finish();
+        if (data.length > 65536) return finish(false);
         const newline = data.indexOf(10);
         if (newline < 0) return;
         try {
           const result = JSON.parse(data.subarray(0, newline).toString('utf8'));
-          finish(result?.ok === true && Array.isArray(result.stale) && result.stale.length &&
-            typeof result.message === 'string' && result.message.trim()
-            ? result.message.slice(0, 512) : undefined);
-        } catch { finish(); }
+          finish(result?.ok === true && result.recovered === true);
+        } catch { finish(false); }
       });
-      socket.on('error', () => finish());
-      socket.on('close', () => finish());
-      socket.write(Buffer.from(JSON.stringify({type: 'diagnose'}) + '\n'));
-    }).catch(() => finish());
+      socket.on('error', () => finish(false));
+      socket.on('close', () => finish(false));
+      socket.write(Buffer.from(JSON.stringify({type: 'recover'}) + '\n'));
+    }).catch(() => finish(false));
   });
 }
 
-// Keep the original error, its class and fields; only extend the message when
-// the host found a stale service. Any failure to diagnose leaves it untouched.
-// Concurrent requests can await one shared failure, so each error is explained once
-// and every waiter sees the finished message.
-const explainedErrors = new WeakMap();
-async function explainNativePipeFailure(runtime, error) {
+// One recovery at a time: concurrent failures share it.
+function recoverOnce(runtime) {
+  recovering ??= askHostToRecover(runtime).finally(() => { recovering = undefined; });
+  return recovering;
+}
+
+// Run `attempt`. When it fails with a native pipe startup failure and the host recovered
+// from a provably stale service, run it once more. In every other case the original error
+// is thrown unchanged, and a failure of the single retry is the retry's own error.
+async function withStaleServiceRecovery(runtime, attempt) {
   try {
-    const message = error?.message;
-    if (typeof message !== 'string' || !NATIVE_PIPE_FAILURE.test(message) ||
-        typeof error !== 'object') return error;
-    if (!explainedErrors.has(error)) {
-      explainedErrors.set(error, staleServiceNote(runtime).then(note => {
-        if (note) error.message = `${message} ${note}`;
-      }));
-    }
-    await explainedErrors.get(error);
-  } catch {}
-  return error;
+    return await attempt();
+  } catch (error) {
+    let recovered = false;
+    try {
+      recovered = typeof error?.message === 'string' && NATIVE_PIPE_FAILURE.test(error.message) &&
+        await recoverOnce(runtime);
+    } catch {}
+    if (!recovered) throw error;
+  }
+  return attempt();
 }
 
 function register() {
@@ -412,12 +419,8 @@ function finishPendingCleanup() {
 
 export async function handleRpc(request) {
   register();
-  try {
-    await finishPendingCleanup();
-  } catch (error) {
-    // Retried turn cleanup talks to the same native pipe and fails the same way.
-    throw await explainNativePipeFailure(globalThis.nodeRepl, error);
-  }
+  // Retried turn cleanup talks to the same native pipe and fails the same way.
+  await withStaleServiceRecovery(globalThis.nodeRepl, finishPendingCleanup);
   original ??= import(pathToFileURL(globalThis.nodeRepl.env.LCU_MAC_SKY_SERVICE_PATH).href);
   const runtime = globalThis.nodeRepl;
   const metadata = readTurnMetadata(runtime);
@@ -439,9 +442,5 @@ export async function handleRpc(request) {
     }
   }
   const service = await original;
-  try {
-    return await service.handleRpc(request);
-  } catch (error) {
-    throw await explainNativePipeFailure(runtime, error);
-  }
+  return withStaleServiceRecovery(runtime, () => service.handleRpc(request));
 }
