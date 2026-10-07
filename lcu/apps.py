@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from xml.parsers.expat import ExpatError
 
 KEY = 'approvedBundleIdentifiers'
 STORE = ('Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/'
@@ -112,7 +113,7 @@ def bundle_info(app):
     """(bundle id, display name) of an .app directory, or None when it is not a bundle."""
     try:
         info = plistlib.loads((Path(app) / 'Contents/Info.plist').read_bytes())
-    except (OSError, plistlib.InvalidFileException, ValueError):
+    except (OSError, plistlib.InvalidFileException, ValueError, ExpatError):
         return None
     identifier = info.get('CFBundleIdentifier')
     if not isinstance(identifier, str) or not identifier:

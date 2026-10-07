@@ -99,6 +99,19 @@ class AppsTests(unittest.TestCase):
         self.assertIn('com.gone.App  (not installed)', out)
         self.assertEqual(self.calls, [])
 
+    def test_bundle_with_unparseable_xml_plist_is_skipped(self):
+        # Steam desktop shortcuts end their Info.plist with NUL bytes; plistlib raises ExpatError.
+        contents = self.applications / 'Balatro.app/Contents'
+        contents.mkdir(parents=True)
+        (contents / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleName': 'Balatro'}) + b'\0\0')
+        self.assertIsNone(apps.bundle_info(contents.parent))
+        self.write_store({apps.KEY: ['dev.zed.Zed']})
+        code, out, _ = self.run_apps()
+        self.assertEqual(code, 0)
+        self.assertIn('dev.zed.Zed', out)
+        self.assertNotIn('not installed', out)
+        self.assertEqual(apps.resolve('Zed', home=self.home), ('dev.zed.Zed', 'Zed', True))
+
     def test_list_json_and_empty_list(self):
         code, out, _ = self.run_apps('list')
         self.assertIn('No apps are always allowed', out)
