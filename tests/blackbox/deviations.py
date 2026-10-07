@@ -1,6 +1,6 @@
 """Reviewed, expected differences between implementation A and B (`run.py --deviations FILE`).
 
-FILE is JSON (stdlib only, so no YAML):
+FILE is JSON (stdlib only, so no YAML; `{arch}` stands for this machine's archive architecture, see `load`):
 
     {"deviations": [
       {"id": "node-traceback",                      # unique, shown in the report
@@ -35,6 +35,7 @@ matched nothing are reported as UNUSED.
 """
 import fnmatch
 import json
+import platform
 import re
 from pathlib import Path
 
@@ -43,9 +44,18 @@ _RUN = re.compile(r'^### run (\d+):')
 _KEY = re.compile(r'^\s*"([^"]+)":')
 
 
+def architecture():
+    """The archive architecture label of this machine (scripts/bundle.py): `arm64` or `x64`."""
+    return {'aarch64': 'arm64', 'arm64': 'arm64', 'x86_64': 'x64', 'amd64': 'x64'}[platform.machine().lower()]
+
+
 def load(path, host=None):
-    """The entries of FILE; with `host` ('linux' or 'darwin'), only those without a `host` key or with that one."""
-    data = json.loads(Path(path).read_text())
+    """The entries of FILE; with `host` ('linux' or 'darwin'), only those without a `host` key or with that one.
+
+    `{arch}` in a before/after text stands for this machine's archive architecture (release names such as
+    `lcu-0.9.7-linux-{arch}.tar.gz` differ between the arm64 and x64 runners).
+    """
+    data = json.loads(Path(path).read_text().replace('{arch}', architecture()))
     entries = data.get('deviations') if isinstance(data, dict) else None
     if not isinstance(entries, list):
         raise SystemExit(f'{path}: expected {{"deviations": [...]}}')
