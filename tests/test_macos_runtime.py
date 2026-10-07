@@ -104,7 +104,8 @@ class MacRuntimeTests(unittest.TestCase):
              patch('lcu.macos_host.start_original_host', return_value=(object(), object(), '/tmp/lcu.sock')) as start, \
              patch('lcu.macos_host.stop_original_host'), \
              patch('lcu.runtime.subprocess.run', return_value=SimpleNamespace(returncode=0)), \
-             patch.dict(os.environ, {'HOME': '/fixture', 'SKY_CUA_SERVICE_NATIVE_PIPE_PATH': '/tmp/custom.sock'}, clear=True):
+             patch.dict(os.environ, {'HOME': '/fixture', 'SKY_CUA_SERVICE_NATIVE_PIPE_PATH': '/tmp/custom.sock',
+                                 'LCU_MAC_SERVICE_LOCK': '/inherited/computeruse.sock.lock'}, clear=True):
             with self.assertRaises(SystemExit):
                 main(self.root, [])
         self.assertNotIn('LCU_MAC_SERVICE_LOCK', start.call_args.kwargs['env'])

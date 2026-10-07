@@ -148,19 +148,23 @@ shared_diagnosis = SingleFlight(diagnose_response)
 # start a current one. Every step is bounded; any doubt means no action.
 CODESIGN_TIMEOUT_SECONDS = 4
 LSOF_TIMEOUT_SECONDS = 3
+# Observations older than this are not acted on, so a slow machine cannot turn a stale
+# reading into a signal after the requester has already given up (it waits 15 s).
+PRE_SIGNAL_BUDGET_SECONDS = 9
+PEER_LOCK_WAIT_SECONDS = 4
 TERMINATE_WAIT_SECONDS = 3
 TERMINATE_POLL_SECONDS = 0.1
 RECOVERY_WAIT_SECONDS = 16
-# Failures of `codesign --verify <pid>` that mean the running code no longer matches its
-# signature on disk. Anything else (a vanished pid, a usage error) is not proof. A healthy
-# service prints `dynamically valid`, `valid on disk` and exits 0.
-SIGNATURE_BROKEN_MARKERS = ('invalid signature', 'sealed resource', 'have been modified',
-                            'not valid on disk', 'invalid or unsupported')
+# What `codesign --verify <pid>` prints when the code that is running is not the code now on
+# disk (errSecCSStaticCodeChanged). A healthy service prints `dynamically valid`, `valid on
+# disk` and exits 0. Any other failure (a vanished pid, a usage error, a broken seal) does
+# not prove that the running service is stale, so it is not enough.
+SIGNATURE_MISMATCH_MARKERS = ('the code on disk does not match what is running',)
 SERVICE_EXECUTABLE = Path('Contents/MacOS') / SKY_SERVICE_NAME
 
 
 def verify_service_signature(pid, *, run=subprocess.run):
-    """'valid', 'invalid' (verification failed on a changed bundle) or 'unknown'.
+    """'valid', 'invalid' (the running code differs from the code on disk) or 'unknown'.
 
     `codesign --verify <pid>` validates the running code against its signature on disk, so
     a bundle replaced under a running process fails it, and a healthy service passes.
@@ -168,19 +172,23 @@ def verify_service_signature(pid, *, run=subprocess.run):
     try:
         result = run(['codesign', '--verify', '--strict', str(pid)], stdin=subprocess.DEVNULL,
                      capture_output=True, timeout=CODESIGN_TIMEOUT_SECONDS, check=False,
-                     encoding='utf-8', errors='replace')
+                     encoding='utf-8', errors='replace', env=_ps_environment())
     except (OSError, subprocess.SubprocessError):
         return 'unknown'
     if result.returncode == 0:
         return 'valid'
     detail = f'{result.stderr or ""} {result.stdout or ""}'.lower()
-    if result.returncode == 1 and any(marker in detail for marker in SIGNATURE_BROKEN_MARKERS):
+    if result.returncode == 1 and any(marker in detail for marker in SIGNATURE_MISMATCH_MARKERS):
         return 'invalid'
     return 'unknown'
 
 
 def lock_holders(lock_path, *, run=subprocess.run):
-    """Pids that have the service's socket lock file open, or None when that cannot be told."""
+    """The complete set of pids with the service's socket lock file open, or None when unsure.
+
+    Only a clean answer counts: pids and no diagnostics, or no pids, no diagnostics and
+    lsof's "nothing found" status. A warning, an error status or odd output is unknown.
+    """
     if not lock_path or not os.path.isabs(lock_path):
         return None
     try:
@@ -189,9 +197,70 @@ def lock_holders(lock_path, *, run=subprocess.run):
     except (OSError, subprocess.SubprocessError):
         return None
     lines = (result.stdout or '').split()
-    if result.returncode not in (0, 1) or not all(line.isdigit() for line in lines):
+    clean = (not (result.stderr or '').strip() and all(line.isdigit() for line in lines) and
+             (result.returncode == 0 and lines or result.returncode == 1 and not lines))
+    return {int(line) for line in lines} if clean else None
+
+
+def executable_path(pid):
+    """The executable path the kernel reports for a pid (proc_pidpath), or None.
+
+    `ps` shows argv[0], which a process can choose; this is the file actually running.
+    """
+    if sys.platform != 'darwin' or type(pid) is not int or pid <= 1:
         return None
-    return {int(line) for line in lines}
+    try:
+        import ctypes
+        libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+        buffer = ctypes.create_string_buffer(4096)
+        size = libproc.proc_pidpath(ctypes.c_int(pid), buffer, ctypes.c_uint32(len(buffer)))
+        return os.fsdecode(buffer.value) if size > 0 else None
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+class PeerLock:
+    """Exclusion between the LCU hosts of this account (one per MCP connection).
+
+    An advisory flock on a file in the account's private temporary directory. Another host
+    recovering at the same time makes this one wait (bounded); `waited` tells it so.
+    """
+
+    def __init__(self, path=None, wait_seconds=PEER_LOCK_WAIT_SECONDS, sleep=time.sleep, monotonic=time.monotonic):
+        self.path = path or os.path.join(tempfile.gettempdir(), f'lcu-stale-service-recovery-{os.getuid()}.lock')
+        self.wait_seconds, self.sleep, self.monotonic = wait_seconds, sleep, monotonic
+        self.descriptor, self.acquired, self.waited = None, False, False
+
+    def __enter__(self):
+        try:
+            import fcntl
+            descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except (OSError, ImportError):
+            return self
+        deadline = self.monotonic() + self.wait_seconds
+        try:
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self.descriptor, self.acquired = descriptor, True
+                    return self
+                except BlockingIOError:
+                    self.waited = True
+                    if self.monotonic() >= deadline:
+                        break
+                    self.sleep(0.05)
+        except OSError:
+            pass
+        os.close(descriptor)
+        return self
+
+    def __exit__(self, *exc):
+        if self.descriptor is not None:
+            try:
+                os.close(self.descriptor)  # closing releases the flock
+            finally:
+                self.descriptor = None
+        return False
 
 
 def known_service_executables(environment=None, realpath=os.path.realpath):
@@ -218,51 +287,90 @@ def _process_exists(pid):
     return True
 
 
+class _NoPeerLock:
+    acquired, waited = True, False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose_sky_services,
-                          verify=verify_service_signature, holders=lock_holders, kill=os.kill,
-                          exists=_process_exists, realpath=os.path.realpath, sleep=time.sleep,
-                          monotonic=time.monotonic, log=None):
+                          verify=verify_service_signature, holders=lock_holders,
+                          kernel_path=executable_path, kill=os.kill, exists=_process_exists,
+                          realpath=os.path.realpath, sleep=time.sleep, monotonic=time.monotonic,
+                          exclusive=_NoPeerLock, log=None):
     """Quit the one Computer Use service that is provably stale and holds the connection.
 
     Every one of these must hold, otherwise nothing is signaled:
-    - exactly one running service started before its bundle was replaced (ctime);
+    - the process listing is complete, and exactly one running service started before its
+      bundle was replaced (ctime);
     - it is a single process (pid > 1, not this one), owned by the current user, named
-      exactly SkyComputerUseService, at the executable path of a known bundle;
+      exactly SkyComputerUseService, and the executable the kernel reports for it is the
+      one in a known bundle;
     - it is the only process holding the socket lock file;
-    - `codesign --verify` rejects the running code with a signature-mismatch message.
-    It is read again right before the signal and must match pid, start time, path and owner
-    exactly. The signal is SIGTERM to that one pid, never a group, never SIGKILL: a service
-    that ignores it is left alone. Returns the reason when it did nothing.
+    - `codesign --verify` rejects the running code as different from the code on disk.
+    Then the process, lock and executable are read again, and the checks must still agree
+    exactly (pid, owner, start time, path), within the pre-signal time budget. The signal is
+    SIGTERM to that one pid, never a group, never SIGKILL: a service that ignores it is left
+    alone. Only one LCU host per account does this at a time. Returns the reason when it
+    did nothing.
     """
     def nothing(reason):
         return {'ok': True, 'recovered': False, 'reason': reason}
 
     uid = os.getuid() if uid is None else uid
     started = monotonic()
-    try:
-        stale = [service for service in diagnose()['services'] if service['stale']]
+
+    def candidate():
+        """The single stale service that passes every identity check, or the reason there is none."""
+        diagnosis = diagnose()
+        if diagnosis.get('unparsed'):
+            return None, 'the process listing was incomplete'
+        stale = [service for service in diagnosis['services'] if service['stale']]
         if not stale:
-            return nothing('no stale service')
+            return None, 'no stale service'
         if len(stale) != 1:
-            return nothing('more than one stale service')
+            return None, 'more than one stale service'
         service = stale[0]
         pid = service['pid']
         if type(pid) is not int or pid <= 1 or pid == os.getpid():
-            return nothing('not a single service process')
+            return None, 'not a single service process'
         if service['uid'] != uid:
-            return nothing('the stale service belongs to another user')
+            return None, 'the stale service belongs to another user'
         if os.path.basename(service['path']) != SKY_SERVICE_NAME or realpath(service['path']) not in executables:
-            return nothing('the stale service is not in a known Computer Use bundle')
+            return None, 'the stale service is not in a known Computer Use bundle'
+        actual = kernel_path(pid)
+        if not actual or realpath(actual) != realpath(service['path']) or realpath(actual) not in executables:
+            return None, 'the kernel does not report the known executable for the stale service'
         if holders(lock_path) != {pid}:
-            return nothing('the stale service is not the only holder of the socket lock')
-        if verify(pid) != 'invalid':
-            return nothing('the running service passes signature verification, or it could not be checked')
-        # Guard against a recycled pid or a changed service between the checks and the signal.
-        again = [item for item in diagnose()['services'] if item['stale']]
-        if [(item['pid'], item['uid'], item['started'], item['path']) for item in again] != [
-                (pid, service['uid'], service['started'], service['path'])]:
-            return nothing('the service changed while it was being checked')
-        kill(pid, signal.SIGTERM)
+            return None, 'the stale service is not the only holder of the socket lock'
+        return service, None
+
+    try:
+        with exclusive() as peer:
+            if not peer.acquired:
+                return nothing('another LCU process is recovering')
+            service, reason = candidate()
+            if service is None:
+                if peer.waited and reason == 'no stale service':
+                    # Another LCU process was recovering while this one waited for it.
+                    return {'ok': True, 'recovered': True, 'reason': 'recovered by another LCU process'}
+                return nothing(reason)
+            pid = service['pid']
+            if verify(pid) != 'invalid':
+                return nothing('the running service passes signature verification, or it could not be checked')
+            # Read everything again, then signal at once: a recycled pid, a replaced service or
+            # a lock that changed hand during the slower checks must not be signaled.
+            again, reason = candidate()
+            if again is None or (again['pid'], again['uid'], again['started'], again['path']) != (
+                    pid, service['uid'], service['started'], service['path']):
+                return nothing('the service changed while it was being checked')
+            if monotonic() - started > PRE_SIGNAL_BUDGET_SECONDS:
+                return nothing('the checks took too long to act on')
+            kill(pid, signal.SIGTERM)
     except Exception as exc:
         return nothing(f'check failed: {str(exc)[:200]}')
     try:
@@ -285,7 +393,7 @@ def recover_response():
         return {'ok': True, 'recovered': False, 'reason': 'not macOS'}
     return recover_stale_service(
         lock_path=os.environ.get('LCU_MAC_SERVICE_LOCK'), executables=known_service_executables(),
-        log=lambda line: print(line, file=sys.stderr, flush=True))
+        exclusive=PeerLock, log=lambda line: print(line, file=sys.stderr, flush=True))
 
 
 shared_recovery = SingleFlight(recover_response, wait_seconds=RECOVERY_WAIT_SECONDS,

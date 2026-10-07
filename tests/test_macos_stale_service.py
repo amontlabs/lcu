@@ -16,7 +16,7 @@ if sys.platform == 'win32':
 
 from lcu.macos_host import (SKY_SERVICE_NAME, SingleFlight, bundle_replaced_at, diagnose_response,
                             diagnose_sky_services, parse_process_start, parse_process_table,
-                            SIGNATURE_BROKEN_MARKERS, known_service_executables, lock_holders,
+                            SIGNATURE_MISMATCH_MARKERS, PeerLock, executable_path, known_service_executables, lock_holders,
                             recover_response, recover_stale_service, verify_service_signature)
 
 BUNDLE = '/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app'
@@ -226,6 +226,7 @@ class FakeWorld:
         self.verdict = verdict
         self.exits_after = exits_after
         self.kills, self.polls, self.clock, self.logs, self.verified = [], 0, 0.0, [], []
+        self.kernel = path
         self.table = [self.line(pid, uid, start, path)]
         self.after_check = None
         self.stat = stat_with(whole_bundle(path, REPLACED))
@@ -250,6 +251,9 @@ class FakeWorld:
         self.lock_paths = getattr(self, 'lock_paths', []) + [lock_path]
         return self.holder_set
 
+    def kernel_path(self, pid):
+        return self.kernel
+
     def kill(self, pid, sig):
         self.kills.append((pid, sig))
 
@@ -265,7 +269,7 @@ class FakeWorld:
 
     def run(self, **overrides):
         options = dict(lock_path=LOCK, executables=EXECUTABLES, uid=501, diagnose=self.diagnose,
-                       verify=self.verify, holders=self.holders, kill=self.kill, exists=self.exists,
+                       verify=self.verify, holders=self.holders, kernel_path=self.kernel_path, kill=self.kill, exists=self.exists,
                        realpath=lambda path: path, sleep=self.sleep, monotonic=self.monotonic,
                        log=self.logs.append)
         options.update(overrides)
@@ -288,7 +292,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result['recovered'], True)
         self.assertEqual((result['pid'], result['path']), (4242, EXECUTABLE))
         self.assertEqual(world.verified, [4242])
-        self.assertEqual(world.lock_paths, [LOCK])
+        self.assertEqual(world.lock_paths, [LOCK, LOCK], 'checked before the slow checks and again before the signal')
         self.assertEqual(len(world.logs), 1)
         self.assertIn('pid 4242', world.logs[0])
         self.assertIn(EXECUTABLE, world.logs[0])
@@ -390,6 +394,61 @@ class RecoveryTests(unittest.TestCase):
             world.after_check = lambda world=world, change=change: change(world)
             self.assertNothingSignaled(world, world.run(), 'changed while')
 
+    def test_the_kernel_reported_executable_must_be_the_known_one(self):
+        # argv[0], which ps shows, can be chosen by any process of the same user.
+        for kernel in (None, '/bin/sleep', '/tmp/evil/Contents/MacOS/' + SKY_SERVICE_NAME, HOME_EXECUTABLE + 'x'):
+            world = FakeWorld()
+            world.kernel = kernel
+            self.assertNothingSignaled(world, world.run(), 'kernel')
+        world = FakeWorld()
+        world.after_check = lambda: setattr(world, 'kernel', '/bin/sleep')
+        self.assertNothingSignaled(world, world.run(), 'changed while')
+
+    def test_a_lock_that_changes_hands_during_the_slow_checks_is_not_signaled(self):
+        world = FakeWorld()
+        world.after_check = lambda: setattr(world, 'holder_set', {9999})
+        self.assertNothingSignaled(world, world.run(), 'changed while')
+        world = FakeWorld()
+        world.after_check = lambda: setattr(world, 'holder_set', {4242, 9999})
+        self.assertNothingSignaled(world, world.run(), 'changed while')
+
+    def test_an_incomplete_process_listing_does_nothing(self):
+        world = FakeWorld()
+        world.table.append(f'5151 501 not-a-date {HOME_EXECUTABLE}')
+        self.assertNothingSignaled(world, world.run(), 'incomplete')
+
+    def test_observations_that_took_too_long_are_not_acted_on(self):
+        world = FakeWorld()
+        world.after_check = lambda: setattr(world, 'clock', world.clock + 10)
+        self.assertNothingSignaled(world, world.run(), 'too long')
+
+    def test_only_one_lcu_host_recovers_at_a_time(self):
+        class Peer:
+            def __init__(self, acquired, waited):
+                self.acquired, self.waited = acquired, waited
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        world = FakeWorld()
+        self.assertNothingSignaled(world, world.run(exclusive=lambda: Peer(False, True)), 'another LCU')
+        # Waited for a peer that recovered: nothing stale is left, and the request may retry.
+        gone = FakeWorld()
+        gone.table = []
+        result = gone.run(exclusive=lambda: Peer(True, True))
+        self.assertEqual((result['recovered'], gone.kills), (True, []))
+        # Waited for a peer, but a stale service is still there: the full checks apply.
+        still = FakeWorld()
+        self.assertTrue(still.run(exclusive=lambda: Peer(True, True))['recovered'])
+        self.assertEqual(len(still.kills), 1)
+        # Never waited and nothing stale: no claim of recovery.
+        none = FakeWorld()
+        none.table = []
+        self.assertFalse(none.run(exclusive=lambda: Peer(True, False))['recovered'])
+
     def test_a_service_that_does_not_exit_is_waited_for_a_bounded_time_and_never_force_killed(self):
         import signal
         world = FakeWorld(exits_after=10 ** 9)
@@ -456,20 +515,26 @@ class CodesignAndLockTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], ['codesign', '--verify', '--strict', '4242'])
         self.assertIsInstance(run.call_args.kwargs['timeout'], int)
 
-    def test_only_a_signature_mismatch_failure_is_invalid(self):
-        for message in ('4242: invalid signature (code or signature have been modified)',
-                        '4242: a sealed resource is missing or invalid', '4242: code or signature have been modified',
-                        '4242: not valid on disk'):
-            self.assertEqual(verify_service_signature(
-                4242, run=self.run_with(1, stderr=message)), 'invalid', message)
+    def test_only_a_running_versus_disk_mismatch_is_invalid(self):
+        mismatch = '4242: the code on disk does not match what is running'
+        self.assertEqual(verify_service_signature(4242, run=self.run_with(1, stderr=mismatch)), 'invalid')
         for result in (self.run_with(1, stderr='4242: no such process'),
                        self.run_with(1, stderr=''),
-                       self.run_with(2, stderr='invalid signature'),
-                       self.run_with(3, stderr='a sealed resource is missing'),
+                       self.run_with(1, stderr='4242: invalid signature (code or signature have been modified)'),
+                       self.run_with(1, stderr='4242: a sealed resource is missing or invalid'),
+                       self.run_with(1, stderr='4242: invalid or unsupported format for signature'),
+                       self.run_with(2, stderr=mismatch),
+                       self.run_with(3, stderr=mismatch),
                        Mock(side_effect=subprocess.TimeoutExpired('codesign', 4)),
                        Mock(side_effect=OSError('missing'))):
             self.assertEqual(verify_service_signature(4242, run=result), 'unknown')
-        self.assertTrue(SIGNATURE_BROKEN_MARKERS)
+        self.assertEqual(SIGNATURE_MISMATCH_MARKERS, ('the code on disk does not match what is running',))
+
+    def test_codesign_runs_with_english_messages(self):
+        run = self.run_with(0)
+        verify_service_signature(4242, run=run)
+        self.assertEqual(run.call_args.kwargs['env']['LC_TIME'], 'C')
+        self.assertNotIn('LC_ALL', run.call_args.kwargs['env'])
 
     def test_lock_holders_parses_lsof_terse_output(self):
         self.assertEqual(lock_holders(LOCK, run=self.run_with(0, stdout='4242\n')), {4242})
@@ -479,12 +544,26 @@ class CodesignAndLockTests(unittest.TestCase):
         lock_holders(LOCK, run=run)
         self.assertEqual(run.call_args.args[0], ['lsof', '-t', '--', LOCK])
 
-    def test_lock_holders_is_unknown_when_lsof_cannot_answer(self):
+    def test_lock_holders_is_unknown_unless_lsof_answered_cleanly(self):
         for run in (self.run_with(2, stdout=''), self.run_with(0, stdout='lsof: WARNING\n'),
+                    self.run_with(1, stdout='4242\n'),  # status 1 may mean an error, not a complete list
+                    self.run_with(0, stdout='4242\n', stderr='lsof: WARNING: can not stat() file system\n'),
+                    self.run_with(1, stdout='', stderr='lsof: status error\n'),
+                    self.run_with(0, stdout=''),
                     Mock(side_effect=subprocess.TimeoutExpired('lsof', 3)), Mock(side_effect=OSError('x'))):
             self.assertIsNone(lock_holders(LOCK, run=run))
         for path in (None, '', 'relative/computeruse.sock.lock'):
             self.assertIsNone(lock_holders(path, run=self.run_with(0, stdout='1\n')))
+
+    def test_the_kernel_executable_path_is_only_asked_for_real_processes_on_macos(self):
+        with patch('lcu.macos_host.sys.platform', 'linux'):
+            self.assertIsNone(executable_path(os.getpid()))
+        for pid in (0, 1, -1, True, '1', None):
+            self.assertIsNone(executable_path(pid))
+        if sys.platform == 'darwin':
+            path = executable_path(os.getpid())
+            self.assertTrue(path and os.path.isabs(path) and os.path.exists(path), path)
+            self.assertIsNone(executable_path(2 ** 30))
 
     def test_known_executables_are_the_configured_service_and_the_apps_copy(self):
         environment = {'SKY_CUA_SERVICE_PATH': BUNDLE, 'CODEX_HOME': '/Users/x/.codex'}
@@ -492,6 +571,35 @@ class CodesignAndLockTests(unittest.TestCase):
                          {EXECUTABLE, HOME_EXECUTABLE})
         self.assertEqual(known_service_executables({'SKY_CUA_SERVICE_PATH': 'relative.app'}), set())
         self.assertEqual(known_service_executables({}), set())
+
+
+class PeerLockTests(unittest.TestCase):
+    def test_a_second_holder_waits_a_bounded_time_and_then_is_refused(self):
+        with tempfile.TemporaryDirectory() as base:
+            path = os.path.join(base, 'recovery.lock')
+            clock, sleeps = [0.0], []
+            with PeerLock(path) as first:
+                self.assertTrue(first.acquired)
+                self.assertFalse(first.waited)
+                second = PeerLock(path, wait_seconds=1, sleep=lambda seconds: (sleeps.append(seconds), clock.__setitem__(0, clock[0] + seconds)),
+                                  monotonic=lambda: clock[0])
+                with second as held:
+                    self.assertFalse(held.acquired)
+                    self.assertTrue(held.waited)
+                self.assertLessEqual(clock[0], 1.1)
+            with PeerLock(path) as later:
+                self.assertTrue(later.acquired)
+
+    def test_an_unusable_lock_file_means_not_acquired(self):
+        with tempfile.TemporaryDirectory() as base:
+            target = os.path.join(base, 'real')
+            open(target, 'w').close()
+            link = os.path.join(base, 'link')
+            os.symlink(target, link)
+            with PeerLock(link) as lock:
+                self.assertFalse(lock.acquired, 'a symlink is never followed')
+            with PeerLock(os.path.join(base, 'missing-dir', 'x.lock')) as lock:
+                self.assertFalse(lock.acquired)
 
 
 class SingleFlightTests(unittest.TestCase):
