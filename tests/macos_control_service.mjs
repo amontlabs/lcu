@@ -604,6 +604,12 @@ try {
   assert.equal(countOriginal(), rpcBefore, 'nothing is sent for a turn that ended during the cleanup gate');
   globalThis.failTurnEndedMessage = undefined;
   globalThis.failTurnEndedCount = 0;
+  // A later request of that ended turn is not retried after a recovery either.
+  reset();
+  recoverReply = recovered;
+  rpcBefore = countOriginal();
+  assert.equal((await failure({failUntilRecovered: true})).message, startupFailure);
+  assert.equal(countOriginal(), rpcBefore + 1, 'a request of an ended turn is not sent again');
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true}, 'the pending cleanup completes and later requests proceed');
 

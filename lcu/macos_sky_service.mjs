@@ -35,6 +35,10 @@ const turnMetadata = new Map();
 // by a stale service recovery is never retried, re-registered or sent for a turn that ended.
 // Entries live only while their request runs, so nothing has to be bounded or evicted.
 const inFlightTurns = new Map();
+// Recently ended turns, so a later request of one is not retried after a recovery either.
+// Bounded: an evicted turn only falls back to the request being sent once, as without recovery.
+const endedTurns = new Set();
+const ENDED_TURNS_LIMIT = 1024;
 
 function lifetimeSignal(runtime, session_id, turn_id) {
   const address = runtime.env.LCU_MAC_LIFETIME_SOCKET;
@@ -175,6 +179,9 @@ function register() {
     endControlTurn(session_id, turn_id);
     const key = JSON.stringify([session_id, turn_id]);
     for (const state of inFlightTurns.get(key) ?? []) state.ended = true;
+    endedTurns.delete(key);
+    endedTurns.add(key);
+    if (endedTurns.size > ENDED_TURNS_LIMIT) endedTurns.delete(endedTurns.values().next().value);
     const item = pendingCleanup.get(key) ?? {
       key, session_id, turn_id,
       metadata: turnMetadata.get(key),
@@ -513,7 +520,7 @@ export async function handleRpc(request) {
   const metadata = readTurnMetadata(runtime);
   const context = controlContext(runtime, request);
   const turnKey = metadata && JSON.stringify([metadata.session_id, metadata.turn_id]);
-  const state = {ended: false, recoveryError: undefined, resent: false};
+  const state = {ended: Boolean(turnKey) && endedTurns.has(turnKey), recoveryError: undefined, resent: false};
   if (!turnKey) return dispatch(runtime, request, metadata, context, undefined, state);
   const requests = inFlightTurns.get(turnKey) ?? new Set();
   inFlightTurns.set(turnKey, requests.add(state));
