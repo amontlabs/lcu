@@ -424,6 +424,23 @@ try {
     assert.equal(recoverRequests.length, recoveriesBefore + 1);
   }
 
+  // The deadline sent to the host counts from the start of the wait, however long the
+  // connection takes to come up.
+  reset();
+  recoverReply = notRecovered;
+  globalThis.nodeRepl.env.LCU_MAC_RECOVER_TIMEOUT_MS = '5000';
+  const realConnect = globalThis.nodeRepl.nativePipe.createConnection;
+  globalThis.nodeRepl.nativePipe.createConnection = async address => {
+    await new Promise(resolve => setTimeout(resolve, 600));
+    return realConnect(address);
+  };
+  const waitStarted = Date.now();
+  await failure({fail: startupFailure});
+  globalThis.nodeRepl.nativePipe.createConnection = realConnect;
+  globalThis.nodeRepl.env.LCU_MAC_RECOVER_TIMEOUT_MS = undefined;
+  const delayedDeadline = recoverRequests.at(-1).deadline_unix_ms;
+  assert.ok(delayedDeadline <= waitStarted + 5_000 - 3_500 + 100, `deadline ${delayedDeadline - waitStarted} ms after the start`);
+
   // Messages that only contain the words (a validation or approval error) are not a native
   // pipe startup failure and never reach the host.
   reset();
@@ -496,6 +513,22 @@ try {
   globalThis.nodeRepl.nativePipe.createConnection = realCreateConnection;
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true}, 'the retried cleanup completes and the request proceeds');
+
+  // A native cleanup step that never settles is abandoned after a hard bound, so the request
+  // behind it is not held forever; the cleanup is retried by the next request.
+  const stuckMetadata = {session_id: 'stuck-session', turn_id: 'stuck-turn', call_id: 'stuck-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': stuckMetadata};
+  assert.deepEqual(await rpc(), {ok: true});
+  globalThis.nodeRepl.env.LCU_MAC_CLEANUP_STEP_TIMEOUT_MS = '300';
+  globalThis.turnEndedGate = new Promise(() => {});
+  const stuckStarted = Date.now();
+  await assert.rejects(turnEnded.run({session_id: stuckMetadata.session_id, turn_id: stuckMetadata.turn_id}),
+    /timed out after 300 ms/);
+  assert.ok(Date.now() - stuckStarted < 3_000);
+  globalThis.turnEndedGate = undefined;
+  globalThis.nodeRepl.env.LCU_MAC_CLEANUP_STEP_TIMEOUT_MS = undefined;
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true}, 'the abandoned cleanup is retried and the request proceeds');
 
   // Retried turn cleanup uses the same pipe and fails the same way: a recovery makes the
   // cleanup retry and the request proceed; without one the original error is thrown.

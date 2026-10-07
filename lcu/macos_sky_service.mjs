@@ -94,6 +94,8 @@ function askHostToRecover(runtime) {
   // A shorter bound may be configured (tests); the wait never exceeds RECOVER_TIMEOUT_MS.
   const configured = Number(runtime.env.LCU_MAC_RECOVER_TIMEOUT_MS);
   const timeoutMs = configured > 0 ? Math.min(configured, RECOVER_TIMEOUT_MS) : RECOVER_TIMEOUT_MS;
+  // Measured from here, with the timer: the host must not signal once this request has given up.
+  const deadline_unix_ms = Date.now() + timeoutMs - RECOVER_EXIT_WAIT_MS;
   return new Promise(resolve => {
     let socket;
     let finished = false;
@@ -124,8 +126,6 @@ function askHostToRecover(runtime) {
       });
       socket.on('error', () => finish(false));
       socket.on('close', () => finish(false));
-      // The host must not signal after this time: by then this request has given up.
-      const deadline_unix_ms = Date.now() + timeoutMs - RECOVER_EXIT_WAIT_MS;
       socket.write(Buffer.from(JSON.stringify({type: 'recover', deadline_unix_ms}) + '\n'));
     }).catch(() => finish(false));
   });
@@ -382,6 +382,9 @@ function startControlChannel(runtime) {
 }
 
 const SLOW_CLEANUP_STEP_MS = 1_000;
+// A cleanup step that never settles (an original transport call stuck in LaunchServices)
+// must not hold every later request behind it. A lower bound may be configured (tests).
+const CLEANUP_STEP_HARD_TIMEOUT_MS = 20_000;
 
 // Report which cleanup step is slow so a host "turn-ended handlers timed out"
 // can be attributed to native IPC or the CLI helper.
@@ -391,9 +394,15 @@ async function timedCleanupStep(step, run) {
   const watchdog = setTimeout(() => {
     console.error(`LCU macOS turn cleanup step "${step}" is still running after ${Date.now() - started} ms`);
   }, TURN_CLEANUP_HOOK_TIMEOUT_MS);
+  let hardTimer;
+  const hardLimit = Number(globalThis.nodeRepl?.env?.LCU_MAC_CLEANUP_STEP_TIMEOUT_MS);
+  const hardMs = hardLimit > 0 ? Math.min(hardLimit, CLEANUP_STEP_HARD_TIMEOUT_MS) : CLEANUP_STEP_HARD_TIMEOUT_MS;
   try {
-    return await run();
+    return await Promise.race([run(), new Promise((_, reject) => {
+      hardTimer = setTimeout(() => reject(Error(`macOS turn cleanup step "${step}" timed out after ${hardMs} ms`)), hardMs);
+    })]);
   } finally {
+    clearTimeout(hardTimer);
     clearTimeout(watchdog);
     const ms = Date.now() - started;
     if (ms >= SLOW_CLEANUP_STEP_MS) {

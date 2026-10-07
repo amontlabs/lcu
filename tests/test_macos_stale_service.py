@@ -72,6 +72,19 @@ class ProcessTableTests(unittest.TestCase):
         self.assertEqual(services, [{'pid': 45404, 'uid': 501, 'path': EXECUTABLE,
                                      'started': epoch('Wed Oct 7 00:34:53 2026')}])
 
+    def test_unicode_separators_in_a_path_cannot_forge_rows_or_fields(self):
+        fake = f'999 501 Mon Jan  1 00:00:00 2026 {EXECUTABLE}'
+        for separator in ('\u2028', '\u2029', '\x85', '\x0b', '\x0c', '\x1c', '\r'):
+            real = f'4242 501 Wed Oct  7 00:34:53 2026 /tmp/x{separator}{fake}'
+            services, unparsed = parse_process_table(real)
+            self.assertEqual(services, [], repr(separator))
+            self.assertEqual(unparsed, 1, repr(separator))
+        # A crafted name with a Unicode space inside the start time is not a row either.
+        services, unparsed = parse_process_table(f'4242 501 Wed Oct\u2002 7 00:34:53 2026 {EXECUTABLE}')
+        self.assertEqual((services, unparsed), ([], 1))
+        services, _ = parse_process_table(f'4242 501 Wed Oct  7 00:34:53 2026 {EXECUTABLE}\r')
+        self.assertEqual([item['pid'] for item in services], [4242], 'a trailing CR from the terminal is just trimmed')
+
     def test_keeps_non_ascii_path_characters(self):
         path = f'/Users/Jos\u00e9/ChatGPT.app/Contents/MacOS/{SKY_SERVICE_NAME}'
         services, _ = parse_process_table(f'7 501 Wed Oct  7 00:34:53 2026 {path}')
@@ -127,6 +140,19 @@ class StartTimeTests(unittest.TestCase):
             os.environ['TZ'] = zone
             time.tzset()
             self.assertEqual(parse_process_start('Sun Oct 25 02:30:00 2026'.split()), 1792895400.0)
+
+    def test_one_pid_can_be_read_with_ps_p_and_a_vanished_one_is_just_absent(self):
+        run = ps(f'4242 501 Tue Oct  6 11:00:00 2026 {EXECUTABLE}')
+        diagnosis = diagnose_sky_services(run=run, stat=stat_with(whole_bundle(EXECUTABLE, REPLACED)), pid=4242)
+        self.assertEqual(run.call_args.args[0], ['/bin/ps', '-p', '4242', '-o', 'pid=,uid=,lstart=,comm='])
+        self.assertEqual(diagnosis['stale'], [4242])
+        gone = Mock(return_value=SimpleNamespace(returncode=1, stdout='', stderr=''))
+        self.assertEqual(diagnose_sky_services(run=gone, stat=stat_with({}), pid=4242)['services'], [])
+        with self.assertRaises(ValueError):
+            diagnose_sky_services(run=gone, stat=stat_with({}))  # a full listing never fails quietly
+        with self.assertRaises(ValueError):
+            diagnose_sky_services(run=Mock(return_value=SimpleNamespace(returncode=2, stdout='', stderr='')),
+                                  stat=stat_with({}), pid=4242)
 
     def test_ps_is_asked_for_utc_times(self):
         run = ps()
@@ -248,9 +274,10 @@ class FakeWorld:
     def line(pid, uid, start, path):
         return f'{pid} {uid} {start} {path}'
 
-    def diagnose(self):
-        diagnosis = diagnose_sky_services(run=ps(*self.table), stat=self.stat)
-        return diagnosis
+    def diagnose(self, pid=None):
+        lines = [line for line in self.table if pid is None or line.split()[0] == str(pid)]
+        self.selections = getattr(self, 'selections', []) + [pid]
+        return diagnose_sky_services(run=ps(*lines), stat=self.stat, pid=pid)
 
     def verify(self, pid):
         self.verified.append(pid)
@@ -309,7 +336,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(world.kills, [(4242, signal.SIGTERM)])
         self.assertEqual(result['recovered'], True)
         self.assertEqual((result['pid'], result['path']), (4242, EXECUTABLE))
-        self.assertEqual(world.verified, [4242])
+        self.assertEqual(world.verified, [4242, 4242], 'the signature is checked again before the signal')
+        self.assertEqual(world.selections, [None, 4242], 'the last process read is for that one pid')
         self.assertEqual(world.lock_paths, [LOCK, LOCK], 'checked before the slow checks and again before the signal')
         self.assertEqual(len(world.logs), 1)
         self.assertIn('pid 4242', world.logs[0])
@@ -429,6 +457,9 @@ class RecoveryTests(unittest.TestCase):
         world = FakeWorld()
         world.after_check = lambda: setattr(world, 'holder_set', {4242, 9999})
         self.assertNothingSignaled(world, world.run(), 'changed while')
+        world = FakeWorld()
+        world.after_check = lambda: setattr(world, 'holder_set', set())
+        self.assertNothingSignaled(world, world.run(), 'changed while')
 
     def test_an_incomplete_process_listing_does_nothing(self):
         world = FakeWorld()
@@ -470,11 +501,12 @@ class RecoveryTests(unittest.TestCase):
         world = FakeWorld()
         peer = self.Peer()
         world.run(exclusive=lambda: peer, wallclock=lambda: 1000.0)
-        self.assertEqual(peer.recorded, [{'recovered': True, 'pid': 4242, 'at': 1000.0}])
+        started = epoch(STALE_START)
+        self.assertEqual(peer.recorded, [{'recovered': True, 'pid': 4242, 'started': started, 'at': 1000.0}])
         stuck = FakeWorld(exits_after=10 ** 9)
         peer = self.Peer()
         stuck.run(exclusive=lambda: peer, wallclock=lambda: 1000.0)
-        self.assertEqual(peer.recorded, [{'recovered': False, 'at': 1000.0}])
+        self.assertEqual(peer.recorded, [{'recovered': False, 'pid': 4242, 'started': started, 'at': 1000.0}])
 
     def test_a_host_that_waited_retries_only_on_a_recent_recorded_recovery(self):
         def attempt(previous, waited=True, now=1010.0):
@@ -511,25 +543,43 @@ class RecoveryTests(unittest.TestCase):
         world.on_holders = reuse
         self.assertNothingSignaled(world, world.run(), 'changed while')
 
-    def test_the_kernel_executable_is_read_again_immediately_before_the_signal(self):
+    def test_the_process_is_read_last_after_the_slow_evidence(self):
         world = FakeWorld()
         calls = []
 
         def kernel_path(pid):
             calls.append(pid)
-            return world.kernel if len(calls) < 3 else '/usr/bin/other'
+            return world.kernel if len(calls) < 2 else '/usr/bin/other'
 
         self.assertNothingSignaled(world, world.run(kernel_path=kernel_path), 'changed while')
-        self.assertEqual(len(calls), 3)
-        # Order of the final pass: process, kernel executable, lock holders (the slowest), kernel again.
         order = []
         world = FakeWorld()
         world.on_holders = lambda call: order.append(f'holders{call}')
-        original = world.diagnose
-        world.diagnose = lambda: (order.append('ps'), original())[1]
+        original_verify, original_diagnose = world.verify, world.diagnose
+        world.verify = lambda pid: (order.append('verify'), original_verify(pid))[1]
+        world.diagnose = lambda pid=None: (order.append('ps' if pid is None else 'ps-pid'), original_diagnose(pid))[1]
         world.kernel_path = lambda pid: (order.append('kernel'), world.kernel)[1]
         world.run()
-        self.assertEqual(order[-4:], ['ps', 'kernel', 'holders2', 'kernel'])
+        self.assertEqual(order, ['ps', 'kernel', 'holders1', 'verify', 'holders2', 'verify', 'ps-pid', 'kernel'])
+
+    def test_a_healthy_service_that_took_over_the_pid_and_path_is_not_signaled(self):
+        # P exits during the final slow checks and its pid goes to a service from the same bundle.
+        for start in ('Wed Oct  7 00:40:00 2026', 'Tue Oct  6 12:00:00 2026'):
+            world = FakeWorld()
+            world.on_holders = lambda call, world=world, start=start: (
+                setattr(world, 'table', [world.line(4242, 501, start, EXECUTABLE)]) if call == 2 else None)
+            self.assertNothingSignaled(world, world.run(), 'changed while')
+
+    def test_a_service_already_asked_to_quit_is_not_signaled_again(self):
+        def peer(previous):
+            return lambda: self.Peer(True, False, previous)
+
+        stuck = {'recovered': False, 'pid': 4242, 'started': epoch(STALE_START), 'at': 1000.0}
+        world = FakeWorld()
+        self.assertNothingSignaled(world, world.run(exclusive=peer(stuck), wallclock=lambda: 1030.0), 'already asked')
+        for other in ({**stuck, 'pid': 9999}, {**stuck, 'started': 1.0}, {**stuck, 'at': 900.0}, {**stuck, 'recovered': True}):
+            world = FakeWorld()
+            self.assertTrue(world.run(exclusive=peer(other), wallclock=lambda: 1030.0)['recovered'], other)
 
     def test_a_bundle_restored_after_the_signature_check_is_not_signaled(self):
         # The mismatch was seen against the replacement; restoring the old bundle gives all
@@ -550,11 +600,11 @@ class RecoveryTests(unittest.TestCase):
     def test_the_requests_deadline_is_validated(self):
         now = 1_000_000
         self.assertEqual(requested_signal_deadline({'deadline_unix_ms': now + 5000}, now), (now + 5000) / 1000)
-        self.assertIsNone(requested_signal_deadline({}, now))
-        self.assertIsNone(requested_signal_deadline(None, now))
-        for bad in (now - 1, now + 17_000, 'soon', 1.5, True, None, [], 10 ** 18):
-            expected = None if bad is None else now / 1000
-            self.assertEqual(requested_signal_deadline({'deadline_unix_ms': bad}, now), expected, bad)
+        # No valid deadline means the requester is not known to be waiting: nothing may be signaled.
+        for request in ({}, None, 'recover', {'deadline_unix_ms': None}):
+            self.assertEqual(requested_signal_deadline(request, now), now / 1000, request)
+        for bad in (now - 1, now + 17_000, 'soon', 1.5, True, [], 10 ** 18):
+            self.assertEqual(requested_signal_deadline({'deadline_unix_ms': bad}, now), now / 1000, bad)
 
     def test_a_service_that_does_not_exit_is_waited_for_a_bounded_time_and_never_force_killed(self):
         import signal
@@ -608,7 +658,8 @@ class RecoveryTests(unittest.TestCase):
             os.environ.pop('LCU_MAC_SERVICE_LOCK')
             recover_response(None)
         first, second = (call.kwargs for call in recover.call_args_list)
-        self.assertEqual((first['lock_path'], first['signal_deadline'], first['exclusive']), (LOCK, None, PeerLock))
+        self.assertEqual((first['lock_path'], first['exclusive']), (LOCK, PeerLock))
+        self.assertLessEqual(first['signal_deadline'], time.time(), 'a request without a deadline allows no signal')
         self.assertIsNone(second['lock_path'])
 
     def test_system_tools_are_used_by_absolute_path(self):
