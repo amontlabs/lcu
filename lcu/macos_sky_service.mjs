@@ -31,15 +31,9 @@ export const LIFETIME_SIGNAL_TIMEOUT_MS = 12_000;
 const CLI_CLEANUP_ATTEMPTS = 2;
 const TURN_ENDED_TIMEOUT_SECONDS = 15;
 const turnMetadata = new Map();
-// The requests in flight per turn. The turn-ended hook marks them ended, so a request held up
-// by a stale service recovery is never retried, re-registered or sent for a turn that ended.
-// Entries live only while their request runs, so nothing has to be bounded or evicted.
-const inFlightTurns = new Map();
-// Recently ended turns, so a later request of one is not retried after a recovery either.
-// Bounded: an evicted turn only falls back to the request being sent once, as without recovery.
-// Never cleared otherwise: a turn ID used again is simply not retried after a recovery.
-const endedTurns = new Set();
-const ENDED_TURNS_LIMIT = 1024;
+// Turn-ended hooks run so far. A request that saw any turn end (Stop or Interrupt) after it
+// started is never retried, registered or sent after a stale service recovery.
+let turnsEnded = 0;
 
 function lifetimeSignal(runtime, session_id, turn_id) {
   const address = runtime.env.LCU_MAC_LIFETIME_SOCKET;
@@ -179,10 +173,7 @@ function register() {
     }
     endControlTurn(session_id, turn_id);
     const key = JSON.stringify([session_id, turn_id]);
-    for (const state of inFlightTurns.get(key) ?? []) state.ended = true;
-    endedTurns.delete(key);
-    endedTurns.add(key);
-    if (endedTurns.size > ENDED_TURNS_LIMIT) endedTurns.delete(endedTurns.values().next().value);
+    turnsEnded++;
     const item = pendingCleanup.get(key) ?? {
       key, session_id, turn_id,
       metadata: turnMetadata.get(key),
@@ -517,74 +508,57 @@ async function gateOnCleanup() {
 export async function handleRpc(request) {
   register();
   const runtime = globalThis.nodeRepl;
-  // Read before any wait, so both are this request's turn (used after a recovery).
-  const metadata = readTurnMetadata(runtime);
-  const context = controlContext(runtime, request);
-  const turnKey = metadata && JSON.stringify([metadata.session_id, metadata.turn_id]);
-  const state = {ended: Boolean(turnKey) && endedTurns.has(turnKey), recoveryError: undefined, resent: false};
-  if (!turnKey) return dispatch(runtime, request, metadata, context, state);
-  const requests = inFlightTurns.get(turnKey) ?? new Set();
-  inFlightTurns.set(turnKey, requests.add(state));
-  try {
-    return await dispatch(runtime, request, metadata, context, state);
-  } catch (error) {
-    // A turn that ended after a recovery, with nothing sent since, gets the error that led to
-    // the recovery whatever failed later; a retry that was sent fails with its own error.
-    throw state.recoveryError && state.ended && !state.resent ? state.recoveryError : error;
-  } finally {
-    requests.delete(state);
-    if (!requests.size && inFlightTurns.get(turnKey) === requests) inFlightTurns.delete(turnKey);
-  }
-}
-
-async function dispatch(runtime, request, metadata, context, state) {
-  // After a stale service recovery, nothing is retried, registered or sent for a turn that
-  // ended (Stop or Interrupt) meanwhile; the error that led to the recovery is thrown instead.
-  const turnActive = () => !state.ended;
+  // After a recovery, the request is retried, registered and sent only while no turn has
+  // ended since it started; otherwise the error that led to the recovery is returned.
+  const startedAt = turnsEnded;
+  const turnsActive = () => turnsEnded === startedAt;
+  const state = {recoveryError: undefined, resent: false};
   const retryIfActive = async error => {
     // Each recovery restarts "nothing sent since": only a send after it sets `resent` again.
     state.recoveryError = error;
     state.resent = false;
-    return turnActive();
+    return turnsActive();
   };
-  // Retried turn cleanup talks to the same native pipe and fails the same way.
-  await withStaleServiceRecovery(runtime, gateOnCleanup, retryIfActive);
-  original ??= import(pathToFileURL(runtime.env.LCU_MAC_SKY_SERVICE_PATH).href);
-  // Without a recovery, registration is exactly as before: the turn and control context are
-  // read now, after the cleanup gate (a turn ID a harness uses again is registered again).
-  // After a recovery, this request's own turn is registered, and nothing for a turn that ended.
-  // Registration never clears the ended-turn record, so a reused turn ID is not retried after
-  // a recovery (its original error is returned) rather than risk retrying an ended turn.
-  const recovered = Boolean(state.recoveryError);
-  const register = recovered ? (state.ended ? undefined : metadata) : readTurnMetadata(runtime);
-  const registerContext = recovered ? (state.ended ? undefined : context) : controlContext(runtime, request);
-  if (register) {
-    const key = JSON.stringify([register.session_id, register.turn_id]);
-    if (!turnMetadata.has(key) && turnMetadata.size >= TURN_METADATA_LIMIT) {
-      throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
+  try {
+    // Retried turn cleanup talks to the same native pipe and fails the same way.
+    await withStaleServiceRecovery(runtime, gateOnCleanup, retryIfActive);
+    original ??= import(pathToFileURL(runtime.env.LCU_MAC_SKY_SERVICE_PATH).href);
+    // Registration is as before, except that nothing is registered after a recovery that a
+    // turn end followed.
+    const blocked = () => Boolean(state.recoveryError) && !turnsActive();
+    const metadata = blocked() ? undefined : readTurnMetadata(runtime);
+    if (metadata) {
+      const key = JSON.stringify([metadata.session_id, metadata.turn_id]);
+      if (!turnMetadata.has(key) && turnMetadata.size >= TURN_METADATA_LIMIT) {
+        throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
+      }
+      turnMetadata.set(key, metadata);
     }
-    turnMetadata.set(key, register);
-  }
-  const controlReady = await startControlChannel(runtime);
-  if (registerContext && controlReady && !(state.recoveryError && state.ended)) {
-    const context = registerContext;
-    const token = JSON.stringify([context.session_id, context.turn_id, context.app]);
-    if (context.app && (activeContexts.has(token) || activeContexts.size < 128)) {
-      activeContexts.set(token, context);
-      writeControl({type: 'context', token, session_id: context.session_id,
-        turn_id: context.turn_id, app: context.app});
+    const context = blocked() ? undefined : controlContext(runtime, request);
+    const controlReady = await startControlChannel(runtime);
+    if (context && controlReady && !blocked()) {
+      const token = JSON.stringify([context.session_id, context.turn_id, context.app]);
+      if (context.app && (activeContexts.has(token) || activeContexts.size < 128)) {
+        activeContexts.set(token, context);
+        writeControl({type: 'context', token, session_id: context.session_id,
+          turn_id: context.turn_id, app: context.app});
+      }
     }
+    const service = await original;
+    // Checked with no wait before the dispatch below.
+    if (blocked()) throw state.recoveryError;
+    // The retry, like any request, first waits for pending turn cleanup.
+    return await withStaleServiceRecovery(runtime, () => {
+      if (state.recoveryError) state.resent = true;
+      return service.handleRpc(request);
+    }, async error => {
+      if (!(await retryIfActive(error))) return false;
+      await gateOnCleanup();
+      return turnsActive();
+    });
+  } catch (error) {
+    // A turn end after a recovery, with nothing sent since, returns the error that led to the
+    // recovery whatever failed later; a retry that was sent fails with its own error.
+    throw state.recoveryError && !turnsActive() && !state.resent ? state.recoveryError : error;
   }
-  const service = await original;
-  // Checked with no wait before the dispatch below.
-  if (state.recoveryError && !turnActive()) throw state.recoveryError;
-  // The retry, like any request, first waits for pending turn cleanup.
-  return withStaleServiceRecovery(runtime, () => {
-    if (state.recoveryError) state.resent = true;
-    return service.handleRpc(request);
-  }, async error => {
-    if (!(await retryIfActive(error))) return false;
-    await gateOnCleanup();
-    return turnActive();
-  });
 }

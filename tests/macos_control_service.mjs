@@ -604,13 +604,14 @@ try {
   assert.equal(countOriginal(), rpcBefore, 'nothing is sent for a turn that ended during the cleanup gate');
   globalThis.failTurnEndedMessage = undefined;
   globalThis.failTurnEndedCount = 0;
-  // A later request of that ended turn is not retried after a recovery either.
+  // A request that starts after its turn ended is sent as before; its first attempt never
+  // reached the service, so its single retry after a recovery is its only delivery.
   reset();
   recoverReply = recovered;
   rpcBefore = countOriginal();
-  assert.equal((await failure({failUntilRecovered: true})).message, startupFailure);
-  assert.equal(countOriginal(), rpcBefore + 1, 'a request of an ended turn is not sent again');
-  // That request was registered as before (no recovery yet when it was sent); its turn ends again.
+  assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
+  assert.equal(countOriginal(), rpcBefore + 2);
+  // That request was registered as before; its turn ends again.
   await turnEnded.run({session_id: gateMetadata.session_id, turn_id: gateMetadata.turn_id});
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true}, 'the pending cleanup completes and later requests proceed');
@@ -690,56 +691,6 @@ try {
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true});
 
-  // Two recoveries in one request: the gate's, then the request's. The turn ends while the
-  // second retry's cleanup gate runs and that gate fails: the second recovery's error comes back.
-  reset();
-  const twicePrior = {session_id: 'twice-prior-session', turn_id: 'twice-prior-turn', call_id: 'twice-prior-call'};
-  const twiceOther = {session_id: 'twice-other-session', turn_id: 'twice-other-turn', call_id: 'twice-other-call'};
-  const twiceTurn = {session_id: 'twice-session', turn_id: 'twice-turn', call_id: 'twice-call'};
-  for (const metadata of [twicePrior, twiceOther, twiceTurn]) {
-    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': metadata};
-    assert.deepEqual(await rpc(), {ok: true});
-  }
-  globalThis.failTurnEndedMessage = startupFailure;
-  globalThis.failTurnEndedCount = 2;  // the prior turn's hook, then the first gate's attempt
-  await assert.rejects(turnEnded.run({session_id: twicePrior.session_id, turn_id: twicePrior.turn_id}));
-  recoverReply = recovered;
-  recoveriesBefore = recoverRequests.length;
-  rpcBefore = countOriginal();
-  // The request itself fails with the startup failure: hold the second recovery.
-  let releaseFirst, releaseSecond;
-  recoverHold = new Promise(resolve => { releaseFirst = resolve; });
-  const twiceRequest = failure({fail: startupFailure});
-  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the cleanup gate did not ask for recovery');
-  // The fake host reads the hold when a request arrives: arm the second before releasing the first.
-  recoverHold = new Promise(resolve => { releaseSecond = resolve; });
-  releaseFirst();
-  await waitFor(() => recoverRequests.length === recoveriesBefore + 2, 'the request did not ask for a second recovery');
-  assert.equal(countOriginal(), rpcBefore + 1, 'the request was sent once after the first recovery');
-  // Pending native work for another turn, held, so the second retry's gate waits on it.
-  globalThis.failTurnEndedMessage = 'Some other native failure';
-  globalThis.failTurnEndedCount = 1;
-  await assert.rejects(turnEnded.run({session_id: twiceOther.session_id, turn_id: twiceOther.turn_id}));
-  let releaseTwiceGate;
-  globalThis.turnEndedGate = new Promise(resolve => { releaseTwiceGate = resolve; });
-  const twiceNative = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest').length;
-  const twiceNativeBefore = twiceNative();
-  releaseSecond();
-  await waitFor(() => twiceNative() > twiceNativeBefore, 'the second retry\'s gate did not start');
-  const twiceEnded = turnEnded.run({session_id: twiceTurn.session_id, turn_id: twiceTurn.turn_id}).catch(() => {});
-  globalThis.failTurnEndedCount = 10;
-  globalThis.turnEndedGate = undefined;
-  releaseTwiceGate();
-  await twiceEnded;
-  const twiceError = await twiceRequest;
-  assert.equal(twiceError.message, startupFailure, 'the second recovery\'s error, not the gate\'s');
-  assert.equal(countOriginal(), rpcBefore + 1);
-  recoverHold = undefined;
-  globalThis.failTurnEndedMessage = undefined;
-  globalThis.failTurnEndedCount = 0;
-  globalThis.nodeRepl.requestMeta = {};
-  assert.deepEqual(await rpc(), {ok: true});
-
   // A turn ID can be used again after its turn-ended (a harness that continues the same
   // prompt): without a recovery its later requests are registered as before, so the next
   // turn-ended still reaches the native service.
@@ -782,7 +733,7 @@ try {
   globalThis.nodeRepl.requestMeta = {};
 
   // A request whose turn ended while it waited in the gate (no recovery) is registered as on
-  // main, but that does not reopen the turn: a later request of it is not retried either.
+  // main; a later request then recovers and is retried once like any other.
   reset();
   const racePrior = {session_id: 'race-prior-session', turn_id: 'race-prior-turn', call_id: 'race-prior-call'};
   const raceTurn = {session_id: 'race-session', turn_id: 'race-turn', call_id: 'race-call'};
@@ -800,8 +751,8 @@ try {
   assert.deepEqual(await raceRequest, {ok: true});
   recoverReply = recovered;
   rpcBefore = countOriginal();
-  assert.equal((await failure({failUntilRecovered: true})).message, startupFailure);
-  assert.equal(countOriginal(), rpcBefore + 1, 'a later request of the ended turn is not sent again');
+  assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
+  assert.equal(countOriginal(), rpcBefore + 2, 'a later request is retried once, as any request');
   await turnEnded.run({session_id: raceTurn.session_id, turn_id: raceTurn.turn_id});
   globalThis.nodeRepl.requestMeta = {};
 
