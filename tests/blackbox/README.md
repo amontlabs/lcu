@@ -2,7 +2,7 @@
 
 Runs LCU entry points (`bin/lcu`, `bin/lcu-codex-sandbox`, `scripts/install.sh`, ...) as subprocesses and compares
 two implementations byte for byte. The oracle is the Python implementation at the commit in `BASE`
-(`a2c48c21016589d4...`, LCU 0.9.6); the other side is this worktree. Nothing here imports the code under test, so the harness
+(`02cc9af0ca0cff6a...`, LCU 0.9.7); the other side is this worktree. Nothing here imports the code under test, so the harness
 survives a port to another language. The harness itself is Python 3.12 stdlib only and needs `node` on PATH
 (the fake apps' `cua_node/bin/node` is a wrapper that execs the real Node, and every recorder is a Node script).
 

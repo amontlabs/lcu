@@ -7,17 +7,21 @@
 // select); everything observable (socket paths, modes, framing, payload bytes, timeouts, reply strings) is kept.
 import { spawn } from './compat/spawn.mjs';
 import { randomUUID } from 'node:crypto';
-import { accessSync, chmodSync, constants as fsConstants, lstatSync, realpathSync, rmSync, statSync, writeSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, ftruncateSync, lstatSync, readSync, realpathSync, rmSync, statSync, writeSync } from 'node:fs';
 import net from 'node:net';
 import { constants as osConstants } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { pyStrip } from './compat/argparse.mjs';
+import { PySystemExit, pyStrip } from './compat/argparse.mjs';
+import { LockTimeoutError, acquire } from './compat/lock.mjs';
+import { commonpath2, join as pyJoin, realpath as pyRealpath } from './compat/pypath.mjs';
 import { PyOSError, fromNodeError, isOSError, pyStr, reprStr, spawnErrorText } from './compat/pyerr.mjs';
-import { TimeoutExpired, execFormatError } from './compat/subprocess.mjs';
+import { SubprocessError, TimeoutExpired, execFormatError, textOf } from './compat/subprocess.mjs';
+import { runTool, trustedTool } from './compat/systool.mjs';
 import { mkdtemp } from './compat/tempfile.mjs';
-import { ValueError, dumps, equal, loads } from './compat/pyjson.mjs';
+import { decode } from './compat/utf8.mjs';
+import { ValueError, dumps, equal, loads, pyfloat } from './compat/pyjson.mjs';
 
 const SIGNALS = osConstants.signals;
 
@@ -242,6 +246,707 @@ function listenPrivate(server, address) {
 }
 
 const unlinkQuiet = (path) => rmSync(path, { force: true });
+
+// ------------------------------------------------------------------------------------------ stale service recovery
+// Port of the stale Computer Use service recovery of lcu/macos_host.py (upstream #26). The Python code ran this on
+// threads; here the recovery is asynchronous (it must not block the accept loop) and every injectable step may
+// return a promise. Adaptations are listed in .port/notes/macos_stale_service.md.
+
+export const SKY_SERVICE_NAME = 'SkyComputerUseService';
+// The system tools by absolute path, so a caller's PATH cannot stand in for them.
+export const PS = '/bin/ps';
+export const LSOF = '/usr/sbin/lsof';
+export const CODESIGN = '/usr/bin/codesign';
+// `ps` reports the start time in whole seconds and the file time has sub-second
+// precision, so a change this close to the start is never read as an update.
+export const STALE_MARGIN_SECONDS = 2;
+const _MONTHS = new Map(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  .map((name, index) => [name, index + 1]));
+
+/** Test and platform seams (production values are the defaults). */
+export const stale_internals = {
+  platform: process.platform,
+  // The recovery itself, so recover_response can be tested without inspecting anything real.
+  recover_stale_service: (...args) => recover_stale_service(...args),
+  // Positional pread/pwrite/ftruncate of the peer lock record.
+  read: (fd, buffer, length, position) => readSync(fd, buffer, 0, length, position),
+  write: (fd, buffer, position) => writeSync(fd, buffer, 0, buffer.length, position),
+  truncate: (fd, length) => ftruncateSync(fd, length),
+  // The SingleFlight at the end of this section (a test replaces it).
+  shared_recovery: null,
+};
+
+const basename_of = (path) => path.slice(path.lastIndexOf('/') + 1);
+const is_abs = (path) => path.startsWith('/');
+const sleep_seconds = (seconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, seconds * 1000));
+
+/** int(text) for the text Python accepts that matters here: optional sign, ASCII digits, single underscores, padding. */
+function pyInt(text) {
+  const trimmed = pyStrip(text);
+  if (!/^[+-]?\d+(?:_\d+)*$/.test(trimmed)) throw new ValueError(`invalid literal for int() with base 10: ${reprStr(text)}`);
+  return Number(trimmed.replaceAll('_', ''));
+}
+
+/** UTC epoch seconds from the five `ps lstart` fields, or null when malformed. */
+export function parse_process_start(fields) {
+  try {
+    if (fields.length !== 5) throw new ValueError('unpack');
+    const [, month_name, day_text, clock, year_text] = fields;
+    const parts = clock.split(':').map(pyInt);
+    if (parts.length !== 3) throw new ValueError('unpack');
+    const [hour, minute, second] = parts;
+    if (!_MONTHS.has(month_name)) throw new ValueError('KeyError');
+    const month = _MONTHS.get(month_name);
+    const day = pyInt(day_text);
+    const year = pyInt(year_text);
+    if (!(day >= 1 && day <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 &&
+        second >= 0 && second <= 60 && year >= 1970 && year <= 9999)) {
+      return null;
+    }
+    // `ps` is run with TZ=UTC, so there is no local-time ambiguity at DST changes.
+    return Date.UTC(year, month - 1, day, hour, minute, second) / 1000;
+  } catch (error) {
+    if (error instanceof ValueError) return null;
+    throw error;
+  }
+}
+
+const _PROCESS_ROW = new RegExp(
+  '^[ \\t]*([0-9]+)[ \\t]+([0-9]+)[ \\t]+([A-Za-z]{3})[ \\t]+([A-Za-z]{3})[ \\t]+([0-9]{1,2})[ \\t]+' +
+  '([0-9]{2}:[0-9]{2}:[0-9]{2})[ \\t]+([0-9]{4})[ \\t]+(/[^\\n]*)$');
+// Characters that could make a path look like several rows or fields.
+const _UNSAFE_PATH = /[\x00-\x1f\x7f\x85\u2028\u2029]/;
+
+/**
+ * Return running Sky services from `ps -axo pid=,uid=,lstart=,comm=` output, as [services, unparsed].
+ *
+ * Rows are split on newlines only (not on Unicode line separators a process name could
+ * carry), and lines that name the service but cannot be parsed are counted, not guessed at.
+ */
+export function parse_process_table(text) {
+  const services = [];
+  let unparsed = 0;
+  for (const line of text.split('\n')) {
+    if (!line.includes(SKY_SERVICE_NAME)) continue;
+    // pid, uid, then lstart as `Wed Oct  7 00:34:53 2026`, then the executable path
+    // (which may contain spaces).
+    const match = _PROCESS_ROW.exec(line.replace(/\r+$/, ''));
+    const started = match ? parse_process_start([match[3], match[4], match[5], match[6], match[7]]) : null;
+    // Checked before trimming: only trailing spaces are padding.
+    const raw = match ? match[8] : '';
+    const path = raw.replace(/ +$/, '');
+    if (started === null || _UNSAFE_PATH.test(raw) || !is_abs(path) || basename_of(path) !== SKY_SERVICE_NAME) {
+      unparsed += 1;
+      continue;
+    }
+    services.push({ pid: Number(match[1]), uid: Number(match[2]), path, started });
+  }
+  return [services, unparsed];
+}
+
+const stat_default = (path) => ({ st_ctime: statSync(path).ctimeMs / 1000 });
+
+/** PurePosixPath(path).parents as a list. */
+function path_parents(path) {
+  const parts = path.split('/').filter((part) => part && part !== '.');
+  const anchor = path.startsWith('/') ? '/' : '';
+  const parents = [];
+  for (let count = parts.length - 1; count >= 1; count--) parents.push(anchor + parts.slice(0, count).join('/'));
+  if (parts.length >= 1) parents.push(anchor || '.');
+  return parents;
+}
+
+const child_path = (parent, name) => (parent === '.' ? name : parent.endsWith('/') ? parent + name : `${parent}/${name}`);
+
+/**
+ * The change times (ctime) of the executable, Info.plist and code-signature seal, or null.
+ *
+ * An app update replaces the whole bundle: observed live, all 167 files had the update
+ * time as ctime while their mtimes (build time) and creation times were days to months
+ * older, so neither of those can detect it. The bundle counts as replaced at the oldest
+ * of the three, so one metadata change (chmod, an extended attribute) on a single file
+ * does not read as an update, and a missing or unreadable file gives null, not a guess.
+ * Starting the service does not change ctime.
+ */
+export function bundle_change_times(executable, stat = stat_default) {
+  try {
+    const parents = path_parents(String(executable));
+    if (parents.length < 2) return null; // IndexError
+    const contents = parents[1];
+    return [String(executable), child_path(contents, 'Info.plist'),
+      child_path(child_path(contents, '_CodeSignature'), 'CodeResources')].map((path) => stat(path).st_ctime);
+  } catch (error) {
+    if (isOSError(error)) return null;
+    throw error;
+  }
+}
+
+/**
+ * English month names and UTC times; UTF-8 so `ps` does not escape non-ASCII paths.
+ *
+ * No COLUMNS, which would make `ps` cut paths and hide services from the listing.
+ */
+function _ps_environment() {
+  const environment = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key !== 'LC_ALL' && key !== 'COLUMNS') environment[key] = value;
+  }
+  return Object.assign(environment, { LC_TIME: 'C', LC_CTYPE: 'UTF-8', TZ: 'UTC' });
+}
+
+/** subprocess.Popen(stdin=DEVNULL, stdout/stderr=PIPE, text) for bounded_run: communicate(timeout), kill(), abandon(). */
+function popen_default(args, { env } = {}) {
+  let child = null;
+  let spawnError = null;
+  try {
+    child = spawn(args[0], args.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], env });
+  } catch (error) {
+    spawnError = fromNodeError(error) ?? error;
+  }
+  const out = [];
+  const err = [];
+  const process_ = {
+    returncode: null,
+    // Only ever this module's own child.
+    kill() { if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); },
+    // The child outlived SIGKILL: stop waiting for it (it is reaped whenever the kernel lets it go).
+    abandon() { child?.stdout?.destroy(); child?.stderr?.destroy(); child?.unref(); },
+    // communicate(timeout): the text output once the child has ended and its pipes are closed, or TimeoutExpired.
+    communicate(seconds) {
+      return new Promise((resolveCommunicate, rejectCommunicate) => {
+        const timer = setTimeout(() => rejectCommunicate(new TimeoutExpired(args, seconds * 1000)), seconds * 1000);
+        closed.then((failure) => {
+          clearTimeout(timer);
+          if (failure) rejectCommunicate(failure);
+          else resolveCommunicate([textOf(Buffer.concat(out), 'replace'), textOf(Buffer.concat(err), 'replace')]);
+        });
+      });
+    },
+  };
+  const closed = new Promise((resolveClosed) => {
+    if (!child) { resolveClosed(spawnError); return; }
+    child.stdout.on('data', (chunk) => out.push(chunk));
+    child.stderr.on('data', (chunk) => err.push(chunk));
+    child.once('error', (error) => resolveClosed(fromNodeError(error) ?? error));
+    child.once('close', (code, signal) => {
+      process_.returncode = code !== null ? code : -(SIGNALS[signal] ?? 0);
+      resolveClosed(null);
+    });
+  });
+  return process_;
+}
+
+/**
+ * Run a system tool and return its status and text output, never waiting much past `timeout` (seconds).
+ *
+ * subprocess.run waits without a bound for a child it killed; a tool blocked in the kernel
+ * (a hung network volume) can outlive SIGKILL. After one second more it is abandoned.
+ */
+export async function bounded_run(args, { timeout, env = undefined, popen = popen_default } = {}) {
+  const process_ = popen(args, { env });
+  let stdout;
+  let stderr;
+  try {
+    [stdout, stderr] = await process_.communicate(timeout);
+  } catch (error) {
+    if (!(error instanceof TimeoutExpired)) throw error;
+    process_.kill();
+    try {
+      await process_.communicate(1);
+    } catch (second) {
+      if (!(second instanceof TimeoutExpired)) throw second;
+      process_.abandon?.();
+    }
+    throw new TimeoutExpired(args, timeout * 1000);
+  }
+  return { returncode: process_.returncode, stdout, stderr };
+}
+
+/** Running Sky services (or just `pid`) from `ps`, as [services, unparsed]: how many service rows could not be read. */
+export async function list_sky_services({ run = bounded_run, pid = null } = {}) {
+  const selection = pid === null ? ['-axo'] : ['-p', String(pid), '-o'];
+  // -ww: unlimited width; without a terminal `ps` would cut long paths and hide services.
+  const result = await run([PS, '-ww', ...selection, 'pid=,uid=,lstart=,comm='], {
+    stdin: 'devnull', capture_output: true, timeout: 2, check: false, encoding: 'utf-8', errors: 'replace',
+    env: _ps_environment() });
+  // `ps -p` exits 1 with no output when that process is gone.
+  if (result.returncode !== 0 && !(pid !== null && result.returncode === 1 && pyStrip(result.stdout) === '')) {
+    throw new ValueError(`ps exited with status ${result.returncode}.`);
+  }
+  return parse_process_table(result.stdout);
+}
+
+/** List running Sky services and flag those started before their bundle was replaced. Kills nothing. */
+export async function diagnose_sky_services({ run = bounded_run, stat = stat_default } = {}) {
+  const [found, unparsed] = await list_sky_services({ run });
+  const services = [];
+  for (const service of found) {
+    const times = bundle_change_times(service.path, stat);
+    services.push({ ...service, bundle_times: times,
+      stale: times !== null && Math.min(...times) > service.started + STALE_MARGIN_SECONDS });
+  }
+  return { services, unparsed };
+}
+
+/** Run `work` once at a time; callers arriving meanwhile share the running call's result. */
+export class SingleFlight {
+  constructor(work, { wait_seconds = 5, unfinished = 'The Computer Use service recovery did not finish.' } = {}) {
+    this.work = work;
+    this.wait_seconds = wait_seconds;
+    this.unfinished = unfinished;
+    this.current = null;
+  }
+
+  /** Python's __call__. */
+  async run(...args) {
+    let flight = this.current;
+    const leader = flight === null;
+    if (leader) {
+      let finish;
+      flight = this.current = { done: new Promise((resolveDone) => { finish = resolveDone; }), finish, result: null };
+    }
+    if (leader) {
+      try {
+        flight.result = await this.work(...args);
+      } finally {
+        this.current = null;
+        flight.finish();
+      }
+    } else {
+      let timer;
+      await Promise.race([flight.done, new Promise((resolveWait) => { timer = setTimeout(resolveWait, this.wait_seconds * 1000); })]);
+      clearTimeout(timer);
+    }
+    return flight.result || { ok: false, error: this.unfinished };
+  }
+}
+
+// Recovery. A Computer Use service whose bundle was replaced while it ran keeps the socket
+// lock and rejects every client. When, and only when, every check below agrees that one
+// service is that stale holder, it is asked to quit (SIGTERM) so the original client can
+// start a current one. Every step is bounded; any doubt means no action.
+export const CODESIGN_TIMEOUT_SECONDS = 4;
+export const LSOF_TIMEOUT_SECONDS = 3;
+// The signal must follow the start of the recovery within this many seconds of this host's
+// monotonic clock (the requester waits 15 s for the answer, including the exit wait below).
+export const SIGNAL_BUDGET_SECONDS = 9;
+export const PEER_LOCK_WAIT_SECONDS = 4;
+export const TERMINATE_WAIT_SECONDS = 3;
+export const TERMINATE_POLL_SECONDS = 0.1;
+export const RECOVERY_WAIT_SECONDS = 16;
+// What `codesign --verify <pid>` prints when the code that is running is not the code now on
+// disk (errSecCSStaticCodeChanged). A healthy service prints `dynamically valid`, `valid on
+// disk` and exits 0. Any other failure (a vanished pid, a usage error, a broken seal) does
+// not prove that the running service is stale, so it is not enough.
+export const SIGNATURE_MISMATCH_MARKERS = Object.freeze(['the code on disk does not match what is running']);
+// confstr(3) name for the per-user temporary directory (asked of getconf(1): Node has no confstr).
+const _CS_DARWIN_USER_TEMP_DIR = 'DARWIN_USER_TEMP_DIR';
+export const SERVICE_EXECUTABLE = `Contents/MacOS/${SKY_SERVICE_NAME}`;
+
+const is_subprocess_failure = (error) => isOSError(error) || error instanceof SubprocessError;
+
+/**
+ * 'valid', 'invalid' (the running code differs from the code on disk) or 'unknown'.
+ *
+ * `codesign --verify <pid>` validates the running code against its signature on disk, so
+ * a bundle replaced under a running process fails it, and a healthy service passes.
+ */
+export async function verify_service_signature(pid, { run = bounded_run } = {}) {
+  let result;
+  try {
+    result = await run([CODESIGN, '--verify', '--strict', String(pid)], {
+      stdin: 'devnull', capture_output: true, timeout: CODESIGN_TIMEOUT_SECONDS, check: false,
+      encoding: 'utf-8', errors: 'replace', env: _ps_environment() });
+  } catch (error) {
+    if (is_subprocess_failure(error)) return 'unknown';
+    throw error;
+  }
+  if (result.returncode === 0) return 'valid';
+  const detail = `${result.stderr || ''} ${result.stdout || ''}`.toLowerCase();
+  if (result.returncode === 1 && SIGNATURE_MISMATCH_MARKERS.some((marker) => detail.includes(marker))) return 'invalid';
+  return 'unknown';
+}
+
+/**
+ * The complete set of pids with the service's socket lock file open, or null when unsure.
+ *
+ * Only a clean answer counts: pids and no diagnostics, or no pids, no diagnostics and
+ * lsof's "nothing found" status. A warning, an error status or odd output is unknown.
+ */
+export async function lock_holders(lock_path, { run = bounded_run } = {}) {
+  if (!lock_path || !is_abs(lock_path)) return null;
+  let result;
+  try {
+    result = await run([LSOF, '-t', '--', lock_path], {
+      stdin: 'devnull', capture_output: true, timeout: LSOF_TIMEOUT_SECONDS, check: false,
+      encoding: 'utf-8', errors: 'replace' });
+  } catch (error) {
+    if (is_subprocess_failure(error)) return null;
+    throw error;
+  }
+  const lines = (result.stdout || '').split(/\s+/).filter(Boolean);
+  const clean = pyStrip(result.stderr || '') === '' && lines.every((line) => /^[0-9]+$/.test(line)) &&
+    ((result.returncode === 0 && lines.length > 0) || (result.returncode === 1 && lines.length === 0));
+  return clean ? new Set(lines.map(Number)) : null;
+}
+
+/**
+ * The executable path the kernel reports for a pid, or null.
+ *
+ * `ps` shows argv[0], which a process can choose; this is the file actually running.
+ * ADAPTATION: Python asks proc_pidpath through ctypes; Node cannot, so the first text (executable) mapping that
+ * `lsof` reports for the pid is used, which comes from the same kernel vnode information. Anything unexpected is
+ * null, which refuses the recovery.
+ */
+export async function executable_path(pid, { run = bounded_run } = {}) {
+  if (stale_internals.platform !== 'darwin' || typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 1) return null;
+  try {
+    const result = await run([LSOF, '-a', '-p', String(pid), '-d', 'txt', '-Fn'], {
+      stdin: 'devnull', capture_output: true, timeout: LSOF_TIMEOUT_SECONDS, check: false,
+      encoding: 'utf-8', errors: 'replace' });
+    if (result.returncode !== 0 || pyStrip(result.stderr || '') !== '') return null;
+    const lines = (result.stdout || '').split('\n');
+    if (lines[0] !== `p${pid}`) return null;
+    const entry = lines.slice(1).find((line) => line.startsWith('n'));
+    return entry && is_abs(entry.slice(1)) ? entry.slice(1) : null;
+  } catch (error) {
+    if (is_subprocess_failure(error)) return null;
+    throw error;
+  }
+}
+
+const monotonic_default = () => monotonic();
+
+/**
+ * Exclusion between the LCU hosts of this account (one per MCP connection).
+ *
+ * An advisory flock on a file in the account's private temporary directory, held for the
+ * whole recovery including the wait for the service to exit. Another host recovering at the
+ * same time makes this one wait (bounded). The file names the last service instance that
+ * was asked to quit, so no host asks the same instance twice.
+ *
+ * Python's `with PeerLock() as peer:` is `const peer = await lock.enter(); try { ... } finally { lock.exit(); }`.
+ * Node has no flock(2): the lock is taken by compat/lock.mjs, whose open file description this class then reads
+ * and writes (positional reads and writes, like pread/pwrite).
+ */
+export class PeerLock {
+  constructor(path = null, { wait_seconds = PEER_LOCK_WAIT_SECONDS, sleep = sleep_seconds, monotonic: clock = monotonic_default } = {}) {
+    this.path = path || PeerLock.default_path();
+    this.wait_seconds = wait_seconds;
+    this.sleep = sleep;
+    this.monotonic = clock;
+    this.lock = null;
+    this.descriptor = null;
+    this.acquired = false;
+    this.previous = null;
+  }
+
+  /** The account's private temporary directory by the system's own answer, not $TMPDIR. */
+  static default_path() {
+    try {
+      const getconf = trustedTool('getconf', ['/usr/bin']);
+      if (!getconf) return null;
+      const result = runTool(getconf, [_CS_DARWIN_USER_TEMP_DIR], { encoding: 'utf8' });
+      const directory = result.status === 0 && !result.error ? result.stdout.replace(/\n$/, '') : '';
+      if (!directory || !is_abs(directory)) return null;
+      return pyJoin(directory, `lcu-stale-service-recovery-${process.getuid()}.lock`);
+    } catch {
+      return null;
+    }
+  }
+
+  async enter() {
+    if (!this.path) return this;
+    const deadline = this.monotonic() + this.wait_seconds;
+    for (;;) {
+      // One non-blocking attempt (LOCK_EX | LOCK_NB); the file is opened as O_RDWR | O_CREAT | O_NOFOLLOW, 0600.
+      let lock;
+      try {
+        lock = await acquire(this.path, { timeout: 0 });
+      } catch (error) {
+        if (error instanceof LockTimeoutError) {
+          if (this.monotonic() >= deadline) return this;
+          await this.sleep(0.05);
+          continue;
+        }
+        return this; // not acquired: the file cannot be opened, or the lock helper is unusable
+      }
+      this.lock = lock;
+      this.descriptor = lock.fd;
+      this.acquired = true;
+      this.previous = this._read();
+      return this;
+    }
+  }
+
+  _read() {
+    try {
+      const buffer = Buffer.alloc(1024);
+      const count = stale_internals.read(this.descriptor, buffer, 1024, 0);
+      const record = loads(decode(buffer.subarray(0, count)));
+      return record instanceof Map ? record : null;
+    } catch (error) {
+      if (isOSError(error) || error instanceof ValueError) return null;
+      throw error;
+    }
+  }
+
+  /** Keep `outcome` for the next holder of the lock; true only when it is on disk whole. */
+  record(outcome) {
+    try {
+      const data = Buffer.from(dumps(outcome), 'utf8');
+      stale_internals.truncate(this.descriptor, 0);
+      // A short write (a file size limit) would leave a record nobody can read.
+      if (stale_internals.write(this.descriptor, data, 0) !== data.length) return false;
+      const back = Buffer.alloc(data.length + 1);
+      const count = stale_internals.read(this.descriptor, back, data.length + 1, 0);
+      return back.subarray(0, count).equals(data);
+    } catch (error) {
+      if (isOSError(error) || error instanceof ValueError || error instanceof TypeError) return false;
+      throw error;
+    }
+  }
+
+  exit() {
+    if (this.lock !== null) {
+      const lock = this.lock;
+      this.lock = null;
+      try {
+        lock.release(); // closing releases the flock
+      } finally {
+        this.descriptor = null;
+      }
+    }
+    return false;
+  }
+}
+
+/** The default peer lock for recover_stale_service (Python passes the class itself). */
+export const peer_lock = () => new PeerLock();
+
+/** The defaults of recover_stale_service's `exclusive` and `waiting`, for tests that check them. */
+export const recovery_defaults = Object.freeze({ exclusive: peer_lock, waiting: () => false });
+
+/**
+ * Executables of the two bundles LCU may stop a service from: the one it launches and the app's copy.
+ *
+ * A bundle whose service executable resolves (through a symlink) to somewhere outside the
+ * bundle contributes nothing.
+ */
+export function known_service_executables(environment = null, realpath = pyRealpath) {
+  environment = environment === null ? process.env : environment;
+  const bundles = [environment.SKY_CUA_SERVICE_PATH];
+  const codex_home = environment.CODEX_HOME;
+  if (codex_home) bundles.push(pyJoin(codex_home, 'computer-use', 'Codex Computer Use.app'));
+  const executables = new Set();
+  for (const bundle of bundles) {
+    if (!bundle || !is_abs(bundle)) continue;
+    const root = realpath(bundle);
+    const executable = realpath(pyJoin(bundle, SERVICE_EXECUTABLE));
+    if (basename_of(executable) === SKY_SERVICE_NAME && commonpath2(root, executable) === root && executable !== root) {
+      executables.add(executable);
+    }
+  }
+  return executables;
+}
+
+/** Existence probe with signal 0 (never delivers anything); pid must be a single process. */
+export function _process_exists(pid) {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 1) {
+    throw new ValueError('refusing to probe a non-process id');
+  }
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    return true;
+  }
+  return true;
+}
+
+/**
+ * True while the requester's connection is open and it has sent nothing more.
+ *
+ * `connection` is the LineReader of the requester's connection (it collects whatever arrives). The requester
+ * closes its end when it stops waiting for the answer, which ends the connection here. Ended, failed, more data or
+ * any error means nobody would retry.
+ */
+export function requester_waiting(connection) {
+  try {
+    const socket = connection.connection;
+    return !(connection.buffer.length > 0 || connection.ended || connection.failure ||
+      socket.destroyed || socket.readableEnded || !socket.readable);
+  } catch {
+    return false;
+  }
+}
+
+/** `check failed: ` + str(exc)[:200] */
+const check_failed = (exc) => `check failed: ${cpSlice(excStr(exc), 200)}`;
+
+const one_holder = (holder_set, pid) => holder_set instanceof Set && holder_set.size === 1 && holder_set.has(pid);
+const field = (record, key) => (record instanceof Map ? record.get(key) : record?.[key]);
+const kill_default = (pid, signal) => process.kill(pid, signal);
+
+/** tuple equality of two change-time lists (or null). */
+function same_times(left, right) {
+  if (left === null || right === null || left === undefined || right === undefined) return left === right;
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+/**
+ * Quit the one Computer Use service that is provably stale and holds the connection.
+ *
+ * In this order, and any failed or inconclusive step means nothing is signaled:
+ * 1. only this LCU host of the account is recovering (a flock, held through the exit wait);
+ * 2. the process listing is complete and exactly one service started before its bundle was
+ *    replaced (the change times of its executable, Info.plist and seal);
+ * 3. it is a single process (pid > 1, not this one) of the current user, named exactly
+ *    SkyComputerUseService, whose path and kernel-reported executable are the one in a
+ *    known bundle;
+ * 4. this instance (pid and start time) was never asked to quit before;
+ * 5. it is the only process holding the socket lock (among those lsof can see), and
+ *    `codesign --verify` rejects its running code as different from the code on disk;
+ * 6. the instance is recorded as asked (no record, no signal; the previous record is put
+ *    back if no signal follows);
+ * 7. last, with nothing slow after the process read: the lock holders, then the bundle's
+ *    change times, then the process itself (`ps -p`) and its kernel executable all match
+ *    what was checked, the recovery is within its time budget on this host's monotonic
+ *    clock, and the requester is still waiting for the answer.
+ * Then that one pid gets SIGTERM (never a group, never SIGKILL), it is given at most 3
+ * seconds to exit, and one line is logged. A pid can still be recycled in the instants
+ * between the last read and the signal; macOS has no process handle that closes that gap.
+ */
+export async function recover_stale_service({
+  lock_path, executables, uid = null, diagnose = diagnose_sky_services, read_process = list_sky_services,
+  change_times = bundle_change_times, verify = verify_service_signature, holders = lock_holders,
+  kernel_path = executable_path, kill = kill_default, exists = _process_exists, realpath = pyRealpath,
+  sleep = sleep_seconds, monotonic: clock = monotonic, exclusive = recovery_defaults.exclusive,
+  waiting = recovery_defaults.waiting, log = null,
+} = {}) {
+  const nothing = (reason) => ({ ok: true, recovered: false, reason });
+
+  uid = uid === null ? process.getuid() : uid;
+  const started = clock();
+  let pid;
+  let path;
+  let exited = false;
+  let elapsed_ms;
+  try {
+    const guard = exclusive();
+    const peer = await guard.enter();
+    try {
+      if (!peer.acquired) return nothing('another LCU process is recovering');
+      const diagnosis = await diagnose();
+      if (diagnosis.unparsed) return nothing('the process listing was incomplete');
+      // Only this account's services: another user's cannot hold this account's lock.
+      const stale = diagnosis.services.filter((item) => item.stale && item.uid === uid);
+      if (stale.length === 0) return nothing('no stale service');
+      if (stale.length !== 1) return nothing('more than one stale service');
+      const service = stale[0];
+      pid = service.pid;
+      path = service.path;
+      const start = service.started;
+      if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return nothing('not a single service process');
+      if (service.uid !== uid) return nothing('the stale service belongs to another user');
+      if (basename_of(path) !== SKY_SERVICE_NAME || !executables.has(realpath(path))) {
+        return nothing('the stale service is not in a known Computer Use bundle');
+      }
+      const kernel = await kernel_path(pid);
+      const previous = peer.previous || new Map();
+      if (!(kernel && basename_of(kernel) === SKY_SERVICE_NAME && realpath(kernel) === realpath(path))) {
+        return nothing('the kernel does not report the known executable for the stale service');
+      }
+      if (equal(field(previous, 'pid') ?? null, pid) && equal(field(previous, 'started') ?? null, pyfloat(start))) {
+        // Never twice for one instance: a service that outlived SIGTERM is left alone.
+        return nothing('this service was already asked to quit');
+      }
+      if (!one_holder(await holders(lock_path), pid)) {
+        return nothing('the stale service is not the only holder of the socket lock');
+      }
+      if ((await verify(pid)) !== 'invalid') {
+        return nothing('the running service passes signature verification, or it could not be checked');
+      }
+      if (!peer.record(dict([['pid', pid], ['started', pyfloat(start)]]))) return nothing('the attempt could not be recorded');
+      let reason;
+      try {
+        if (!one_holder(await holders(lock_path), pid)) {
+          reason = 'the socket lock changed hands while it was being checked';
+        } else if (!same_times(await change_times(path), service.bundle_times)) {
+          reason = 'the service bundle changed while it was being checked';
+        } else {
+          const [rows, unparsed] = await read_process({ pid }); // the process itself, read last
+          if (unparsed || rows.length !== 1 || rows[0].pid !== pid || rows[0].uid !== service.uid ||
+              rows[0].started !== start || rows[0].path !== path || (await kernel_path(pid)) !== kernel) {
+            reason = 'the service changed while it was being checked';
+          } else if (clock() - started > SIGNAL_BUDGET_SECONDS) {
+            reason = 'the checks took too long to act on';
+          } else if (!(await waiting())) {
+            reason = 'the request stopped waiting for the recovery';
+          } else {
+            reason = null;
+          }
+        }
+      } catch (exc) {
+        if (exc instanceof PySystemExit) throw exc;
+        reason = check_failed(exc);
+      }
+      if (reason) {
+        // Back to the previous record, so an instance asked earlier stays recorded.
+        peer.record(peer.previous || new Map());
+        return nothing(reason);
+      }
+      kill(pid, SIGNALS.SIGTERM);
+      try {
+        const deadline = clock() + TERMINATE_WAIT_SECONDS;
+        while (!exited && clock() < deadline) {
+          exited = !(await exists(pid));
+          if (!exited) await sleep(TERMINATE_POLL_SECONDS);
+        }
+      } finally {
+        elapsed_ms = Math.trunc((clock() - started) * 1000);
+        if (log) {
+          log(`LCU macOS sent SIGTERM to stale Computer Use service pid ${pid} (${path}); ` +
+            (exited ? `it exited after ${elapsed_ms} ms` : `it did not exit within ${TERMINATE_WAIT_SECONDS} seconds`));
+        }
+      }
+    } finally {
+      guard.exit();
+    }
+  } catch (exc) {
+    if (exc instanceof PySystemExit) throw exc;
+    return nothing(check_failed(exc));
+  }
+  if (!exited) return nothing(`pid ${pid} did not exit within ${TERMINATE_WAIT_SECONDS} seconds of SIGTERM`);
+  return { ok: true, recovered: true, pid, path, elapsed_ms };
+}
+
+export async function recover_response(waiting = null) {
+  if (stale_internals.platform !== 'darwin') return { ok: true, recovered: false, reason: 'not macOS' };
+  return stale_internals.recover_stale_service({
+    lock_path: process.env.LCU_MAC_SERVICE_LOCK ?? null, executables: known_service_executables(),
+    waiting: waiting || (() => false),
+    log: (line) => writeFd(2, `${line}\n`),
+  });
+}
+
+export const shared_recovery = new SingleFlight(recover_response, { wait_seconds: RECOVERY_WAIT_SECONDS });
+stale_internals.shared_recovery = shared_recovery;
+
+/** Run (or join) the recovery for this requester and answer on its connection, then close it. */
+export async function answer_recover(reader) {
+  try {
+    const result = await stale_internals.shared_recovery.run(() => requester_waiting(reader));
+    await reader.sendAndClose(frame(result), 3000);
+  } catch (error) {
+    // except OSError: pass. Anything else would have ended Python's thread with a traceback; the host goes on.
+    if (!isOSError(error)) {
+      try { writeFd(2, `LCU macOS recovery answer failed: ${cpSlice(excStr(error), 256)}\n`); } catch { /* stderr gone */ }
+    }
+  } finally {
+    reader.close();
+  }
+}
 
 // ------------------------------------------------------------------------------------------ public API
 
@@ -824,11 +1529,19 @@ export async function serve(address, client, control_address = null, { stdin = p
   const lines = new StdinLines(stdin, wake);
 
   const handle = async (reader) => {
+    let detached = false;
     try {
       reader.timeout = 3000;
       let response;
       try {
         const request = await reader.read();
+        if (request instanceof Map && request.get('type') === 'recover') {
+          // Off the accept loop: it waits on codesign, lsof and the service's exit. The recovery answers on (and
+          // closes) the requester's connection itself.
+          detached = true;
+          answer_recover(reader).catch(() => {});
+          return;
+        }
         const session_id = request instanceof Map ? request.get('session_id') : null;
         const turn_id = request instanceof Map ? request.get('turn_id') : null;
         if (!nonBlank(session_id) || !nonBlank(turn_id)) throw new ValueError('Original macOS turn IDs are missing.');
@@ -843,7 +1556,7 @@ export async function serve(address, client, control_address = null, { stdin = p
       // A disconnected hook client must not terminate the host.
       await reader.sendAndClose(frame(response), 3000);
     } finally {
-      reader.close();
+      if (!detached) reader.close();
     }
   };
 

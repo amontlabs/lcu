@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { asUri } from '../../lcu/compat/pathlib.mjs';
+import { getpwuid } from '../../lcu/compat/accounts.mjs';
 import { PySystemExit } from '../../lcu/compat/argparse.mjs';
 import * as runtime from '../../lcu/runtime.mjs';
 import {
@@ -708,7 +709,7 @@ describe('MacRuntimeTests', { skip: skipOnWindows('macOS app bundle, lifecycle h
     };
     internals.supervise = async (command, env) => { ran.push([command, env]); return 0; };
     internals.execve = () => assert.fail('execve must not run when the lifecycle host supervises');
-    await assert.rejects(withEnv({ HOME: '/fixture' }, () => main(root, [])),
+    await assert.rejects(withEnv({ HOME: getpwuid(process.getuid()).pw_dir }, () => main(root, [])),
       (error) => error instanceof PySystemExit && error.status === 0);
     assert.equal(started.length, 1);
     assert.equal(started[0].client, client);
@@ -717,7 +718,48 @@ describe('MacRuntimeTests', { skip: skipOnWindows('macOS app bundle, lifecycle h
     assert.deepEqual(stopped, [[host, temporaryHost]]);
     assert.deepEqual(ran[0][0], [join(runtimeDir, 'bin/node'), join(runtimeDir, 'lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs')]);
     assert.equal(ran[0][1].LCU_MAC_LIFETIME_SOCKET, '/tmp/lcu.sock');
+    // The host learns the default socket lock location before it starts, not afterwards.
+    const host_env = started[0].env;
+    assert.ok(host_env.LCU_MAC_SERVICE_LOCK.endsWith(
+      '/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/IPC/computeruse.sock.lock'));
+    assert.equal(ran[0][1].LCU_MAC_SERVICE_LOCK, host_env.LCU_MAC_SERVICE_LOCK);
     assert.equal(JSON.parse(ran[0][1].NODE_REPL_TRUSTED_SERVICES).sky, join(root, 'lcu/macos_sky_service.mjs'));
+  });
+
+  /** Run main() on a macOS launcher whose lifecycle host is a recorder; returns the env the host was started with. */
+  const startedHostEnv = async (values) => {
+    resolver();
+    const client = join(runtimeDir,
+      'lib/node_modules/@oai/sky/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient');
+    write(client, 'fixture');
+    chmodSync(client, 0o755);
+    const started = [];
+    internals.load = async () => ({
+      start_original_host: (options) => { started.push(options); return [{}, {}, '/tmp/lcu.sock']; },
+      stop_original_host: () => {},
+    });
+    internals.supervise = async () => 0;
+    await assert.rejects(withEnv(values, () => main(root, [])), (error) => error instanceof PySystemExit);
+    return started[0].env;
+  };
+
+  it('test_a_custom_socket_path_leaves_the_service_lock_unknown_to_the_host', async () => {
+    // Set but empty too: what the original client makes of it is not the default socket.
+    for (const custom of ['/tmp/custom.sock', '']) {
+      const env = await startedHostEnv({ HOME: getpwuid(process.getuid()).pw_dir, SKY_CUA_SERVICE_NATIVE_PIPE_PATH: custom,
+        LCU_MAC_SERVICE_LOCK: '/inherited/computeruse.sock.lock' });
+      assert.ok(!('LCU_MAC_SERVICE_LOCK' in env), JSON.stringify(custom));
+    }
+  });
+
+  it('test_a_home_that_is_not_the_accounts_leaves_the_service_lock_unknown_to_the_host', async () => {
+    // The original client builds its socket path from $HOME, so it is then not talking to
+    // the account-home socket whose stale holder recovery would stop.
+    // An empty HOME too: Node's os.homedir() then returns '' and the socket path is relative.
+    for (const home of ['/tmp/isolated-home', '']) {
+      const env = await startedHostEnv({ HOME: home, LCU_MAC_SERVICE_LOCK: '/inherited.lock' });
+      assert.ok(!('LCU_MAC_SERVICE_LOCK' in env), JSON.stringify(home));
+    }
   });
 
   it('test_reports_current_metadata_after_descriptor_and_lock_become_stale', async () => {
@@ -1064,6 +1106,6 @@ describe('supervised launch exit statuses (macOS/Windows)', () => {
 
   it('a missing executable is an OSError with Python text', async () => {
     await assert.rejects(runtime.supervise(['/nonexistent/lcu-node', 'x'], process.env),
-      /\[Errno 2\] No such file or directory: '\/nonexistent\/lcu-node'/);
+      process.platform === 'win32' ? /^\[WinError 3\] The system cannot find the path specified$/ : /\[Errno 2\] No such file or directory: '\/nonexistent\/lcu-node'/);
   });
 });

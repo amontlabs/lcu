@@ -18,7 +18,8 @@ import { constants as osConstants } from 'node:os';
 
 import { dumps, isFloat, isInt, JSONDecodeError, loads, UnicodeDecodeError, ValueError } from './compat/pyjson.mjs';
 import { io, PySystemExit, pyStrip } from './compat/argparse.mjs';
-import { asUri, normpath, pathExpanduser, pathStr, resolve } from './compat/pathlib.mjs';
+import { getpwuid } from './compat/accounts.mjs';
+import { asUri, normpath, pathExpanduser, pathStr, realpath, resolve } from './compat/pathlib.mjs';
 import { join as posixJoin } from './compat/pypath.mjs';
 import { fromNodeError, isOSError } from './compat/pyerr.mjs';
 import { py_str } from './compat/pystr.mjs';
@@ -865,6 +866,21 @@ export async function main(root, argv) {
     const client = _configure_macos_lifecycle(root, runtime, env);
     if (client !== null) {
       const { start_original_host, stop_original_host } = await internals.load('./macos_host.mjs');
+      const { MAC_SOCKET_ENV, mac_socket_path } = internals.platforms();
+      const [socket_path] = mac_socket_path(env);
+      // Any override, even an empty one, means the client may not use the default socket.
+      const overridden = Object.hasOwn(env, MAC_SOCKET_ENV);
+      // Always decided here, never inherited: only the default location is known, and the
+      // original client builds its socket path from $HOME (Node's os.homedir), so an
+      // account whose HOME is elsewhere is talking to a different socket.
+      const account_home = getpwuid(process.getuid()).pw_dir;
+      // An unset HOME makes Node fall back to the account home; an empty one gives ''.
+      const client_home = Object.hasOwn(env, 'HOME') ? env.HOME : account_home;
+      if (overridden || !client_home || realpath(client_home) !== realpath(account_home)) {
+        delete env.LCU_MAC_SERVICE_LOCK;
+      } else {
+        env.LCU_MAC_SERVICE_LOCK = `${socket_path}.lock`;
+      }
       const [host, temporary, address] = await start_original_host({
         // LCU's own Node starts quarantined through entry.mjs (`macos-host`), like the launcher itself; the
         // caller's startup variables reach the original client as data (review port-runtime #2).
