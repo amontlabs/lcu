@@ -643,6 +643,45 @@ try {
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true});
 
+  // If that retried gate then fails, the error that led to the recovery still comes back.
+  reset();
+  const failPrior = {session_id: 'fail-prior-session', turn_id: 'fail-prior-turn', call_id: 'fail-prior-call'};
+  const failTurn = {session_id: 'fail-session', turn_id: 'fail-turn', call_id: 'fail-call'};
+  for (const metadata of [failPrior, failTurn]) {
+    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': metadata};
+    assert.deepEqual(await rpc(), {ok: true});
+  }
+  globalThis.failTurnEndedMessage = startupFailure;
+  globalThis.failTurnEndedCount = 2;
+  await assert.rejects(turnEnded.run({session_id: failPrior.session_id, turn_id: failPrior.turn_id}));
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const failRequest = failure();
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the cleanup gate did not ask for recovery');
+  let releaseFailGate;
+  globalThis.turnEndedGate = new Promise(resolve => { releaseFailGate = resolve; });
+  const failNativeCount = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest').length;
+  const failNativeBefore = failNativeCount();
+  releaseRecovery();
+  await waitFor(() => failNativeCount() > failNativeBefore, 'the retried gate did not start');
+  const failEnded = turnEnded.run({session_id: failTurn.session_id, turn_id: failTurn.turn_id}).catch(() => {});
+  // Every held and later native turn-ended now fails with another error.
+  globalThis.failTurnEndedMessage = 'Some other native failure';
+  globalThis.failTurnEndedCount = 10;
+  globalThis.turnEndedGate = undefined;
+  releaseFailGate();
+  await failEnded;
+  const failError = await failRequest;
+  assert.equal(failError.message, startupFailure, 'the error that led to the recovery, not the gate\'s');
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore);
+  globalThis.failTurnEndedMessage = undefined;
+  globalThis.failTurnEndedCount = 0;
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true});
+
   // A turn that is still active is retried, after the pending turn cleanup.
   reset();
   const activeMetadata = {session_id: 'active-session', turn_id: 'active-turn', call_id: 'active-call'};

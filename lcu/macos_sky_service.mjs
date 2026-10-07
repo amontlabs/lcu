@@ -513,24 +513,28 @@ export async function handleRpc(request) {
   const metadata = readTurnMetadata(runtime);
   const context = controlContext(runtime, request);
   const turnKey = metadata && JSON.stringify([metadata.session_id, metadata.turn_id]);
-  if (!turnKey) return dispatch(runtime, request, metadata, context, undefined, () => true);
-  const state = {ended: false};
+  const state = {ended: false, recoveryError: undefined, resent: false};
+  if (!turnKey) return dispatch(runtime, request, metadata, context, undefined, state);
   const requests = inFlightTurns.get(turnKey) ?? new Set();
   inFlightTurns.set(turnKey, requests.add(state));
   try {
-    return await dispatch(runtime, request, metadata, context, turnKey, () => !state.ended);
+    return await dispatch(runtime, request, metadata, context, turnKey, state);
+  } catch (error) {
+    // A turn that ended after a recovery, with nothing sent since, gets the error that led to
+    // the recovery whatever failed later; a retry that was sent fails with its own error.
+    throw state.recoveryError && state.ended && !state.resent ? state.recoveryError : error;
   } finally {
     requests.delete(state);
     if (!requests.size && inFlightTurns.get(turnKey) === requests) inFlightTurns.delete(turnKey);
   }
 }
 
-async function dispatch(runtime, request, metadata, context, turnKey, turnActive) {
+async function dispatch(runtime, request, metadata, context, turnKey, state) {
   // After a stale service recovery, nothing is retried, registered or sent for a turn that
   // ended (Stop or Interrupt) meanwhile; the error that led to the recovery is thrown instead.
-  let recoveryError;
+  const turnActive = () => !state.ended;
   const retryIfActive = async error => {
-    recoveryError = error;
+    state.recoveryError = error;
     return turnActive();
   };
   // Retried turn cleanup talks to the same native pipe and fails the same way.
@@ -554,9 +558,12 @@ async function dispatch(runtime, request, metadata, context, turnKey, turnActive
   }
   const service = await original;
   // Checked with no wait before the dispatch below.
-  if (recoveryError && !turnActive()) throw recoveryError;
+  if (state.recoveryError && !turnActive()) throw state.recoveryError;
   // The retry, like any request, first waits for pending turn cleanup.
-  return withStaleServiceRecovery(runtime, () => service.handleRpc(request), async error => {
+  return withStaleServiceRecovery(runtime, () => {
+    if (state.recoveryError) state.resent = true;
+    return service.handleRpc(request);
+  }, async error => {
     if (!(await retryIfActive(error))) return false;
     await gateOnCleanup();
     return turnActive();
