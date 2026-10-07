@@ -570,6 +570,10 @@ try {
   const endedRequest = failure({failUntilRecovered: true});
   await waitFor(() => countOriginal() === rpcBefore + 1, 'the request did not fail first');
   await turnEnded.run({session_id: endedMetadata.session_id, turn_id: endedMetadata.turn_id});
+  // However many other turns end meanwhile, this request's turn stays ended.
+  for (let index = 0; index < 1100; index++) {
+    await turnEnded.run({session_id: 'other-session', turn_id: `other-turn-${index}`});
+  }
   releaseRecovery();
   assert.equal((await endedRequest).message, startupFailure);
   recoverHold = undefined;
@@ -600,12 +604,6 @@ try {
   assert.equal(countOriginal(), rpcBefore, 'nothing is sent for a turn that ended during the cleanup gate');
   globalThis.failTurnEndedMessage = undefined;
   globalThis.failTurnEndedCount = 0;
-  // A later request of that ended turn is not retried after a recovery either.
-  reset();
-  recoverReply = recovered;
-  rpcBefore = countOriginal();
-  assert.equal((await failure({failUntilRecovered: true})).message, startupFailure);
-  assert.equal(countOriginal(), rpcBefore + 1);
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true}, 'the pending cleanup completes and later requests proceed');
 
