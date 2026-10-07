@@ -609,6 +609,42 @@ try {
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true}, 'the pending cleanup completes and later requests proceed');
 
+  // And when the turn ends while the retried cleanup gate is still running.
+  reset();
+  const heldPrior = {session_id: 'held-prior-session', turn_id: 'held-prior-turn', call_id: 'held-prior-call'};
+  const heldTurn = {session_id: 'held-session', turn_id: 'held-turn', call_id: 'held-call'};
+  for (const metadata of [heldPrior, heldTurn]) {
+    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': metadata};
+    assert.deepEqual(await rpc(), {ok: true});
+  }
+  globalThis.failTurnEndedMessage = startupFailure;
+  globalThis.failTurnEndedCount = 2;  // the prior turn's hook, then the gate's first attempt
+  await assert.rejects(turnEnded.run({session_id: heldPrior.session_id, turn_id: heldPrior.turn_id}));
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const heldRequest = failure();
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the cleanup gate did not ask for recovery');
+  // Hold the retried gate's native turn-ended, then let the recovery answer.
+  let releaseGate;
+  globalThis.turnEndedGate = new Promise(resolve => { releaseGate = resolve; });
+  const heldNativeCount = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest').length;
+  const heldNativeBefore = heldNativeCount();
+  releaseRecovery();
+  await waitFor(() => heldNativeCount() > heldNativeBefore, 'the retried gate did not start');
+  // The turn ends while that retried gate is running.
+  const heldEnded = turnEnded.run({session_id: heldTurn.session_id, turn_id: heldTurn.turn_id});
+  globalThis.turnEndedGate = undefined;
+  releaseGate();
+  await heldEnded;
+  assert.equal((await heldRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore, 'nothing is sent for a turn that ended during the retried gate');
+  globalThis.failTurnEndedMessage = undefined;
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true});
+
   // A turn that is still active is retried, after the pending turn cleanup.
   reset();
   const activeMetadata = {session_id: 'active-session', turn_id: 'active-turn', call_id: 'active-call'};
