@@ -490,6 +490,16 @@ class UpdateTest(unittest.TestCase):
             update.notice(self.root)
         popen.assert_called_once()
 
+    def test_refresh_stamp_tolerates_clock_skew(self):
+        stamp = update.cache_path().with_name('refresh.stamp')
+        self.assertTrue(update.refresh_claimed())
+        now = stamp.stat().st_mtime - 0.05  # the stamp's mtime slightly ahead of time.time()
+        self.assertFalse(update.refresh_claimed(now))
+        future = now + update.STAMP_SKEW + 1
+        os.utime(stamp, (future, future))
+        self.assertTrue(update.refresh_claimed(now))
+        self.assertFalse(update.refresh_claimed(now + 3))
+
     def test_check_cli(self):
         with mock.patch.object(update, 'fetch_latest', return_value=INFO):
             status, out = self.run_main('--check')

@@ -20,6 +20,7 @@ NOTES_URL = f'https://raw.githubusercontent.com/{REPO}/%s/docs/releases/%s.md'
 INTERVAL = 600
 RETRY = 3600
 STAMP_TTL = 120
+STAMP_SKEW = 2  # Windows file times can run ahead of time.time()
 ANNOUNCE_TTL = 7 * 24 * 3600
 ANNOUNCE_COOLDOWN = 24 * 3600
 ANNOUNCE_ACCOUNT = '*'
@@ -200,7 +201,7 @@ def refresh_claimed(now=None):
         stamp = cache_path().with_name('refresh.stamp')
         now = time.time() if now is None else now
         try:
-            if 0 <= now - stamp.stat().st_mtime < STAMP_TTL:
+            if -STAMP_SKEW <= now - stamp.stat().st_mtime < STAMP_TTL:
                 return False
         except OSError:
             pass
