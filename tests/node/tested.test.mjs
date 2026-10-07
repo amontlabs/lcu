@@ -128,7 +128,7 @@ describe('TestedVersionTests', () => {
     const { mkdirSync } = process.getBuiltinModule('node:fs');
     mkdirSync(join(root, tested.RECORD));
     const [, problem] = tested.load_entries(root);
-    assert.equal(problem, `the tested-versions record is unreadable (${join(root, tested.RECORD)}: [Errno 21] Is a directory: ${reprStr(join(root, tested.RECORD))})`);
+    assert.equal(problem, `the tested-versions record is unreadable (${join(root, tested.RECORD)}: ${process.platform === 'win32' ? '[Errno 13] Permission denied' : '[Errno 21] Is a directory'}: ${reprStr(join(root, tested.RECORD))})`); // open() of a directory
   });
 
   it('test_the_checked_in_record_is_valid_and_has_no_duplicate_pairs', () => {

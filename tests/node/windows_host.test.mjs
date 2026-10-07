@@ -627,7 +627,8 @@ describe('windows_host (structural extraction)', () => {
     _asar(archive, split());
     mkdirSync(join(base, 'derived'));
     assert.throws(() => windows_host.materialize_original_host(app, join(base, 'derived'), { node: NODE }),
-      (error) => error.message === `[Errno 17] File exists: ${reprStr(join(base, 'derived'))}`);
+      (error) => error.message === (process.platform === 'win32' ? `[WinError 183] Cannot create a file when that file already exists: ${reprStr(join(base, 'derived'))}`
+        : `[Errno 17] File exists: ${reprStr(join(base, 'derived'))}`));
   });
 });
 

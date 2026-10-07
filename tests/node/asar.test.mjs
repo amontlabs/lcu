@@ -85,7 +85,7 @@ describe('asar', () => {
 
   it('a missing archive is an OSError with Python text', () => {
     assert.throws(() => list_asar_members(join(temporary.path, 'none.asar')),
-      (error) => /^\[Errno 2\] No such file or directory: '.*none\.asar'$/.test(error.message));
+      (error) => /^(\[Errno 2\] No such file or directory|\[WinError 2\] The system cannot find the file specified): '.*none\.asar'$/.test(error.message)); // stat() first: WinError on Windows
   });
 
   it('matches lcu/asar.py on valid and invalid archives (differential)', (t) => {

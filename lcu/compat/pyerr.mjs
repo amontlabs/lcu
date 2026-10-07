@@ -304,9 +304,11 @@ function windowsError(err, { filename, filename2, parentExists }) {
   let code = err?.code;
   const syscall = typeof err?.syscall === 'string' ? err.syscall : '';
   if (typeof code !== 'string' || errnoNumber(code, 'win32') === undefined && WINERROR_OF_CODE[code] === undefined) return null;
-  const name = filename !== undefined ? filename : err.path;
-  const second = filename2 !== undefined ? filename2 : err.dest;
   const call = syscall.split(' ')[0];
+  const spawning = call.startsWith('spawn');
+  // CreateProcess failures carry no file name in CPython (`[WinError 2] The system cannot find the file specified`).
+  const name = spawning ? null : filename !== undefined ? filename : err.path;
+  const second = spawning ? null : filename2 !== undefined ? filename2 : err.dest;
   if (call === '' || CRT_SYSCALLS.has(call)) {
     if (code === 'EISDIR' && (call === 'read' || call === 'open')) code = 'EACCES';
     const number = errnoNumber(code, 'win32');
@@ -320,10 +322,10 @@ function windowsError(err, { filename, filename2, parentExists }) {
     // ERROR_FILE_NOT_FOUND (2) unless the directory part is missing too (ERROR_PATH_NOT_FOUND, 3); a directory
     // listing (FindFirstFile on `dir\*`) reports 3 for a missing directory.
     if (call === 'scandir') winerror = 3;
-    else if (call !== 'spawn' && typeof name === 'string' && name !== '') {
-      const parent = ntpath.dirname(name);
+    else if (typeof (spawning ? (filename ?? err.path) : name) === 'string') {
+      const parent = ntpath.dirname(spawning ? (filename ?? err.path) : name);
       const exists = parentExists ?? ((p) => existsSync(p));
-      if (parent !== name && parent !== '' && parent !== '.' && !exists(parent)) winerror = 3;
+      if (parent !== '' && parent !== '.' && !exists(parent)) winerror = 3;
     }
   }
   const [message, mapped] = WINERROR[winerror];
@@ -343,14 +345,16 @@ export function spawnErrorText(err, { cwd, platform } = {}) {
   // way chdir(2) would. (Checked after the fact: a cwd changed in between is a race, not a contract.)
   if (cwd !== undefined && cwd !== null) {
     const failure = chdirFailure(String(cwd));
-    if (failure && (platform ?? process.platform) === 'win32') {
-      // CreateProcess with a bad lpCurrentDirectory: ERROR_DIRECTORY, whatever the reason.
-      return new PyOSError({ errno: 20, strerror: WINERROR[267][0], winerror: 267, filename: cwd,
-        className: 'NotADirectoryError', code: 'ENOTDIR' }, 'win32').message;
-    }
+    if (failure && (platform ?? process.platform) === 'win32') return windowsBadCwdError().message;
     if (failure) return pyStr({ code: failure }, { filename: cwd, platform });
   }
   return pyStr(err, { platform });
+}
+
+/** CreateProcess with an unusable lpCurrentDirectory: ERROR_DIRECTORY, whatever the reason (no file name, like CPython). */
+export function windowsBadCwdError() {
+  return new PyOSError({ errno: 20, strerror: WINERROR[267][0], winerror: 267, filename: null,
+    className: 'NotADirectoryError', code: 'ENOTDIR' }, 'win32');
 }
 
 /** The errno name chdir(path) would fail with, or null when it would succeed. */

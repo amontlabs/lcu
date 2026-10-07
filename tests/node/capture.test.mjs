@@ -51,7 +51,8 @@ describe('capture.run', () => {
 
   it('a missing program is FileNotFoundError text', () => {
     assert.throws(() => run(['/nonexistent/tool']),
-      (error) => error.message === "[Errno 2] No such file or directory: '/nonexistent/tool'");
+      (error) => error.message === (process.platform === 'win32' ? '[WinError 3] The system cannot find the path specified'
+        : "[Errno 2] No such file or directory: '/nonexistent/tool'"));
   });
 
   it('review #9: a cwd that cannot be entered is reported against the cwd, as Python does', { skip: skipOnWindows(

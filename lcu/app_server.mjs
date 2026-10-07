@@ -25,7 +25,7 @@ import { constants as osConstants, tmpdir } from 'node:os';
 import { MessageChannel, Worker, receiveMessageOnPort } from 'node:worker_threads';
 
 import { dumps, equal, fromPlain, isInt, loads, PyFloat, reprFloat, ValueError } from './compat/pyjson.mjs';
-import { fromNodeError } from './compat/pyerr.mjs';
+import { fromNodeError, windowsBadCwdError } from './compat/pyerr.mjs';
 import { TimeoutExpired, execFormatError } from './compat/subprocess.mjs';
 
 const now = () => Number(process.hrtime.bigint()) / 1e9; // time.monotonic()
@@ -224,7 +224,8 @@ class ChildProcess {
         });
         // Popen reports the working directory when that is what is missing.
         const filename = message.code === 'ENOENT' && this.cwd !== undefined && !existsSync(this.cwd) ? this.cwd : this.argv[0];
-        this.spawnError = fromNodeError(error, { filename }) ?? error;
+        const badCwd = process.platform === 'win32' && filename === this.cwd && this.cwd !== undefined;
+        this.spawnError = (badCwd ? windowsBadCwdError() : fromNodeError(error, { filename })) ?? error;
         break;
       }
       case 'chunk': this.chunks.push(Buffer.from(message.data)); break;

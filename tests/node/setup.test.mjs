@@ -487,6 +487,7 @@ describe('ReconcileTests', () => {
     const setupUrl = new URL('../../lcu/setup.mjs', import.meta.url).href;
     const holder = spawn(process.execPath, ['--input-type=module', '-e',
       `const s = await import(${JSON.stringify(setupUrl)});
+       s.impl.platform = 'linux'; // the waiter's state directory below
        const lock = await s.setup_lock(${JSON.stringify(f.home)});
        process.stdout.write('held\\n');
        process.stdin.resume();

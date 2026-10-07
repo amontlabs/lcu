@@ -38,8 +38,8 @@ describe('Windows OSError text (unit)', () => {
       ['PermissionError', 13, 5, "[WinError 5] Access is denied: 'C:\\\\t'"]);
     assert.deepEqual(show(nodeError('EBUSY', 'rename', 'C:\\a', 'C:\\b'), { parentExists: present }),
       ['PermissionError', 13, 32, "[WinError 32] The process cannot access the file because it is being used by another process: 'C:\\\\a' -> 'C:\\\\b'"]);
-    assert.deepEqual(show(nodeError('ENOENT', 'spawn C:\\x.exe', 'C:\\x.exe')),
-      ['FileNotFoundError', 2, 2, "[WinError 2] The system cannot find the file specified: 'C:\\\\x.exe'"]);
+    assert.deepEqual(show(nodeError('ENOENT', 'spawn C:\\x.exe', 'C:\\x.exe'), { parentExists: present }),
+      ['FileNotFoundError', 2, 2, '[WinError 2] The system cannot find the file specified']);
   });
 
   it('C-runtime calls (open, read, write) keep [Errno N] with the Microsoft strerror text', () => {
@@ -54,7 +54,7 @@ describe('Windows OSError text (unit)', () => {
 
   it('a spawn with an unusable cwd is NotADirectoryError [WinError 267]', () => {
     assert.equal(spawnErrorText(nodeError('ENOENT', 'spawn x', 'x'), { cwd: 'C:\\no\\such\\dir', platform: 'win32' }),
-      "[WinError 267] The directory name is invalid: 'C:\\\\no\\\\such\\\\dir'");
+      '[WinError 267] The directory name is invalid');
   });
 
   it('the CRT table is complete for the names LCU uses', () => {
@@ -96,7 +96,7 @@ describe('Windows OSError text against CPython 3.12.10', { skip: skipDifferentia
     ['open of a missing file', () => openSync(S('missing'), 'r'), "open(p('missing'))"],
     ['open of an existing file with O_EXCL', () => closeSync(openSync(S('file'), constants.O_CREAT | constants.O_EXCL | constants.O_RDWR)),
       "os.open(p('file'), os.O_CREAT | os.O_EXCL | os.O_RDWR)"],
-    ['read of a directory as a file', () => readFileSync(S('empty')), "open(p('empty')).read()"],
+    ['read of a directory as a file', () => readFileSync(S('empty')), "open(p('empty')).read()", S('empty')],
   ];
 
   it('every failing call renders like CPython', () => {
@@ -113,8 +113,9 @@ for statement in json.loads(${JSON.stringify(JSON.stringify(cases.map((c) => c[2
         out.append([type(exc).__name__, exc.errno, getattr(exc, 'winerror', None), str(exc)])
 print(json.dumps(out))`;
     const expected = python(script);
-    const got = cases.map(([, call]) => {
-      try { call(); return null; } catch (error) { return show(error); }
+    // The file name Python's open() reports (Node's read error on a directory has none).
+    const got = cases.map(([, call, , name]) => {
+      try { call(); return null; } catch (error) { return show(error, name ? { filename: name } : {}); }
     });
     for (const [index, [label]] of cases.entries()) assert.deepEqual(got[index], expected[index], label);
   });
@@ -124,7 +125,7 @@ print(json.dumps(out))`;
     const script = `
 import json, subprocess
 out = []
-for kwargs in ({'args': [${JSON.stringify(missing)}]}, {'args': ['cmd.exe', '/c', 'exit 0'], 'cwd': ${JSON.stringify(S('nodir'))}}):
+for kwargs in ({'args': [${JSON.stringify(missing)}]}, {'args': [${JSON.stringify(S('nodir', 'nope.exe'))}]}, {'args': ['cmd.exe', '/c', 'exit 0'], 'cwd': ${JSON.stringify(S('nodir'))}}):
     try:
         subprocess.run(**kwargs)
         out.append(None)
@@ -138,9 +139,10 @@ print(json.dumps(out))`;
       return rendered && [rendered.name, rendered.errno, rendered.winerror, rendered.message];
     };
     assert.deepEqual(run(missing, []), expected[0]);
+    assert.deepEqual(run(S('nodir', 'nope.exe'), []), expected[1]);
     const cwd = S('nodir');
     const text = spawnErrorText(spawnSync('cmd.exe', ['/c', 'exit 0'], { cwd, stdio: 'ignore' }).error, { cwd, platform: 'win32' });
-    assert.equal(text, expected[1][3]);
+    assert.equal(text, expected[2][3]);
   });
 
   it('errno numbers and os.strerror() of the CRT table match the interpreter', () => {
@@ -149,9 +151,8 @@ print(json.dumps(out))`;
 import errno, json, os
 names = json.loads(${JSON.stringify(JSON.stringify(names))})
 print(json.dumps({n: [getattr(errno, n, None), os.strerror(getattr(errno, n))] if hasattr(errno, n) else None for n in names}))`);
-    for (const name of names) {
-      assert.deepEqual(expected[name], [table.errno[name], table.strerror[table.errno[name]]], name);
-    }
+    const wrong = names.filter((name) => JSON.stringify(expected[name]) !== JSON.stringify([table.errno[name], table.strerror[table.errno[name]]]));
+    assert.deepEqual(wrong.map((name) => [name, expected[name]]), [], `interpreter's values: ${JSON.stringify(expected)}`);
   });
 
   it('cleanup', () => { rmSync(scratch, { recursive: true, force: true }); });

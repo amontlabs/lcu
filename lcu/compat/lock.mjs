@@ -270,11 +270,12 @@ export function windowsHolderScript(path, { attempts = 10, pauseMs = 1000, timeo
   const releaseEncoded = releasePath === null ? null : Buffer.from(releasePath, 'utf8').toString('base64');
   return [
     "$ErrorActionPreference = 'Stop'",
+    "$PSModuleAutoLoadingPreference = 'None'",
     `$path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))`,
     '$out = [Console]::Out',
     'try {',
     '  $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete',
-    '  $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, $share)',
+    '  $fs = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, $share)',
     '} catch { $out.WriteLine("OPENFAIL " + $_.Exception.HResult); $out.Flush(); exit 3 }',
     '$locked = $false',
     ...(timeoutMs === null ? [
@@ -315,6 +316,18 @@ export function windowsDeadlockError() {
   return new PyOSError({ errno: 36, strerror: 'Resource deadlock avoided', className: 'OSError', code: 'EDEADLK' }, 'win32');
 }
 
+// The holder's environment: exactly what Windows PowerShell needs to start (never PATH, PSModulePath or anything PS*/COR*/
+// DOTNET*-like that could redirect what it loads).  The 22-second acquisitions measured on the hosted runner were not about
+// this: they came from the `New-Object` cmdlet in the holder script (an autoloaded command, which makes a stripped-down
+// PowerShell search its modules); [IO.FileStream]::new needs no cmdlet and an acquisition takes about 0.15 s.
+export const WINDOWS_HOLDER_ENVIRONMENT = Object.freeze(['SystemRoot', 'SYSTEMROOT', 'windir', 'SystemDrive', 'TEMP', 'TMP']);
+
+export function windowsHolderEnvironment(source = process.env) {
+  const env = {};
+  for (const key of WINDOWS_HOLDER_ENVIRONMENT) if (source[key] !== undefined) env[key] = source[key];
+  return env;
+}
+
 function startHolder(path, timeout) {
   const statusPath = join(tmpdir(), `.lcu-lock-${process.pid}-${randomBytes(8).toString('hex')}`);
   const statusFd = openSync(statusPath, O_CREAT | constants.O_EXCL | O_RDWR, 0o600);
@@ -325,10 +338,7 @@ function startHolder(path, timeout) {
   });
   const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
-  const env = {};
-  for (const key of ['SystemRoot', 'SYSTEMROOT', 'windir', 'SystemDrive', 'TEMP', 'TMP']) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
-  }
+  const env = windowsHolderEnvironment();
   let child;
   try {
     child = seams.spawn(windowsPowerShell(), args, { stdio: ['pipe', statusFd, 'ignore'], env, windowsHide: true });

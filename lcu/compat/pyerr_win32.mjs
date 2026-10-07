@@ -22,7 +22,7 @@ const CRT = [
   ['ENOMEM', 12, 'Not enough space'],
   ['EACCES', 13, 'Permission denied'],
   ['EFAULT', 14, 'Bad address'],
-  ['EBUSY', 16, 'Device or resource busy'],
+  ['EBUSY', 16, 'Resource device'],
   ['EEXIST', 17, 'File exists'],
   ['EXDEV', 18, 'Improper link'],
   ['ENODEV', 19, 'No such device'],

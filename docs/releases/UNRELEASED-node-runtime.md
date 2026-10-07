@@ -112,13 +112,14 @@ Node by absolute path (never one found on `PATH`) after a check that runs before
   and print the reconnect hint. `windows_launcher.py` is kept as a compatibility trampoline.
 - **Known cost, Windows: every LCU lock starts a PowerShell helper.** Node cannot take the byte-range lock that Python's
   `msvcrt.locking` took, so each lock (setup, `lcu browser`, `lcu origins forget`, `lcu prune`, the install lock) starts
-  `powershell.exe` (`-NoProfile`), which holds `FileStream.Lock(0, 1)` until the command releases it. The lock is
-  therefore as slow as a PowerShell start-up per acquisition, and `lcu setup`, `lcu browser ...`, `lcu origins forget` and
-  `lcu prune` take that long more per lock than with 0.9.x. Measured on the idle hosted `windows-latest` runner (the
-  `lock cost` step of `windows-node.yml`, five consecutive acquisitions in one process): 34.5 s for the first and 22.5 to
-  24.4 s for the next four, acquire and release together. These figures are being investigated (a bare PowerShell start-up
-  should take about a second); they are not yet measured on real hardware. Correctness is unchanged (same file, same byte,
-  interoperable with 0.9.x), and read-only commands take no lock.
+  `powershell.exe -NoProfile`, which holds `FileStream.Lock(0, 1)` (the same byte, the same 10 attempts one second apart, so
+  interoperable with 0.9.x) until the command releases it. Measured on the idle hosted `windows-latest` runner, one
+  acquisition plus release takes about 0.16 s (142 to 175 ms over three acquisitions; a bare PowerShell start-up is 0.18 s
+  warm and 1.9 s cold, the first lock of a boot pays the cold start), so `lcu setup`, `lcu browser ...`,
+  `lcu origins forget` and `lcu prune` take that much longer per lock than with 0.9.x. Two defects found on the way are
+  fixed in this release: the holder used the `New-Object` cmdlet, which made each start-up cost 22 to 34 s on the same
+  runner, and `release()` waited ten seconds for the holder to see its stdin close (now a release file the holder polls).
+  Not yet measured on real hardware; read-only commands take no lock.
 
 ## Output and diagnostics
 

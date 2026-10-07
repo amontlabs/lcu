@@ -161,10 +161,12 @@ test('app_server terminates a child that ignores EOF, and propagates body errors
 test('spawn failures read like Python Popen errors', (t) => {
   const dir = tempdir(t);
   // Python's message quotes repr(filename): on Windows the backslashes are doubled.
+  // CPython on Windows: CreateProcess errors carry no file name, and an unusable cwd is [WinError 267].
+  const win = process.platform === 'win32';
   assert.throws(() => app_server(`${dir}/missing`, dir, process.env, () => null),
-    { message: `[Errno 2] No such file or directory: ${reprStr(`${dir}/missing`)}` });
+    { message: win ? '[WinError 2] The system cannot find the file specified' : `[Errno 2] No such file or directory: ${reprStr(`${dir}/missing`)}` });
   assert.throws(() => app_server(process.execPath, `${dir}/nowhere`, process.env, () => null),
-    { message: `[Errno 2] No such file or directory: ${reprStr(`${dir}/nowhere`)}` });
+    { message: win ? '[WinError 267] The directory name is invalid' : `[Errno 2] No such file or directory: ${reprStr(`${dir}/nowhere`)}` });
   if (process.platform !== 'win32') { // a non-executable file: EACCES from execve (CreateProcess fails differently)
     writeFileSync(`${dir}/plain`, 'x');
     assert.throws(() => app_server(`${dir}/plain`, dir, process.env, () => null),
@@ -258,7 +260,8 @@ test('failed spawns retain no worker', async (t) => {
   try {
     for (let i = 0; i < 3; i++) {
       assert.throws(() => popen([`${dir}/missing-${i}`], { cwd: dir, env: process.env, stderrFd: 'ignore' }),
-        { message: `[Errno 2] No such file or directory: ${reprStr(`${dir}/missing-${i}`)}` });
+        { message: process.platform === 'win32' ? '[WinError 2] The system cannot find the file specified'
+          : `[Errno 2] No such file or directory: ${reprStr(`${dir}/missing-${i}`)}` });
     }
     await sleep(300);
     assert.equal(workers.size, 0);
