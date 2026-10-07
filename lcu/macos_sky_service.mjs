@@ -31,13 +31,26 @@ export const LIFETIME_SIGNAL_TIMEOUT_MS = 12_000;
 const CLI_CLEANUP_ATTEMPTS = 2;
 const TURN_ENDED_TIMEOUT_SECONDS = 15;
 const turnMetadata = new Map();
+// Turn-ended hooks run so far. A request that saw any turn end (Stop or Interrupt) after it
+// started is never retried, registered or sent after a stale service recovery.
+let turnsEnded = 0;
 
 function lifetimeSignal(runtime, session_id, turn_id) {
   const address = runtime.env.LCU_MAC_LIFETIME_SOCKET;
   if (!address || typeof runtime.nativePipe?.createConnection !== 'function') {
     throw Error('Original macOS native-pipe lifetime channel is unavailable');
   }
-  return runtime.nativePipe.createConnection(address).then(socket => new Promise((resolve, reject) => {
+  // Bound the connection itself too: a connection that never settles must not hold every
+  // later request behind this cleanup.
+  const connecting = Promise.resolve().then(() => runtime.nativePipe.createConnection(address));
+  let connectTimer;
+  const connectDeadline = new Promise((_, reject) => {
+    connectTimer = setTimeout(() => {
+      connecting.then(late => { try { late.end(); } catch {} }, () => {});
+      reject(Error('macOS native turn cleanup connection timed out'));
+    }, 4000);
+  });
+  return Promise.race([connecting, connectDeadline]).finally(() => clearTimeout(connectTimer)).then(socket => new Promise((resolve, reject) => {
     let data = Buffer.alloc(0);
     let finished = false;
     const timer = setTimeout(() => finish(Error('macOS native turn cleanup timed out')), LIFETIME_SIGNAL_TIMEOUT_MS);
@@ -67,13 +80,96 @@ function lifetimeSignal(runtime, session_id, turn_id) {
   }));
 }
 
+// The exact message of the original transport error; a longer message that merely contains
+// these words (a validation or approval error) is not a native pipe failure.
+const NATIVE_PIPE_FAILURE = 'Sky Computer Use native pipe startup failed';
+// Upper bound on what a failed request waits for the host's recovery attempt: the host
+// bounds its own checks and the service's exit to under this.
+const RECOVER_TIMEOUT_MS = 15_000;
+let recovering;
+
+// Ask the private host to recover from a stale Computer Use service. It stops one only
+// when it proves that service is stale, holds the connection and is ours to stop; it
+// answers `recovered: true` once that service has exited. Resolves to true only then.
+// Never rejects, and never waits longer than RECOVER_TIMEOUT_MS. Giving up closes the
+// connection, and the host signals nothing once it sees that.
+function askHostToRecover(runtime) {
+  const address = runtime?.env?.LCU_MAC_LIFETIME_SOCKET;
+  if (!address || typeof runtime.nativePipe?.createConnection !== 'function') {
+    return Promise.resolve(false);
+  }
+  // A shorter bound may be configured (tests); the wait never exceeds RECOVER_TIMEOUT_MS.
+  const configured = Number(runtime.env.LCU_MAC_RECOVER_TIMEOUT_MS);
+  const timeoutMs = configured > 0 ? Math.min(configured, RECOVER_TIMEOUT_MS) : RECOVER_TIMEOUT_MS;
+  return new Promise(resolve => {
+    let socket;
+    let finished = false;
+    let data = Buffer.alloc(0);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    function finish(recovered) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      try { socket?.end(); } catch {}
+      resolve(recovered === true);
+    }
+    Promise.resolve().then(() => runtime.nativePipe.createConnection(address)).then(connection => {
+      if (finished) {
+        try { connection.end(); } catch {}
+        return;
+      }
+      socket = connection;
+      socket.on('data', chunk => {
+        data = Buffer.concat([data, Buffer.from(chunk)]);
+        if (data.length > 65536) return finish(false);
+        const newline = data.indexOf(10);
+        if (newline < 0) return;
+        try {
+          const result = JSON.parse(data.subarray(0, newline).toString('utf8'));
+          finish(result?.ok === true && result.recovered === true);
+        } catch { finish(false); }
+      });
+      socket.on('error', () => finish(false));
+      socket.on('close', () => finish(false));
+      socket.write(Buffer.from(JSON.stringify({type: 'recover'}) + '\n'));
+    }).catch(() => finish(false));
+  });
+}
+
+// One recovery at a time: concurrent failures share it.
+function recoverOnce(runtime) {
+  recovering ??= askHostToRecover(runtime).finally(() => { recovering = undefined; });
+  return recovering;
+}
+
+// Run `attempt`. When it fails with a native pipe startup failure, the host recovered from a
+// provably stale service and `beforeRetry` still allows it, run it once more. In every other
+// case the original error is thrown unchanged, and a failure of the single retry (or of
+// `beforeRetry`) is that failure's own error.
+async function withStaleServiceRecovery(runtime, attempt, beforeRetry = async () => true) {
+  try {
+    return await attempt();
+  } catch (error) {
+    let recovered = false;
+    try {
+      recovered = typeof error?.message === 'string' && error.message === NATIVE_PIPE_FAILURE &&
+        await recoverOnce(runtime);
+    } catch {}
+    if (!recovered || !(await beforeRetry(error))) throw error;
+  }
+  return attempt();
+}
+
 function register() {
   if (registered) return;
   const runtime = globalThis.nodeRepl;
   if (typeof runtime?.addTurnEndedHandler !== 'function') {
     throw Error('Original node_repl turn-ended hook is unavailable');
   }
-  runtime.addTurnEndedHandler({timeoutMs: TURN_CLEANUP_HOOK_TIMEOUT_MS, run: async ({session_id, turn_id}) => {
+  runtime.addTurnEndedHandler({timeoutMs: TURN_CLEANUP_HOOK_TIMEOUT_MS, run: async event => {
+    // Counted first, so even a turn end rejected below blocks recovery retries.
+    turnsEnded++;
+    const {session_id, turn_id} = event ?? {};
     if (typeof session_id !== 'string' || !session_id.trim() ||
         typeof turn_id !== 'string' || !turn_id.trim()) {
       throw Error('Original node_repl turn IDs are missing');
@@ -298,6 +394,9 @@ function startControlChannel(runtime) {
 }
 
 const SLOW_CLEANUP_STEP_MS = 1_000;
+// A cleanup step that never settles (an original transport call stuck in LaunchServices)
+// must not hold every later request behind it. A lower bound may be configured (tests).
+const CLEANUP_STEP_HARD_TIMEOUT_MS = 20_000;
 
 // Report which cleanup step is slow so a host "turn-ended handlers timed out"
 // can be attributed to native IPC or the CLI helper. Only a step the hook waits
@@ -308,9 +407,15 @@ async function timedCleanupStep(step, run, {hookWaits = false} = {}) {
   const watchdog = hookWaits ? setTimeout(() => {
     console.error(`LCU macOS turn cleanup step "${step}" is still running after ${Date.now() - started} ms`);
   }, TURN_CLEANUP_HOOK_TIMEOUT_MS) : undefined;
+  let hardTimer;
+  const hardLimit = Number(globalThis.nodeRepl?.env?.LCU_MAC_CLEANUP_STEP_TIMEOUT_MS);
+  const hardMs = hardLimit > 0 ? Math.min(hardLimit, CLEANUP_STEP_HARD_TIMEOUT_MS) : CLEANUP_STEP_HARD_TIMEOUT_MS;
   try {
-    return await run();
+    return await Promise.race([run(), new Promise((_, reject) => {
+      hardTimer = setTimeout(() => reject(Error(`macOS turn cleanup step "${step}" timed out after ${hardMs} ms`)), hardMs);
+    })]);
   } finally {
+    clearTimeout(hardTimer);
     clearTimeout(watchdog);
     const ms = Date.now() - started;
     if (ms >= SLOW_CLEANUP_STEP_MS) {
@@ -404,26 +509,58 @@ async function gateOnCleanup() {
 
 export async function handleRpc(request) {
   register();
-  await gateOnCleanup();
-  original ??= import(pathToFileURL(globalThis.nodeRepl.env.LCU_MAC_SKY_SERVICE_PATH).href);
   const runtime = globalThis.nodeRepl;
-  const metadata = readTurnMetadata(runtime);
-  if (metadata) {
-    const key = JSON.stringify([metadata.session_id, metadata.turn_id]);
-    if (!turnMetadata.has(key) && turnMetadata.size >= TURN_METADATA_LIMIT) {
-      throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
+  // After a recovery, the request is retried, registered and sent only while no turn has
+  // ended since it started; otherwise the error that led to the recovery is returned.
+  const startedAt = turnsEnded;
+  const turnsActive = () => turnsEnded === startedAt;
+  const state = {recoveryError: undefined, resent: false};
+  const retryIfActive = async error => {
+    // Each recovery restarts "nothing sent since": only a send after it sets `resent` again.
+    state.recoveryError = error;
+    state.resent = false;
+    return turnsActive();
+  };
+  try {
+    // Retried turn cleanup talks to the same native pipe and fails the same way.
+    await withStaleServiceRecovery(runtime, gateOnCleanup, retryIfActive);
+    original ??= import(pathToFileURL(runtime.env.LCU_MAC_SKY_SERVICE_PATH).href);
+    // Registration is as before, except that nothing is registered after a recovery that a
+    // turn end followed.
+    const blocked = () => Boolean(state.recoveryError) && !turnsActive();
+    const metadata = blocked() ? undefined : readTurnMetadata(runtime);
+    if (metadata) {
+      const key = JSON.stringify([metadata.session_id, metadata.turn_id]);
+      if (!turnMetadata.has(key) && turnMetadata.size >= TURN_METADATA_LIMIT) {
+        throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
+      }
+      turnMetadata.set(key, metadata);
     }
-    turnMetadata.set(key, metadata);
-  }
-  const context = controlContext(runtime, request);
-  const controlReady = await startControlChannel(runtime);
-  if (context && controlReady) {
-    const token = JSON.stringify([context.session_id, context.turn_id, context.app]);
-    if (context.app && (activeContexts.has(token) || activeContexts.size < 128)) {
-      activeContexts.set(token, context);
-      writeControl({type: 'context', token, session_id: context.session_id,
-        turn_id: context.turn_id, app: context.app});
+    const context = blocked() ? undefined : controlContext(runtime, request);
+    const controlReady = await startControlChannel(runtime);
+    if (context && controlReady && !blocked()) {
+      const token = JSON.stringify([context.session_id, context.turn_id, context.app]);
+      if (context.app && (activeContexts.has(token) || activeContexts.size < 128)) {
+        activeContexts.set(token, context);
+        writeControl({type: 'context', token, session_id: context.session_id,
+          turn_id: context.turn_id, app: context.app});
+      }
     }
+    const service = await original;
+    // Checked with no wait before the dispatch below.
+    if (blocked()) throw state.recoveryError;
+    // The retry, like any request, first waits for pending turn cleanup.
+    return await withStaleServiceRecovery(runtime, () => {
+      if (state.recoveryError) state.resent = true;
+      return service.handleRpc(request);
+    }, async error => {
+      if (!(await retryIfActive(error))) return false;
+      await gateOnCleanup();
+      return turnsActive();
+    });
+  } catch (error) {
+    // A turn end after a recovery, with nothing sent since, returns the error that led to the
+    // recovery whatever failed later; a retry that was sent fails with its own error.
+    throw state.recoveryError && !turnsActive() && !state.resent ? state.recoveryError : error;
   }
-  return (await original).handleRpc(request);
 }
