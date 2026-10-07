@@ -509,6 +509,21 @@ def main(root, argv):
         client = _configure_macos_lifecycle(root, runtime, env)
         if client is not None:
             from .macos_host import start_original_host, stop_original_host
+            from .platforms import MAC_SOCKET_ENV, mac_socket_path
+            socket_path, _ = mac_socket_path(env)
+            # Any override, even an empty one, means the client may not use the default socket.
+            overridden = MAC_SOCKET_ENV in env
+            # Always decided here, never inherited: only the default location is known, and the
+            # original client builds its socket path from $HOME (Node's os.homedir), so an
+            # account whose HOME is elsewhere is talking to a different socket.
+            import pwd
+            account_home = pwd.getpwuid(os.getuid()).pw_dir
+            # An unset HOME makes Node fall back to the account home; an empty one gives ''.
+            client_home = env['HOME'] if 'HOME' in env else account_home
+            if overridden or not client_home or os.path.realpath(client_home) != os.path.realpath(account_home):
+                env.pop('LCU_MAC_SERVICE_LOCK', None)
+            else:
+                env['LCU_MAC_SERVICE_LOCK'] = socket_path + '.lock'
             host, temporary, address = start_original_host(
                 python=Path(sys.executable), client=client, entry=root / 'lcu/macos_host.py', env=env,
                 control_address=env.get('LCU_MAC_CONTROL_SOCKET'))

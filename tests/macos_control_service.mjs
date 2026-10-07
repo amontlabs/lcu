@@ -24,6 +24,12 @@ let failTurnEndedOnce = false;
 const pending = new Map();
 const observedContexts = [];
 const lifetimeMessages = [];
+const recoverRequests = [];
+const recoverClosed = [];
+let recoverReply;
+let recoverDelayMs = 0;
+// When set, the recover reply waits for this promise.
+let recoverHold;
 let lifetimeReplies = 0;
 // Decides how the private lifetime host answers: {notified, error?, hold?}, where
 // hold is a promise the reply waits for.
@@ -31,6 +37,14 @@ let lifetimeBehavior = () => ({notified: true});
 
 await writeFile(servicePath, `export async function handleRpc(request) {
   globalThis.originalRpcCount = (globalThis.originalRpcCount || 0) + 1;
+  if (request.failUntilRecovered && !globalThis.hostRecovered) {
+    throw new Error('Sky Computer Use native pipe startup failed');
+  }
+  if (request.fail) {
+    const error = Object.assign(new Error(request.fail), {code: -10001, errorName: 'fixtureFailure'});
+    globalThis.lastThrown = request.freeze ? Object.freeze(error) : error;
+    throw globalThis.lastThrown;
+  }
   if (request.wait) return new Promise(resolve => { globalThis.completeAction = resolve; });
   return {ok: true};
 }\n`);
@@ -55,6 +69,10 @@ await writeFile(clientPath, `export class MacComputerUseClient {
       timeoutSeconds: options.timeoutSeconds});
     if (requestType === 'ComputerUseIPCCodexTurnEndedRequest' && globalThis.turnEndedGate) {
       await globalThis.turnEndedGate;
+    }
+    if (requestType === 'ComputerUseIPCCodexTurnEndedRequest' && globalThis.failTurnEndedCount > 0) {
+      globalThis.failTurnEndedCount--;
+      throw new Error(globalThis.failTurnEndedMessage);
     }
     if (requestType === 'ComputerUseIPCCodexTurnEndedRequest' && globalThis.failTurnEndedOnce) {
       globalThis.failTurnEndedOnce = false;
@@ -103,6 +121,18 @@ const controlServer = createServer(socket => consumeLines(socket, message => {
   serviceSocket?.write(`${JSON.stringify(message)}\n`);
 }));
 const lifetimeServer = createServer(socket => consumeLines(socket, message => {
+  if (message.type === 'recover') {
+    recoverRequests.push(message);
+    socket.once('end', () => recoverClosed.push(message));
+    // undefined: never answer, as a host stuck behind other work would.
+    if (recoverReply === undefined) return;
+    Promise.resolve(recoverHold).then(() => setTimeout(() => {
+      // The host reports `recovered` only after the stale service has exited.
+      try { if (JSON.parse(recoverReply).recovered === true) globalThis.hostRecovered = true; } catch {}
+      socket.end(`${recoverReply}\n`);
+    }, recoverDelayMs));
+    return;
+  }
   lifetimeMessages.push(message);
   const {hold, ...reply} = lifetimeBehavior(message);
   Promise.resolve(hold).then(() => {
@@ -148,6 +178,7 @@ try {
   globalThis.calls = calls;
   globalThis.policyCalls = policyCalls;
   globalThis.failTurnEndedOnce = false;
+  globalThis.failTurnEndedCount = 0;
   globalThis.originalRpcCount = 0;
   globalThis.nodeRepl = {
     env: {LCU_MAC_CONTROL_SOCKET: controlPath,
@@ -435,6 +466,421 @@ try {
   assert.deepEqual(noControlEnded.payload, {threadID: noControlMetadata.session_id,
     turnID: noControlMetadata.turn_id});
   assert.deepEqual(noControlEnded.metadata, noControlMetadata);
+
+  // A native pipe startup failure asks the private host to recover from a provably stale
+  // service. Only when the host reports that it stopped one is the request retried, once.
+  globalThis.nodeRepl.requestMeta = {};
+  const startupFailure = 'Sky Computer Use native pipe startup failed';
+  const recovered = JSON.stringify({ok: true, recovered: true, pid: 321, path: '/fixture', elapsed_ms: 120});
+  const notRecovered = JSON.stringify({ok: true, recovered: false, reason: 'no stale service'});
+  const rpc = extra => handleRpc({type: 'execute', method: 'list_apps', args: [], ...extra});
+  const failure = extra => rpc(extra).then(() => assert.fail('the original error must be thrown'), error => error);
+  const countOriginal = () => globalThis.originalRpcCount;
+  const reset = () => { globalThis.hostRecovered = false; recoverDelayMs = 0; };
+
+  // Recovered: one recovery request, one retry, and the retry's result is returned.
+  reset();
+  recoverReply = recovered;
+  let rpcBefore = countOriginal();
+  assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
+  assert.equal(recoverRequests.length, 1);
+  assert.equal(recoverRequests[0].type, 'recover');
+  // No wall-clock deadline crosses processes: the host signals only while this connection
+  // is still open, and the client closes it when it gives up.
+  assert.deepEqual(recoverRequests[0], {type: 'recover'});
+  assert.equal(countOriginal(), rpcBefore + 2, 'the request runs once, fails, and is retried exactly once');
+
+  // The retry is the last attempt: a persisting failure is thrown after exactly one retry
+  // and one recovery, with the retry's own error object.
+  reset();
+  rpcBefore = countOriginal();
+  let recoveriesBefore = recoverRequests.length;
+  const persisting = await failure({fail: startupFailure});
+  assert.equal(persisting.message, startupFailure);
+  assert.equal(persisting.code, -10001);
+  assert.equal(countOriginal(), rpcBefore + 2);
+  assert.equal(recoverRequests.length, recoveriesBefore + 1);
+
+  // Not recovered (healthy service, failed or inconclusive check): no retry, the original
+  // error object comes back unchanged.
+  for (const reply of [
+    notRecovered,
+    JSON.stringify({ok: true, recovered: 'yes'}),
+    JSON.stringify({ok: false, error: 'ps exited with status 1.'}),
+    JSON.stringify({recovered: true}),
+    '{not json',
+    '[]',
+  ]) {
+    reset();
+    recoverReply = reply;
+    rpcBefore = countOriginal();
+    recoveriesBefore = recoverRequests.length;
+    const error = await failure({fail: startupFailure});
+    assert.equal(error, globalThis.lastThrown, 'the very same error object');
+    assert.equal(error.message, startupFailure, reply);
+    assert.equal(error.errorName, 'fixtureFailure');
+    assert.equal(countOriginal(), rpcBefore + 1, `no retry for ${reply}`);
+    assert.equal(recoverRequests.length, recoveriesBefore + 1);
+  }
+
+  // Messages that only contain the words (a validation or approval error) are not a native
+  // pipe startup failure and never reach the host.
+  reset();
+  recoverReply = recovered;
+  recoveriesBefore = recoverRequests.length;
+  for (const message of [`Sky runtime method is not available: ${startupFailure}`, `${startupFailure}: more`,
+    'Sky Computer Use service startup request failed', startupFailure.toLowerCase()]) {
+    assert.equal((await failure({fail: message})).message, message);
+  }
+  assert.equal(recoverRequests.length, recoveriesBefore);
+
+  // Other failures never ask the host to do anything.
+  reset();
+  recoverReply = recovered;
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  assert.equal((await failure({fail: 'Sky Computer Use request failed'})).message, 'Sky Computer Use request failed');
+  assert.equal(recoverRequests.length, recoveriesBefore);
+  assert.equal(countOriginal(), rpcBefore + 1);
+
+  // Concurrent failures share one recovery, and each is retried once.
+  reset();
+  let releaseRecovery;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const concurrent = Promise.all([1, 2, 3].map(() => rpc({failUntilRecovered: true})));
+  // The host answers only once all three have failed, so all three join the one recovery.
+  await waitFor(() => countOriginal() === rpcBefore + 3, 'the three requests did not all fail first');
+  releaseRecovery();
+  const results = await concurrent;
+  recoverHold = undefined;
+  assert.deepEqual(results, [{ok: true}, {ok: true}, {ok: true}]);
+  assert.equal(recoverRequests.length, recoveriesBefore + 1, 'concurrent requests share one recovery');
+  assert.equal(countOriginal(), rpcBefore + 6);
+
+  // A turn that ends (Stop or Interrupt) while its request waits for the recovery is not
+  // acted on afterwards: the original error comes back and the request is not sent again.
+  reset();
+  const endedMetadata = {session_id: 'ended-session', turn_id: 'ended-turn', call_id: 'ended-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': endedMetadata};
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  rpcBefore = countOriginal();
+  const endedRequest = failure({failUntilRecovered: true});
+  await waitFor(() => countOriginal() === rpcBefore + 1, 'the request did not fail first');
+  await turnEnded.run({session_id: endedMetadata.session_id, turn_id: endedMetadata.turn_id});
+  // However many other turns end meanwhile, this request's turn stays ended.
+  for (let index = 0; index < 1100; index++) {
+    await turnEnded.run({session_id: 'other-session', turn_id: `other-turn-${index}`});
+  }
+  releaseRecovery();
+  assert.equal((await endedRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore + 1, 'nothing is sent for a turn that has ended');
+  globalThis.nodeRepl.requestMeta = {};
+  // The same holds when the failure and recovery happen in the turn-cleanup gate before the
+  // request: the ended turn is not dispatched and not registered again.
+  reset();
+  const priorMetadata = {session_id: 'prior-session', turn_id: 'prior-turn', call_id: 'prior-call'};
+  const gateMetadata = {session_id: 'gate-session', turn_id: 'gate-turn', call_id: 'gate-call'};
+  for (const metadata of [priorMetadata, gateMetadata]) {
+    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': metadata};
+    assert.deepEqual(await rpc(), {ok: true});
+  }
+  globalThis.failTurnEndedMessage = startupFailure;
+  globalThis.failTurnEndedCount = 2;  // the prior turn's hook, then the gate's attempt
+  await assert.rejects(turnEnded.run({session_id: priorMetadata.session_id, turn_id: priorMetadata.turn_id}));
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const gatedRequest = failure();
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the cleanup gate did not ask for recovery');
+  await turnEnded.run({session_id: gateMetadata.session_id, turn_id: gateMetadata.turn_id});
+  releaseRecovery();
+  assert.equal((await gatedRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore, 'nothing is sent for a turn that ended during the cleanup gate');
+  globalThis.failTurnEndedMessage = undefined;
+  globalThis.failTurnEndedCount = 0;
+  // A request that starts after its turn ended is sent as before; its first attempt never
+  // reached the service, so its single retry after a recovery is its only delivery.
+  reset();
+  recoverReply = recovered;
+  rpcBefore = countOriginal();
+  assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
+  assert.equal(countOriginal(), rpcBefore + 2);
+  // That request was registered as before; its turn ends again.
+  await turnEnded.run({session_id: gateMetadata.session_id, turn_id: gateMetadata.turn_id});
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true}, 'the pending cleanup completes and later requests proceed');
+
+  // And when the turn ends while the retried cleanup gate is still running.
+  reset();
+  const heldPrior = {session_id: 'held-prior-session', turn_id: 'held-prior-turn', call_id: 'held-prior-call'};
+  const heldTurn = {session_id: 'held-session', turn_id: 'held-turn', call_id: 'held-call'};
+  for (const metadata of [heldPrior, heldTurn]) {
+    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': metadata};
+    assert.deepEqual(await rpc(), {ok: true});
+  }
+  globalThis.failTurnEndedMessage = startupFailure;
+  globalThis.failTurnEndedCount = 2;  // the prior turn's hook, then the gate's first attempt
+  await assert.rejects(turnEnded.run({session_id: heldPrior.session_id, turn_id: heldPrior.turn_id}));
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const heldRequest = failure();
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the cleanup gate did not ask for recovery');
+  // Hold the retried gate's native turn-ended, then let the recovery answer.
+  let releaseGate;
+  globalThis.turnEndedGate = new Promise(resolve => { releaseGate = resolve; });
+  const heldNativeCount = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest').length;
+  const heldNativeBefore = heldNativeCount();
+  releaseRecovery();
+  await waitFor(() => heldNativeCount() > heldNativeBefore, 'the retried gate did not start');
+  // The turn ends while that retried gate is running.
+  const heldEnded = turnEnded.run({session_id: heldTurn.session_id, turn_id: heldTurn.turn_id});
+  globalThis.turnEndedGate = undefined;
+  releaseGate();
+  await heldEnded;
+  assert.equal((await heldRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore, 'nothing is sent for a turn that ended during the retried gate');
+  globalThis.failTurnEndedMessage = undefined;
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true});
+
+  // If that retried gate then fails, the error that led to the recovery still comes back.
+  reset();
+  const failPrior = {session_id: 'fail-prior-session', turn_id: 'fail-prior-turn', call_id: 'fail-prior-call'};
+  const failTurn = {session_id: 'fail-session', turn_id: 'fail-turn', call_id: 'fail-call'};
+  for (const metadata of [failPrior, failTurn]) {
+    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': metadata};
+    assert.deepEqual(await rpc(), {ok: true});
+  }
+  globalThis.failTurnEndedMessage = startupFailure;
+  globalThis.failTurnEndedCount = 2;
+  await assert.rejects(turnEnded.run({session_id: failPrior.session_id, turn_id: failPrior.turn_id}));
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const failRequest = failure();
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the cleanup gate did not ask for recovery');
+  let releaseFailGate;
+  globalThis.turnEndedGate = new Promise(resolve => { releaseFailGate = resolve; });
+  const failNativeCount = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest').length;
+  const failNativeBefore = failNativeCount();
+  releaseRecovery();
+  await waitFor(() => failNativeCount() > failNativeBefore, 'the retried gate did not start');
+  const failEnded = turnEnded.run({session_id: failTurn.session_id, turn_id: failTurn.turn_id}).catch(() => {});
+  // Every held and later native turn-ended now fails with another error.
+  globalThis.failTurnEndedMessage = 'Some other native failure';
+  globalThis.failTurnEndedCount = 10;
+  globalThis.turnEndedGate = undefined;
+  releaseFailGate();
+  await failEnded;
+  const failError = await failRequest;
+  assert.equal(failError.message, startupFailure, 'the error that led to the recovery, not the gate\'s');
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore);
+  globalThis.failTurnEndedMessage = undefined;
+  globalThis.failTurnEndedCount = 0;
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true});
+
+  // A turn ID can be used again after its turn-ended (a harness that continues the same
+  // prompt): without a recovery its later requests are registered as before, so the next
+  // turn-ended still reaches the native service.
+  reset();
+  const reusedTurn = {session_id: 'reused-session', turn_id: 'reused-turn', call_id: 'reused-call'};
+  const reusedEnded = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest' &&
+    call.payload?.turnID === reusedTurn.turn_id).length;
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': reusedTurn};
+  assert.deepEqual(await rpc(), {ok: true});
+  await turnEnded.run({session_id: reusedTurn.session_id, turn_id: reusedTurn.turn_id});
+  assert.equal(reusedEnded(), 1);
+  assert.deepEqual(await rpc(), {ok: true});
+  await turnEnded.run({session_id: reusedTurn.session_id, turn_id: reusedTurn.turn_id});
+  assert.equal(reusedEnded(), 2, 'the second turn-ended of a reused turn reaches the native service');
+  globalThis.nodeRepl.requestMeta = {};
+
+  // Without a recovery, registration is as on main: the turn is read after the cleanup gate,
+  // so a request that waited while its turn ended and the next turn began registers the next.
+  reset();
+  const parityPrior = {session_id: 'parity-prior-session', turn_id: 'parity-prior-turn', call_id: 'parity-prior-call'};
+  const parityOld = {session_id: 'parity-old-session', turn_id: 'parity-old-turn', call_id: 'parity-old-call'};
+  const parityNew = {session_id: 'parity-new-session', turn_id: 'parity-new-turn', call_id: 'parity-new-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': parityPrior};
+  assert.deepEqual(await rpc(), {ok: true});
+  let releaseParity;
+  globalThis.turnEndedGate = new Promise(resolve => { releaseParity = resolve; });
+  const parityPriorEnded = turnEnded.run({session_id: parityPrior.session_id, turn_id: parityPrior.turn_id});
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': parityOld};
+  const parityRequest = rpc();
+  await turnEnded.run({session_id: parityOld.session_id, turn_id: parityOld.turn_id}).catch(() => {});
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': parityNew};
+  globalThis.turnEndedGate = undefined;
+  releaseParity();
+  await parityPriorEnded;
+  assert.deepEqual(await parityRequest, {ok: true});
+  const parityNewEnded = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest' &&
+    call.payload?.turnID === parityNew.turn_id).length;
+  await turnEnded.run({session_id: parityNew.session_id, turn_id: parityNew.turn_id});
+  assert.equal(parityNewEnded(), 1, 'the request registered the turn current after the gate, as on main');
+  globalThis.nodeRepl.requestMeta = {};
+
+  // A request whose turn ended while it waited in the gate (no recovery) is registered as on
+  // main; a later request then recovers and is retried once like any other.
+  reset();
+  const racePrior = {session_id: 'race-prior-session', turn_id: 'race-prior-turn', call_id: 'race-prior-call'};
+  const raceTurn = {session_id: 'race-session', turn_id: 'race-turn', call_id: 'race-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': racePrior};
+  assert.deepEqual(await rpc(), {ok: true});
+  let releaseRace;
+  globalThis.turnEndedGate = new Promise(resolve => { releaseRace = resolve; });
+  const racePriorEnded = turnEnded.run({session_id: racePrior.session_id, turn_id: racePrior.turn_id});
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': raceTurn};
+  const raceRequest = rpc();
+  await turnEnded.run({session_id: raceTurn.session_id, turn_id: raceTurn.turn_id}).catch(() => {});
+  globalThis.turnEndedGate = undefined;
+  releaseRace();
+  await racePriorEnded;
+  assert.deepEqual(await raceRequest, {ok: true});
+  recoverReply = recovered;
+  rpcBefore = countOriginal();
+  assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
+  assert.equal(countOriginal(), rpcBefore + 2, 'a later request is retried once, as any request');
+  await turnEnded.run({session_id: raceTurn.session_id, turn_id: raceTurn.turn_id});
+  globalThis.nodeRepl.requestMeta = {};
+
+  // A turn end the hook rejects (missing IDs) still counts as a turn end: no retry follows.
+  reset();
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const missingRequest = failure({failUntilRecovered: true});
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the request did not ask for recovery');
+  await assert.rejects(turnEnded.run({session_id: '', turn_id: ''}));
+  releaseRecovery();
+  assert.equal((await missingRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore + 1, 'nothing is sent again after any turn end');
+  // Nor does a turn end with no event object at all.
+  reset();
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const noEventRequest = failure({failUntilRecovered: true});
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the request did not ask for recovery');
+  await assert.rejects(turnEnded.run(undefined));
+  releaseRecovery();
+  assert.equal((await noEventRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore + 1);
+
+  // A turn that is still active is retried, after the pending turn cleanup.
+  reset();
+  const activeMetadata = {session_id: 'active-session', turn_id: 'active-turn', call_id: 'active-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': activeMetadata};
+  rpcBefore = countOriginal();
+  assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
+  assert.equal(countOriginal(), rpcBefore + 2);
+  await turnEnded.run({session_id: activeMetadata.session_id, turn_id: activeMetadata.turn_id});
+  globalThis.nodeRepl.requestMeta = {};
+
+  // An unreachable host, or none configured, leaves the original error, immediately.
+  reset();
+  recoverDelayMs = 0;
+  const lifetimeAddress = globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET;
+  for (const address of [join(root, 'missing.sock'), undefined]) {
+    globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET = address;
+    rpcBefore = countOriginal();
+    assert.equal((await failure({fail: startupFailure})).message, startupFailure);
+    assert.equal(countOriginal(), rpcBefore + 1);
+  }
+  globalThis.nodeRepl.env.LCU_MAC_LIFETIME_SOCKET = lifetimeAddress;
+
+  // A host that never answers delays the original error by a bounded time only, and the
+  // configured bound can only lower the default.
+  recoverReply = undefined;
+  globalThis.nodeRepl.env.LCU_MAC_RECOVER_TIMEOUT_MS = '400';
+  rpcBefore = countOriginal();
+  const hangStarted = Date.now();
+  assert.equal((await failure({fail: startupFailure})).message, startupFailure);
+  const hangMs = Date.now() - hangStarted;
+  assert.ok(hangMs >= 350 && hangMs < 2_000, `recovery wait was ${hangMs} ms`);
+  assert.equal(countOriginal(), rpcBefore + 1);
+  // Giving up closes the connection, which is what tells the host to signal nothing.
+  await waitFor(() => recoverClosed.length === recoverRequests.length, 'the client closes a recovery it gave up on');
+  globalThis.nodeRepl.env.LCU_MAC_RECOVER_TIMEOUT_MS = undefined;
+
+  // A frozen error object is still thrown unchanged when nothing was recovered.
+  reset();
+  recoverReply = notRecovered;
+  assert.equal((await failure({fail: startupFailure, freeze: true})).message, startupFailure);
+
+  // A lifetime connection that never settles cannot hold later requests behind its cleanup.
+  const hangMetadata = {session_id: 'hang-session', turn_id: 'hang-turn', call_id: 'hang-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': hangMetadata};
+  assert.deepEqual(await rpc(), {ok: true});
+  const realCreateConnection = globalThis.nodeRepl.nativePipe.createConnection;
+  globalThis.nodeRepl.nativePipe.createConnection = () => new Promise(() => {});
+  // The hook waits only for the native step; the command step behind it gives up on the
+  // connection, so the next request is not held behind it.
+  await turnEnded.run({session_id: hangMetadata.session_id, turn_id: hangMetadata.turn_id});
+  globalThis.nodeRepl.requestMeta = {};
+  const cleanupStarted = Date.now();
+  assert.deepEqual(await rpc(), {ok: true}, 'the request proceeds after the bounded connection attempt');
+  assert.ok(Date.now() - cleanupStarted < 12_000);
+  globalThis.nodeRepl.nativePipe.createConnection = realCreateConnection;
+
+  // A native cleanup step that never settles is abandoned after a hard bound, so the request
+  // behind it is not held forever; the cleanup is retried by the next request.
+  const stuckMetadata = {session_id: 'stuck-session', turn_id: 'stuck-turn', call_id: 'stuck-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': stuckMetadata};
+  assert.deepEqual(await rpc(), {ok: true});
+  globalThis.nodeRepl.env.LCU_MAC_CLEANUP_STEP_TIMEOUT_MS = '300';
+  globalThis.turnEndedGate = new Promise(() => {});
+  const stuckStarted = Date.now();
+  await assert.rejects(turnEnded.run({session_id: stuckMetadata.session_id, turn_id: stuckMetadata.turn_id}),
+    /timed out after 300 ms/);
+  assert.ok(Date.now() - stuckStarted < 3_000);
+  globalThis.turnEndedGate = undefined;
+  globalThis.nodeRepl.env.LCU_MAC_CLEANUP_STEP_TIMEOUT_MS = undefined;
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true}, 'the abandoned cleanup is retried and the request proceeds');
+
+  // Retried turn cleanup uses the same pipe and fails the same way: a recovery makes the
+  // cleanup retry and the request proceed; without one the original error is thrown.
+  const cleanupMetadata = {session_id: 'cleanup-session', turn_id: 'cleanup-turn', call_id: 'cleanup-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': cleanupMetadata};
+  assert.deepEqual(await rpc(), {ok: true});
+  globalThis.failTurnEndedMessage = startupFailure;
+  globalThis.failTurnEndedCount = 2;
+  await assert.rejects(turnEnded.run({session_id: cleanupMetadata.session_id,
+    turn_id: cleanupMetadata.turn_id}), error => error.message === startupFailure);
+  reset();
+  recoverReply = notRecovered;
+  recoveriesBefore = recoverRequests.length;
+  globalThis.nodeRepl.requestMeta = {};
+  await assert.rejects(rpc(), error => error.message === startupFailure);
+  assert.equal(globalThis.failTurnEndedCount, 0, 'the failing cleanup was retried before the request failed');
+  assert.equal(recoverRequests.length, recoveriesBefore + 1);
+  // The cleanup attempt fails once; the recovery lets its single retry through.
+  globalThis.failTurnEndedCount = 1;
+  recoverReply = recovered;
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  assert.deepEqual(await rpc(), {ok: true});
+  assert.equal(recoverRequests.length, recoveriesBefore + 1);
+  assert.equal(countOriginal(), rpcBefore + 1);
+  globalThis.failTurnEndedMessage = undefined;
+  globalThis.failTurnEndedCount = 0;
 
   const boundaryTurns = [];
   for (let index = 0; index < 127; index++) {
