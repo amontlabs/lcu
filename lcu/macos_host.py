@@ -84,9 +84,15 @@ def bundle_replaced_at(executable, stat=os.stat):
     when any of them is missing or unreadable the answer is None, not a guess.
     Starting the service does not change ctime.
     """
+    times = bundle_change_times(executable, stat)
+    return None if times is None else min(times)
+
+
+def bundle_change_times(executable, stat=os.stat):
+    """The change times of the executable, Info.plist and code-signature seal, or None."""
     try:
         contents = Path(executable).parents[1]
-        return min(stat(path).st_ctime for path in (
+        return tuple(stat(path).st_ctime for path in (
             executable, contents / 'Info.plist', contents / '_CodeSignature' / 'CodeResources'))
     except (OSError, IndexError):
         return None
@@ -111,9 +117,10 @@ def diagnose_sky_services(*, run=subprocess.run, stat=os.stat, pid=None):
     found, unparsed = parse_process_table(result.stdout)
     services = []
     for service in found:
-        replaced = bundle_replaced_at(service['path'], stat)
+        times = bundle_change_times(service['path'], stat)
+        replaced = None if times is None else min(times)
         services.append({
-            **service, 'bundle_replaced': replaced, 'bundle_missing': replaced is None,
+            **service, 'bundle_replaced': replaced, 'bundle_times': times, 'bundle_missing': replaced is None,
             'stale': replaced is not None and replaced > service['started'] + STALE_MARGIN_SECONDS})
     stale = sorted(service['pid'] for service in services if service['stale'])
     diagnosis = {'services': services, 'stale': stale, 'unparsed': unparsed}
@@ -295,8 +302,9 @@ class PeerLock:
         try:
             os.ftruncate(self.descriptor, 0)
             os.pwrite(self.descriptor, json.dumps(outcome).encode('utf-8'), 0)
+            return True
         except (OSError, TypeError, ValueError):
-            pass
+            return False
 
     def __exit__(self, *exc):
         if self.descriptor is not None:
@@ -353,7 +361,7 @@ class _NoPeerLock:
         return False
 
     def record(self, outcome):
-        pass
+        return True
 
 
 # A recovery recorded by another LCU host this recently, with no stale service left, means
@@ -401,7 +409,7 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
                     realpath(actual) == realpath(service['path']) and realpath(actual) in executables)
 
     def identity(service):
-        return (service['pid'], service['uid'], service['started'], service['path'], service['bundle_replaced'])
+        return (service['pid'], service['uid'], service['started'], service['path'], service['bundle_times'])
 
     def eligible(service):
         """Why this stale service must be left alone, or None."""
@@ -446,8 +454,8 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
                 return nothing('the stale service is not the only holder of the socket lock')
             if verify(pid) != 'invalid':
                 return nothing('the running service passes signature verification, or it could not be checked')
-            # The slow evidence again, then the process itself, last.
-            if holders(lock_path) != {pid} or verify(pid) != 'invalid':
+            # The slow evidence again (the lock last of it), then the process itself, last.
+            if verify(pid) != 'invalid' or holders(lock_path) != {pid}:
                 return nothing('the service changed while it was being checked')
             final = diagnose(pid=pid)
             if final.get('unparsed') or [identity(item) for item in final['services'] if item['stale']] != [
@@ -459,11 +467,14 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
                 return nothing('the checks took too long to act on')
             if signal_deadline is not None and wallclock() >= signal_deadline:
                 return nothing('the request stopped waiting for the recovery')
+            # Written down before the signal, so no host can signal this instance again even if
+            # this one stops before it records the result; no record, no signal.
+            if not peer.record({'recovered': False, 'pid': pid, 'started': service['started'], 'at': wallclock()}):
+                return nothing('the attempt could not be recorded')
             kill(pid, signal.SIGTERM)
             deadline = monotonic() + TERMINATE_WAIT_SECONDS
             while exists(pid):
                 if monotonic() >= deadline:
-                    peer.record({'recovered': False, 'pid': pid, 'started': service['started'], 'at': wallclock()})
                     return nothing(f'pid {pid} did not exit within {TERMINATE_WAIT_SECONDS} seconds of SIGTERM')
                 sleep(TERMINATE_POLL_SECONDS)
             peer.record({'recovered': True, 'pid': pid, 'started': service['started'], 'at': wallclock()})

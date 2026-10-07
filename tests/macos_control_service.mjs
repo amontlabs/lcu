@@ -530,6 +530,28 @@ try {
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true}, 'the abandoned cleanup is retried and the request proceeds');
 
+  // Turns that end while a cleanup runs are left for the next request: a steady stream of
+  // them cannot keep one request waiting for ever.
+  const turnA = {session_id: 'snap-a', turn_id: 'snap-a-turn', call_id: 'snap-a-call'};
+  const turnB = {session_id: 'snap-b', turn_id: 'snap-b-turn', call_id: 'snap-b-call'};
+  for (const turn of [turnA, turnB]) {
+    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': turn};
+    assert.deepEqual(await rpc(), {ok: true});
+  }
+  const nativeEndedCount = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest').length;
+  const nativeCountBefore = nativeEndedCount();
+  globalThis.turnEndedGate = new Promise(resolve => { globalThis.releaseTurnEnded = resolve; });
+  const hookA = turnEnded.run({session_id: turnA.session_id, turn_id: turnA.turn_id});
+  await waitFor(() => nativeEndedCount() === nativeCountBefore + 1, 'the first native cleanup did not start');
+  const hookB = turnEnded.run({session_id: turnB.session_id, turn_id: turnB.turn_id});
+  globalThis.releaseTurnEnded();
+  globalThis.turnEndedGate = undefined;
+  await Promise.all([hookA, hookB]);
+  assert.equal(nativeEndedCount(), nativeCountBefore + 1, 'the turn that ended during the cleanup waits for the next request');
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true});
+  assert.equal(nativeEndedCount(), nativeCountBefore + 2);
+
   // Retried turn cleanup uses the same pipe and fails the same way: a recovery makes the
   // cleanup retry and the request proceed; without one the original error is thrown.
   const cleanupMetadata = {session_id: 'cleanup-session', turn_id: 'cleanup-turn', call_id: 'cleanup-call'};

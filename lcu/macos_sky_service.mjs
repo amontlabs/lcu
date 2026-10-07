@@ -416,7 +416,9 @@ function finishPendingCleanup() {
   // native cleanup until its host acknowledges it and retry before more actions.
   if (!cleanupInFlight) {
     cleanupInFlight = (async () => {
-      for (const [key, item] of pendingCleanup) {
+      // A snapshot: turns that end while this runs are left for the next request, so a steady
+      // stream of them cannot keep one request waiting for ever.
+      for (const [key, item] of [...pendingCleanup]) {
         if (item.metadata && !item.nativeNotified) {
           await timedCleanupStep('native IPC turn-ended', async () => {
             // Include the first, cold import of the client in the step's timing.

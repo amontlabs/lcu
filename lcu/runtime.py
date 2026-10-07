@@ -511,8 +511,13 @@ def main(root, argv):
             from .macos_host import start_original_host, stop_original_host
             from .platforms import mac_socket_path
             socket_path, overridden = mac_socket_path(env)
-            # Always decided here, never inherited: only the default location is known.
-            if overridden:
+            # Always decided here, never inherited: only the default location is known, and the
+            # original client builds its socket path from $HOME (Node's os.homedir), so an
+            # account whose HOME is elsewhere is talking to a different socket.
+            import pwd
+            account_home = pwd.getpwuid(os.getuid()).pw_dir
+            client_home = env.get('HOME') or account_home
+            if overridden or os.path.realpath(client_home) != os.path.realpath(account_home):
                 env.pop('LCU_MAC_SERVICE_LOCK', None)
             else:
                 env['LCU_MAC_SERVICE_LOCK'] = socket_path + '.lock'

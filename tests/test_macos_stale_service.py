@@ -485,13 +485,15 @@ class RecoveryTests(unittest.TestCase):
             return False
 
         def record(self, outcome):
+            self.events.append('record')
             self.recorded.append(outcome)
+            return True
 
     def test_the_peer_lock_is_held_until_the_service_has_exited(self):
         world = FakeWorld(exits_after=3)
         peer = self.Peer(events=world.events)
         self.assertTrue(world.run(exclusive=lambda: peer)['recovered'])
-        self.assertEqual(world.events, ['enter', 'kill', 'poll', 'poll', 'poll', 'poll', 'exit'])
+        self.assertEqual(world.events, ['enter', 'record', 'kill', 'poll', 'poll', 'poll', 'poll', 'record', 'exit'])
 
     def test_a_refused_peer_lock_does_nothing(self):
         world = FakeWorld()
@@ -502,11 +504,13 @@ class RecoveryTests(unittest.TestCase):
         peer = self.Peer()
         world.run(exclusive=lambda: peer, wallclock=lambda: 1000.0)
         started = epoch(STALE_START)
-        self.assertEqual(peer.recorded, [{'recovered': True, 'pid': 4242, 'started': started, 'at': 1000.0}])
+        attempt = {'recovered': False, 'pid': 4242, 'started': started, 'at': 1000.0}
+        self.assertEqual(peer.recorded, [attempt, {**attempt, 'recovered': True}],
+                         'the attempt is recorded before the signal, the success after the exit')
         stuck = FakeWorld(exits_after=10 ** 9)
         peer = self.Peer()
         stuck.run(exclusive=lambda: peer, wallclock=lambda: 1000.0)
-        self.assertEqual(peer.recorded, [{'recovered': False, 'pid': 4242, 'started': started, 'at': 1000.0}])
+        self.assertEqual(peer.recorded, [attempt], 'a service that did not exit stays recorded as asked')
 
     def test_a_host_that_waited_retries_only_on_a_recent_recorded_recovery(self):
         def attempt(previous, waited=True, now=1010.0):
@@ -560,7 +564,7 @@ class RecoveryTests(unittest.TestCase):
         world.diagnose = lambda pid=None: (order.append('ps' if pid is None else 'ps-pid'), original_diagnose(pid))[1]
         world.kernel_path = lambda pid: (order.append('kernel'), world.kernel)[1]
         world.run()
-        self.assertEqual(order, ['ps', 'kernel', 'holders1', 'verify', 'holders2', 'verify', 'ps-pid', 'kernel'])
+        self.assertEqual(order, ['ps', 'kernel', 'holders1', 'verify', 'verify', 'holders2', 'ps-pid', 'kernel'])
 
     def test_a_healthy_service_that_took_over_the_pid_and_path_is_not_signaled(self):
         # P exits during the final slow checks and its pid goes to a service from the same bundle.
@@ -569,6 +573,30 @@ class RecoveryTests(unittest.TestCase):
             world.on_holders = lambda call, world=world, start=start: (
                 setattr(world, 'table', [world.line(4242, 501, start, EXECUTABLE)]) if call == 2 else None)
             self.assertNothingSignaled(world, world.run(), 'changed while')
+
+    def test_no_record_no_signal(self):
+        class Unwritable(self.Peer):
+            def record(self, outcome):
+                return False
+
+        world = FakeWorld()
+        self.assertNothingSignaled(world, world.run(exclusive=lambda: Unwritable()), 'could not be recorded')
+
+    def test_a_host_that_stops_mid_wait_still_leaves_the_attempt_on_record(self):
+        peer = self.Peer()
+        world = FakeWorld(exits_after=10 ** 9)
+
+        def host_stops(seconds):
+            raise SystemExit('the host process is going away')
+
+        with self.assertRaises(SystemExit):
+            world.run(exclusive=lambda: peer, sleep=host_stops)
+        self.assertEqual(len(world.kills), 1)
+        self.assertEqual([item['recovered'] for item in peer.recorded], [False])
+        # The next host sees that record and does not signal this instance again.
+        world = FakeWorld()
+        self.assertNothingSignaled(world, world.run(exclusive=lambda: self.Peer(True, False, peer.recorded[0]),
+                                                    wallclock=lambda: peer.recorded[0]['at'] + 5), 'already asked')
 
     def test_a_service_already_asked_to_quit_is_not_signaled_again(self):
         def peer(previous):
@@ -586,6 +614,20 @@ class RecoveryTests(unittest.TestCase):
         # three files new change times, so the service still looks stale but is not the same case.
         world = FakeWorld()
         world.after_check = lambda: setattr(world, 'stat', stat_with(whole_bundle(world.path, 'Wed Oct 7 00:30:00 2026')))
+        self.assertNothingSignaled(world, world.run(), 'changed while')
+
+    def test_restored_files_are_noticed_even_when_the_oldest_change_time_is_untouched(self):
+        world = FakeWorld()
+        base = whole_bundle(world.path, REPLACED)
+        plist = str(Path(world.path).parents[1] / 'Info.plist')
+
+        def restore():
+            changed = dict(base)
+            changed[world.path] = 'Wed Oct 7 00:25:00 2026'
+            changed[plist] = 'Wed Oct 7 00:26:00 2026'
+            world.stat = stat_with(changed)  # the seal keeps the oldest time
+
+        world.after_check = restore
         self.assertNothingSignaled(world, world.run(), 'changed while')
 
     def test_nothing_is_signaled_after_the_requesters_deadline(self):
