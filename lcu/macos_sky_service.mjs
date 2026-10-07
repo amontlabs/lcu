@@ -31,6 +31,10 @@ export const LIFETIME_SIGNAL_TIMEOUT_MS = 12_000;
 const CLI_CLEANUP_ATTEMPTS = 2;
 const TURN_ENDED_TIMEOUT_SECONDS = 15;
 const turnMetadata = new Map();
+// Turns whose turn-ended hook has run, newest last and bounded, so a request held up by a
+// stale service recovery is never retried, re-registered or sent for a turn that ended.
+const endedTurns = new Set();
+const ENDED_TURNS_LIMIT = 1024;
 
 function lifetimeSignal(runtime, session_id, turn_id) {
   const address = runtime.env.LCU_MAC_LIFETIME_SOCKET;
@@ -170,6 +174,9 @@ function register() {
     }
     endControlTurn(session_id, turn_id);
     const key = JSON.stringify([session_id, turn_id]);
+    endedTurns.delete(key);
+    endedTurns.add(key);
+    if (endedTurns.size > ENDED_TURNS_LIMIT) endedTurns.delete(endedTurns.values().next().value);
     const item = pendingCleanup.get(key) ?? {
       key, session_id, turn_id,
       metadata: turnMetadata.get(key),
@@ -503,13 +510,17 @@ async function gateOnCleanup() {
 
 export async function handleRpc(request) {
   register();
-  // Retried turn cleanup talks to the same native pipe and fails the same way.
-  await withStaleServiceRecovery(globalThis.nodeRepl, gateOnCleanup);
-  original ??= import(pathToFileURL(globalThis.nodeRepl.env.LCU_MAC_SKY_SERVICE_PATH).href);
   const runtime = globalThis.nodeRepl;
+  // Read before any wait, so it is this request's turn.
   const metadata = readTurnMetadata(runtime);
   const turnKey = metadata && JSON.stringify([metadata.session_id, metadata.turn_id]);
-  if (metadata) {
+  // A recovery retry is only for a turn that has not ended (Stop or Interrupt) meanwhile.
+  const turnActive = () => !turnKey || !endedTurns.has(turnKey);
+  // Retried turn cleanup talks to the same native pipe and fails the same way.
+  await withStaleServiceRecovery(runtime, gateOnCleanup, async () => turnActive());
+  original ??= import(pathToFileURL(runtime.env.LCU_MAC_SKY_SERVICE_PATH).href);
+  // An ended turn is not registered again: its turn-ended hook will not run a second time.
+  if (metadata && turnActive()) {
     const key = turnKey;
     if (!turnMetadata.has(key) && turnMetadata.size >= TURN_METADATA_LIMIT) {
       throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
@@ -518,7 +529,7 @@ export async function handleRpc(request) {
   }
   const context = controlContext(runtime, request);
   const controlReady = await startControlChannel(runtime);
-  if (context && controlReady) {
+  if (context && controlReady && turnActive()) {
     const token = JSON.stringify([context.session_id, context.turn_id, context.app]);
     if (context.app && (activeContexts.has(token) || activeContexts.size < 128)) {
       activeContexts.set(token, context);
@@ -527,9 +538,7 @@ export async function handleRpc(request) {
     }
   }
   const service = await original;
-  // A turn that ended (Stop or Interrupt) during the recovery is not acted on afterwards, and
-  // the retry, like any request, first waits for pending turn cleanup.
-  const turnActive = () => !turnKey || turnMetadata.has(turnKey);
+  // The retry, like any request, first waits for pending turn cleanup.
   return withStaleServiceRecovery(runtime, () => service.handleRpc(request), async () => {
     if (!turnActive()) return false;
     await gateOnCleanup();

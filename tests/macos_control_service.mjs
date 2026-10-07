@@ -575,6 +575,40 @@ try {
   recoverHold = undefined;
   assert.equal(countOriginal(), rpcBefore + 1, 'nothing is sent for a turn that has ended');
   globalThis.nodeRepl.requestMeta = {};
+  // The same holds when the failure and recovery happen in the turn-cleanup gate before the
+  // request: the ended turn is not dispatched and not registered again.
+  reset();
+  const priorMetadata = {session_id: 'prior-session', turn_id: 'prior-turn', call_id: 'prior-call'};
+  const gateMetadata = {session_id: 'gate-session', turn_id: 'gate-turn', call_id: 'gate-call'};
+  for (const metadata of [priorMetadata, gateMetadata]) {
+    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': metadata};
+    assert.deepEqual(await rpc(), {ok: true});
+  }
+  globalThis.failTurnEndedMessage = startupFailure;
+  globalThis.failTurnEndedCount = 2;  // the prior turn's hook, then the gate's attempt
+  await assert.rejects(turnEnded.run({session_id: priorMetadata.session_id, turn_id: priorMetadata.turn_id}));
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const gatedRequest = failure();
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the cleanup gate did not ask for recovery');
+  await turnEnded.run({session_id: gateMetadata.session_id, turn_id: gateMetadata.turn_id});
+  releaseRecovery();
+  assert.equal((await gatedRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore, 'nothing is sent for a turn that ended during the cleanup gate');
+  globalThis.failTurnEndedMessage = undefined;
+  globalThis.failTurnEndedCount = 0;
+  // A later request of that ended turn is not retried after a recovery either.
+  reset();
+  recoverReply = recovered;
+  rpcBefore = countOriginal();
+  assert.equal((await failure({failUntilRecovered: true})).message, startupFailure);
+  assert.equal(countOriginal(), rpcBefore + 1);
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true}, 'the pending cleanup completes and later requests proceed');
+
   // A turn that is still active is retried, after the pending turn cleanup.
   reset();
   const activeMetadata = {session_id: 'active-session', turn_id: 'active-turn', call_id: 'active-call'};
