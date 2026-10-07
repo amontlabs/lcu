@@ -6,12 +6,15 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach } from 'node:test';
 
 import { internals, MAC_HELPER, MAC_REQUIRED_FILES, resolve_installed_linux_app, resolve_installed_mac_app } from '../../lcu/platforms.mjs';
 import { ValueError } from '../../lcu/compat/pyjson.mjs';
 import { ExpatError } from '../../lcu/compat/plist.mjs';
 import { run } from '../../lcu/compat/subprocess.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('regressions of the macOS/Linux installed-app validation (lcu/platforms.mjs: plist, codesign, modes, dpkg); never runs on Windows');
 
 const VERSION = '26.924.22138';
 const saved = { ...internals };
@@ -124,7 +127,7 @@ describe('finding 3: codesign output is decoded strictly, like text=True', () =>
   });
 });
 
-describe('finding 10: stat errors other than "missing" propagate like Python 3.12 pathlib', { skip: process.getuid() === 0 && 'root ignores directory permissions' }, () => {
+describe('finding 10: stat errors other than "missing" propagate like Python 3.12 pathlib', { skip: process.getuid?.() === 0 && 'root ignores directory permissions' }, () => {
   it('a non-searchable runtime directory is a PermissionError, not "manifest is missing"', () => {
     const app = path.join(base, 'app');
     const runtime = path.join(app, 'resources/cua_node');

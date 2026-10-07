@@ -19,6 +19,7 @@ import * as update from '../../lcu/update.mjs';
 import * as apply from '../../lcu/update_apply.mjs';
 import * as compatHttp from '../../lcu/compat/http.mjs';
 import { own, send } from './process_guard.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const SAVED_UPDATE = { ...update._inject };
@@ -116,7 +117,7 @@ const until = async (predicate, ms = 15000) => {
 };
 const tree = (dir) => fs.readdirSync(dir, { recursive: true }).sort();
 
-test('R7: SIGINT during the download removes the partial archive and the temporary tree', async () => {
+test('R7: SIGINT during the download removes the partial archive and the temporary tree', { skip: skipOnWindows('delivers SIGINT to a detached child; Windows has no SIGINT delivery or KeyboardInterrupt (Ctrl-C is a console event)') }, async () => {
   const { release, temp } = installation();
   let sent = false;
   const port = await listen((req, res) => {
@@ -133,7 +134,7 @@ test('R7: SIGINT during the download removes the partial archive and the tempora
   assert.deepEqual(tree(temp), []);
 });
 
-test('R7: SIGINT during the installer ends it like subprocess.run and still removes the tree', async () => {
+test('R7: SIGINT during the installer ends it like subprocess.run and still removes the tree', { skip: skipOnWindows('delivers SIGINT to a detached child and runs a /bin/sh installer; neither exists on Windows') }, async () => {
   const { release, temp } = installation();
   const marker = path.join(tmp, 'installer-started');
   const name = 'lcu-0.9.2-linux-x64';

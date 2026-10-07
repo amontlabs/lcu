@@ -17,6 +17,7 @@ import { rmtree } from '../../lcu/compat/shutil.mjs';
 import * as systool from '../../lcu/compat/systool.mjs';
 import { TarArchive } from '../../lcu/compat/tar.mjs';
 import { extractLcuZip } from '../../lcu/compat/zip.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 function fakeTool(body) {
   const dir = mkdtempSync(join(tmpdir(), 'lcu-r2-'));
@@ -57,7 +58,7 @@ describe('R01 malformed account rows fail closed', () => {
     });
   }
 
-  it('well-formed answers still parse', { skip: process.platform === 'darwin' }, () => {
+  it('well-formed answers still parse', { skip: process.platform === 'darwin' || skipOnWindows('getent and the shell-script fake tool are POSIX; Windows has no account database lookups') }, () => {
     const tool = fakeTool(`case "$1" in
   passwd) if [ "$3" = u ]; then echo 'u:x:5:7777:U:/home/u:/bin/sh'; elif [ -n "$3" ]; then exit 2; else printf '%s\\n' 'root:x:0:0:root:/root:/bin/sh' 'u:x:5:7777:U:/home/u:/bin/sh'; fi;;
   group) if [ "$3" = 7777 ]; then echo 'w:x:7777:u,root'; elif [ -n "$3" ]; then exit 2; else printf '%s\\n' 'g:x:0:' 'w:x:7777:u,root'; fi;;
@@ -222,7 +223,7 @@ describe('R08 rmtree removes names that are not UTF-8', () => {
       mkdirSync(join(base, 'real'));
       symlinkSync(join(base, 'real'), join(base, 'link'));
       assert.throws(() => rmtree(join(base, 'link')), /Cannot call rmtree on a symbolic link/);
-      if (process.getuid?.() !== 0) {
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) { // chmod 0 does not lock a directory on Windows
         mkdirSync(join(base, 'locked/inner'), { recursive: true });
         chmodSync(join(base, 'locked'), 0);
         assert.throws(() => rmtree(join(base, 'locked')), (error) => error.code === 'EACCES' && String(error.path ?? error.message).includes('locked'));

@@ -9,9 +9,12 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import nodeTest from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { hostileEnvironments, standIns } from './path_hijack.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { test } = skippedOnWindows('scripts/install.sh is the POSIX bootstrap of the Linux and macOS installers (sh, uname, chmod modes, codesign); Windows installs through scripts/install_windows.py');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SCRIPT = path.join(ROOT, 'scripts/install.sh');
@@ -186,7 +189,7 @@ test('the gate refuses a Node in a group- or other-writable location', { skip: H
   }
 });
 
-test('as root, the gate refuses a Node owned by another account (even the --user desktop account)', { skip: (HOST !== 'Linux' || process.getuid() !== 0) && 'Linux, root only' }, () => {
+test('as root, the gate refuses a Node owned by another account (even the --user desktop account)', { skip: (HOST !== 'Linux' || process.getuid?.() !== 0) && 'Linux, root only' }, () => {
   const { archive, base, cleanup } = sandbox();
   try {
     const { app, node } = fakeApp(base);
@@ -216,7 +219,7 @@ test('the macOS gate requires the OpenAI code signature before Node runs', { ski
   }
 });
 
-test('review R1: as root, a Node reached through a link in another account\'s directory is refused', { skip: (HOST !== 'Linux' || process.getuid() !== 0) && 'Linux, root only' }, () => {
+test('review R1: as root, a Node reached through a link in another account\'s directory is refused', { skip: (HOST !== 'Linux' || process.getuid?.() !== 0) && 'Linux, root only' }, () => {
   const { archive, base, cleanup } = sandbox();
   try {
     // <app>/resources/cua_node/bin/node -> <base>/controlled/hop -> <base>/trusted/node; controlled is uid 1000's.

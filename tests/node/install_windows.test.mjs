@@ -78,7 +78,7 @@ function publishGeneration(prefix, official) {
 describe('WindowsInstallerTests', () => {
   let base; let source; let prefix;
   beforeEach(() => {
-    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-win-')));
+    base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-win-')));
     source = path.join(base, 'archive');
     fs.mkdirSync(path.join(source, 'scripts'), { recursive: true });
     fs.writeFileSync(path.join(source, 'scripts/windows_launcher.py'), 'fixture');
@@ -160,7 +160,7 @@ describe('WindowsInstallerTests', () => {
     const app = path.join(generation, 'app');
     installWindows.install(prefix, { app_generation: generation });
     const descriptor = loads(fs.readFileSync(path.join(prefix, 'current.json'), 'utf8'));
-    assert.equal(fs.readFileSync(path.join(prefix, 'current.json'), 'utf8'), `{"release": "${descriptor.get('release')}"}\n`);
+    assert.equal(fs.readFileSync(path.join(prefix, 'current.json'), 'utf8'), `{"release": "${descriptor.get('release')}"}${installWindows.internals.linesep()}`);
     const release = path.join(prefix, 'releases', descriptor.get('release'));
     const installed = loads(fs.readFileSync(path.join(release, 'installation.json'), 'utf8'));
     assert.deepEqual([...installed.keys()], ['platform', 'architecture', 'app', 'package_version', 'runtime', 'sha256']);
@@ -250,7 +250,7 @@ describe('WindowsInstallerTests', () => {
 describe('WindowsInstallHostTests (Node publication)', () => {
   let base; let source; let prefix; let official; let generation;
   beforeEach(() => {
-    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-winhost-')));
+    base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-winhost-')));
     source = path.join(base, 'archive');
     fs.mkdirSync(path.join(source, 'scripts'), { recursive: true });
     fs.writeFileSync(path.join(source, 'scripts/windows_launcher.py'), 'fixture');
@@ -353,7 +353,7 @@ describe('WindowsInstallHostTests (Node publication)', () => {
 describe('WindowsInstallerReviewTests', () => {
   let base; let source; let prefix;
   beforeEach(() => {
-    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-win2-')));
+    base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-win2-')));
     source = path.join(base, 'archive');
     fs.mkdirSync(path.join(source, 'scripts'), { recursive: true });
     fs.writeFileSync(path.join(source, 'scripts/windows_launcher.py'), 'fixture');
@@ -421,6 +421,9 @@ describe('WindowsInstallerReviewTests', () => {
 });
 
 // A managed generation + release as the installer leaves them, with a POSIX stand-in for node.exe.
+// Windows cannot run a #! stand-in as node.exe: the stand-in there is a copy of the running Node (the entry script decides what happens).
+const nodeStandIn = (script) => (process.platform === 'win32' ? fs.readFileSync(process.execPath) : script);
+
 function managedRelease(prefix, { node = '#!/bin/sh\nexit 0\n', entry = '' } = {}) {
   const official = path.join(path.dirname(prefix), 'official');
   fs.mkdirSync(path.join(official, 'app/resources/cua_node/bin'), { recursive: true });
@@ -440,7 +443,7 @@ function managedRelease(prefix, { node = '#!/bin/sh\nexit 0\n', entry = '' } = {
 describe('WindowsLauncherTests', () => {
   let base; let prefix;
   beforeEach(() => {
-    base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-winlaunch-')));
+    base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-winlaunch-')));
     prefix = path.join(base, 'prefix');
     fs.mkdirSync(prefix);
   });
@@ -504,18 +507,19 @@ describe('WindowsLauncherTests', () => {
     const marker = path.join(base, 'preload.cjs');
     fs.writeFileSync(marker, "process.stdout.write('CALLER_PRELOAD_EXECUTED\\n');\n");
     const entry = "process.stdout.write(`ENTRY ${process.env.__LCU_Q} ${process.env.__LCU_Q_NODE_OPTIONS ? 'kept' : 'lost'}\\n`);\n";
-    managedRelease(prefix, { node: `#!/bin/sh\nexec "${process.execPath}" "$@"\n`, entry });
+    managedRelease(prefix, { node: nodeStandIn(`#!/bin/sh\nexec "${process.execPath}" "$@"\n`), entry });
     fs.copyFileSync(path.join(ROOT, 'scripts/windows_launcher.mjs'), path.join(prefix, 'windows_launcher.mjs'));
     // As lcu.cmd starts it: startup variables already quarantined.
     const result = spawnSync(process.execPath, [path.join(prefix, 'windows_launcher.mjs'), 'status'], {
-      encoding: 'utf8', env: { PATH: process.env.PATH, __LCU_Q: 'NODE_OPTIONS', __LCU_Q_NODE_OPTIONS: `--require ${marker}` } });
+      encoding: 'utf8', env: { PATH: process.env.PATH, ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+        __LCU_Q: 'NODE_OPTIONS', __LCU_Q_NODE_OPTIONS: `--require ${marker}` } });
     assert.equal(result.stderr, '');
     assert.equal(result.stdout, 'ENTRY NODE_OPTIONS kept\n');
     assert.equal(result.status, 0);
   });
 
   it('dispatches with inherited stdio and returns the exit status', () => {
-    managedRelease(prefix, { node: '#!/bin/sh\nexit $#\n' });
+    managedRelease(prefix, { node: nodeStandIn('#!/bin/sh\nexit $#\n'), entry: 'process.exit(process.argv.length);' });
     assert.equal(launcher.main(['a', 'b'], { prefix }), 5);
   });
 });

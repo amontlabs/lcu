@@ -83,3 +83,18 @@ export function winRelpath(target, start) {
 
 /** PureWindowsPath(p).as_posix() */
 export const winAsPosix = (text) => text.replaceAll('\\', '/');
+
+/** Path.as_uri() of a Windows path: file:///C:/dir/name or file://server/share/name, percent-encoded as UTF-8. */
+export function winAsUri(path) {
+  const text = winPathStr(String(path));
+  if (!winIsAbsolute(text)) throw new ValueError("relative path can't be expressed as a file URI");
+  const [drive] = splitWin(text);
+  const posix = text.replaceAll('\\', '/');
+  const [prefix, rest] = drive.length === 2 && drive[1] === ':' ? [`file:///${drive}`, posix.slice(2)] : ['file:', posix];
+  let out = prefix;
+  for (const byte of Buffer.from(rest, 'utf8')) {
+    const ch = String.fromCharCode(byte);
+    out += /[A-Za-z0-9_.\-~/]/.test(ch) ? ch : `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+  }
+  return out;
+}

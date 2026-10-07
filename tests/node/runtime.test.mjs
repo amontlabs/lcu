@@ -7,7 +7,7 @@ import { chdir, cwd } from 'node:process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { join, delimiter } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { asUri } from '../../lcu/compat/pathlib.mjs';
 import { PySystemExit } from '../../lcu/compat/argparse.mjs';
@@ -17,6 +17,7 @@ import {
   reply_to_server_discover,
 } from '../../lcu/runtime.mjs';
 import { DISPOSITION_SCRIPT, applicationFixture, BytesIO, captureIo, rejectsWith, tempDir, withEnv } from './runtime_support.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url));
 const pristine = { ...internals };
@@ -27,7 +28,7 @@ const write = (path, text) => {
 };
 const json = (value) => JSON.stringify(value);
 
-describe('UpstreamRuntimeTests', () => {
+describe('UpstreamRuntimeTests', { skip: skipOnWindows('Linux app layout under usr/lib/chatgpt, the sandbox shim and X11 translation; the Windows runtime has its own describe below') }, () => {
   let temporary;
   let root;
   let app;
@@ -625,7 +626,7 @@ describe('UpstreamRuntimeTests', () => {
   });
 });
 
-describe('MacRuntimeTests', () => {
+describe('MacRuntimeTests', { skip: skipOnWindows('macOS app bundle, lifecycle host and Unix socket; never reached on a Windows host') }, () => {
   let temporary;
   let base;
   let root;
@@ -971,9 +972,14 @@ describe('discovery compatibility at the file-descriptor level', () => {
     try {
       const script = join(tmp.path, 'probe.mjs');
       writeFileSync(script, `
-        import { fd_sink, fd_source, reply_to_server_discover } from ${JSON.stringify(join(REPO, 'lcu/runtime.mjs'))};
+        import { fd_sink, fd_source, reply_to_server_discover } from ${JSON.stringify(pathToFileURL(join(REPO, 'lcu/runtime.mjs')).href)};
+        import { spawnSync } from 'node:child_process';
         reply_to_server_discover(fd_source(0), fd_sink(1));
-        process.execve('/bin/cat', ['cat'], process.env);
+        // POSIX replaces the process (execve); Windows has no exec, the launcher supervises a child that inherits fd 0/1.
+        if (process.platform === 'win32') {
+          const done = spawnSync(process.execPath, ['-e', 'process.stdin.pipe(process.stdout)'], { stdio: 'inherit' });
+          process.exit(done.status);
+        } else process.execve('/bin/cat', ['cat'], process.env);
       `);
       const following = '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n';
       const result = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', script], {
@@ -1014,13 +1020,15 @@ describe('supervised launch exit statuses (macOS/Windows)', () => {
     const mk = (script) => [process.execPath, '-e', script];
     assert.equal(await runtime.supervise(mk('process.exit(3)'), process.env), 3);
     assert.equal(await runtime.supervise(mk('process.exit(0)'), process.env), 0);
-    assert.equal(await runtime.supervise(mk('process.kill(process.pid, "SIGKILL")'), process.env), -9);
-    assert.equal(await runtime.supervise(mk('process.kill(process.pid, "SIGTERM")'), process.env), -15);
+    if (process.platform !== 'win32') { // a child killed by a signal is -N on POSIX; Windows has exit codes only
+      assert.equal(await runtime.supervise(mk('process.kill(process.pid, "SIGKILL")'), process.env), -9);
+      assert.equal(await runtime.supervise(mk('process.kill(process.pid, "SIGTERM")'), process.env), -15);
+    }
   });
 
   it('review #7: SIGINT handling follows subprocess.run (wait 0.25 s, then kill; a second SIGINT kills at once)', async () => {
     // process.emit only runs the listener in this process: no signal is sent to anything (SAFETY RULE).
-    const mk = ['/bin/sleep', '5'];
+    const mk = [process.execPath, '-e', 'setTimeout(() => {}, 5000)'];
     let started = Date.now();
     let pending = runtime.supervise(mk, process.env);
     await new Promise((resolve) => setTimeout(resolve, 50));

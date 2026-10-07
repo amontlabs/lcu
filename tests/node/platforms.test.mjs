@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach } from 'node:test';
 
 import { ValueError } from '../../lcu/compat/pyjson.mjs';
 import { InvalidFileException } from '../../lcu/compat/plist.mjs';
@@ -16,6 +16,9 @@ import {
   _acl_writers_untrusted, _untrusted_entry, internals, MAC_HELPER, MAC_REQUIRED_FILES,
   resolve_installed_linux_app, resolve_installed_mac_app, _linux_version,
 } from '../../lcu/platforms.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('validation of the installed macOS and Linux apps (codesign, plutil, dpkg, POSIX modes, ACLs, getuid); Windows validates the Store app in lcu/windows.mjs');
 
 const VERSION = '26.924.22138';
 const RUNTIME = '0.0.24/20260924074400-f52ea85e2a98';
@@ -360,9 +363,9 @@ describe('Linux installed application (test_installation.py)', () => {
     throwsValueError(() => resolveLinux(app), /writable by group or other/);
   });
 
-  it('app tree owned by another account is rejected unless trusted', { skip: process.getuid() === 0 && 'root-owned files are always trusted' }, () => {
+  it('app tree owned by another account is rejected unless trusted', { skip: process.getuid?.() === 0 && 'root-owned files are always trusted' }, () => {
     const app = applicationFixture(path.join(root, 'chatgpt'));
-    const other = process.getuid();
+    const other = process.getuid?.();
     internals.getuid = () => other + 1;
     internals.geteuid = () => other + 1;
     throwsValueError(() => resolveLinux(app), new RegExp(`owned by uid ${other}`));
@@ -385,11 +388,11 @@ describe('Linux installed application (test_installation.py)', () => {
     throwsValueError(() => resolveLinux(app), /outside the application/);
   });
 
-  it('read-only mount is checked like any other tree', { skip: process.getuid() === 0 && 'root-owned files are always trusted' }, () => {
+  it('read-only mount is checked like any other tree', { skip: process.getuid?.() === 0 && 'root-owned files are always trusted' }, () => {
     // Python patches os.statvfs to report ST_RDONLY; the validation never consults statvfs, so only the
     // ownership/mode outcomes are asserted (a mount flag has no effect on them).
     const app = applicationFixture(path.join(root, 'chatgpt'));
-    const owner = process.getuid();
+    const owner = process.getuid?.();
     const other = owner + 1;
     internals.getuid = () => other;
     internals.geteuid = () => other;
@@ -501,12 +504,12 @@ describe('Linux installed application (test_installation.py)', () => {
   it('group write requires every group member to be trusted', () => {
     const app = applicationFixture(path.join(root, 'chatgpt'));
     chmodSync(path.join(app, 'resources/cua_node/bin/node'), 0o775);
-    const stranger = process.getuid() + 1000;
+    const stranger = process.getuid?.() + 1000;
     internals.group_members = () => new Set([stranger]);
     throwsValueError(() => resolveLinux(app), /writable by group or other/);
     internals.group_members = () => null;
     throwsValueError(() => resolveLinux(app), /writable by group or other/);
-    internals.group_members = () => new Set([0, process.getuid()]);
+    internals.group_members = () => new Set([0, process.getuid?.()]);
     resolveLinux(app);
   });
 
@@ -516,7 +519,7 @@ describe('Linux installed application (test_installation.py)', () => {
     const seen = [];
     internals.group_members = (gid) => {
       seen.push(gid);
-      return new Set([0, process.getuid()]);
+      return new Set([0, process.getuid?.()]);
     };
     resolveLinux(app);
     assert.equal(new Set(seen).size, seen.length);
@@ -554,7 +557,7 @@ describe('Linux installed application (test_installation.py)', () => {
 
   it('a writable acl on an app file is rejected', () => {
     const app = applicationFixture(path.join(root, 'chatgpt'));
-    const blob = acl([0x01, 6, 0xFFFFFFFF], [0x02, 6, process.getuid() + 1000], [0x10, 7, 0xFFFFFFFF]);
+    const blob = acl([0x01, 6, 0xFFFFFFFF], [0x02, 6, process.getuid?.() + 1000], [0x10, 7, 0xFFFFFFFF]);
     const target = real(path.join(app, 'resources/cua_node/bin/node_repl'));
     const original = internals.posix_acl;
     internals.posix_acl = (file) => (file === target ? blob : original(file));

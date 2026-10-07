@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import zlib from 'node:zlib';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
 
@@ -19,6 +20,7 @@ import * as apply from '../../lcu/update_apply.mjs';
 import { crc32 } from '../../lcu/compat/zip.mjs';
 import { dumps, ValueError } from '../../lcu/compat/pyjson.mjs';
 import { _resetTempdir } from '../../lcu/compat/tempfile.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const INFO = { version: '0.9.2', tag: 'v0.9.2', release_url: 'https://example.invalid/r', severity: 'normal' };
@@ -113,6 +115,9 @@ beforeEach(() => {
   delete process.env.SUDO_USER;
   out = ''; err = ''; requests = []; runs = [];
   update._inject.io = { stdout: (t) => { out += t; }, stderr: (t) => { err += t; } };
+  // The default cases are the POSIX behaviour (LF stdio, XDG cache): a Windows host runs them as 'linux'. The
+  // Windows behaviour (CRLF text mode, LOCALAPPDATA, python preflight) has its own cases that inject 'win32'.
+  update._inject.platform = () => (process.platform === 'win32' ? 'linux' : process.platform);
   apply._inject.DOWNLOAD = base;
   apply._inject.http = { env: { PATH: process.env.PATH } };
 });
@@ -229,7 +234,7 @@ describe('apply', () => {
   });
 
   test('F17: input() strips the line ending and decodes strictly', () => {
-    const script = `import(${JSON.stringify(path.join(ROOT, 'lcu/update_apply.mjs'))}).then((m) => { try { process.stderr.write(JSON.stringify(m.input('P? '))); } catch (e) { process.stderr.write(e.name); } })`;
+    const script = `import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'lcu/update_apply.mjs')).href)}).then((m) => { try { process.stderr.write(JSON.stringify(m.input('P? '))); } catch (e) { process.stderr.write(e.name); } })`;
     const run = (input) => spawnSync(process.execPath, ['-e', script], { input, encoding: 'utf8' });
     assert.equal(run(Buffer.from('y\r\n')).stderr, '"y"');
     assert.equal(run(Buffer.from('yes\nmore')).stderr, '"yes"');
@@ -299,7 +304,7 @@ describe('apply', () => {
     assert.equal(await runApply(release, tarBytes()), 0);
     const command = runs[0];
     assert.deepEqual(command.slice(0, 2), ['/bin/sh', '-p']); // -p: explicit shells ignore the #!/bin/sh -p line
-    assert.ok(command[2].endsWith('scripts/install.sh'));
+    assert.ok(command[2].replaceAll('\\', '/').endsWith('scripts/install.sh'));
     assert.deepEqual(command.slice(3), ['--prefix', prefix, '--runtime-only', '--existing-app', app, '--skip-system']);
     assert.deepEqual(runs[1], [path.join(prefix, 'current/bin/lcu'), 'update', '--post-install']);
     assert.ok(out.endsWith(`LCU 0.9.2 installed. Restart agents that use LCU so they load the new release.\nTo reclaim space from superseded releases, run: ${path.join(prefix, 'current/bin/lcu')} prune\n`));
@@ -319,7 +324,7 @@ describe('apply', () => {
     assert.equal(await runApply(release, tarBytes([], 'lcu-0.9.2-darwin-arm64')), 0);
     const command = runs[0];
     assert.deepEqual(command.slice(0, 2), ['/bin/sh', '-p']); // -p: explicit shells ignore the #!/bin/sh -p line
-    assert.ok(command[2].endsWith('scripts/install.sh'));
+    assert.ok(command[2].replaceAll('\\', '/').endsWith('scripts/install.sh'));
     assert.deepEqual(command.slice(3), ['--prefix', prefix, '--runtime-only', '--existing-app', app]);
     // Then the new release refreshes what setup copied out of the old one.
     assert.deepEqual(runs[1], [path.join(prefix, 'current/bin/lcu'), 'update', '--post-install']);
@@ -330,7 +335,7 @@ describe('apply', () => {
     assert.equal(await runApply(release, zipBytes()), 0);
     const command = runs[0];
     assert.deepEqual(command.slice(0, 2), ['/usr/bin/python3', '-B']);
-    assert.ok(command[2].endsWith('scripts/install_windows.py'));
+    assert.ok(command[2].endsWith(path.join('scripts', 'install_windows.py')));
     assert.deepEqual(command.slice(3), ['--prefix', prefix, '--runtime-only']);
     assert.deepEqual(runs[1], [path.join(prefix, 'lcu.cmd'), 'update', '--post-install']);
   });
@@ -380,12 +385,13 @@ describe('apply', () => {
   });
 
   test('F05: Python discovery probes are killed with SIGKILL on timeout', () => {
-    update._inject.platform = () => 'linux';
+    const win = process.platform === 'win32'; // a PATH with a drive letter needs the Windows lookup (';' and PATHEXT)
+    update._inject.platform = () => (win ? 'win32' : 'linux');
     const calls = [];
     apply._inject.spawnSync = (command, args, options) => { calls.push(options); return { status: 1 }; };
     const bin = path.join(temp, 'bin');
     fs.mkdirSync(bin);
-    fs.writeFileSync(path.join(bin, 'python'), '#!/bin/sh\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, win ? 'python.exe' : 'python'), '#!/bin/sh\n', { mode: 0o755 });
     assert.equal(apply.find_python({ PATH: bin }), null);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].killSignal, 'SIGKILL');
@@ -407,7 +413,7 @@ describe('apply', () => {
     assert.ok(out.includes('LCU 0.9.2 installed.'));
   });
 
-  test('unwritable linux prefix prints sudo', async () => {
+  test('unwritable linux prefix prints sudo', { skip: skipOnWindows('the sudo hint is the Linux root/permission path and quotes POSIX /bin/sh command lines') }, async () => {
     const release = install();
     assert.equal(await runApply(release, tarBytes(), { access: () => false }), 1);
     assert.equal(runs.length, 0);

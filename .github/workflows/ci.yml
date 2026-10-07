@@ -102,7 +102,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
+      # The repository's bytes, not the runner's autocrlf rewrite: shell scripts, JSON and hashed files are LF.
+      - run: git config --global core.autocrlf false
+      # Full history: tests/node differentials extract the frozen 0.9.4 oracle from the commit named in
+      # tests/blackbox/BASE (see the `unit` job).
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12.10'
@@ -115,10 +121,10 @@ jobs:
         shell: bash
         run: python -m unittest -b $(ls test_*.py | sed 's/\.py$//')
       - run: npm test --prefix adapters
-      # Fixture tests of the Windows runtime, not live Windows evidence. Advisory until the suite has a recorded
-      # green run on the hosted Windows image.
-      - name: tests/node (PATH Node only, advisory)
-        continue-on-error: true
+      # Fixture tests of the Windows runtime, not live Windows evidence. Required: tests that cannot run on Windows
+      # skip themselves with a specific reason (tests/node/windows_skip.mjs; classification in
+      # .port/notes/windows-tests.md).  .github/workflows/windows-node.yml runs just this step for quick iteration.
+      - name: tests/node (PATH Node only)
         shell: bash
         run: LCU_TEST_PYTHON="$(command -v python)" LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
       - run: python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"

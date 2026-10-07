@@ -1,0 +1,63 @@
+name: Windows Node suite
+
+# Just the Windows runner's runtime tests, for a quick answer (a few minutes instead of the whole CI):
+# tests/node on the hosted Windows image plus the top-level Python tests on the pinned Python 3.12.10.
+# Same commands as the `windows` job of ci.yml; run it by hand with
+#   gh workflow run windows-node.yml --ref <branch>
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-node.yml'
+      - 'lcu/**'
+      - 'scripts/**'
+      - 'bin/**'
+      - 'adapters/**'
+      - 'tests/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-node-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-node:
+    name: tests/node and top-level tests (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      # The repository's bytes, not the runner's autocrlf rewrite: shell scripts, JSON and hashed files are LF.
+      - run: git config --global core.autocrlf false
+      # Full history: the differentials extract the frozen 0.9.4 oracle from the commit named in tests/blackbox/BASE.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
+      - name: top-level Python tests (Python 3.12.10)
+        working-directory: tests
+        shell: bash
+        run: python -m unittest -b $(ls test_*.py | sed 's/\.py$//')
+      - name: tests/node (PATH Node only)
+        shell: bash
+        run: |
+          set -o pipefail
+          LCU_TEST_PYTHON="$(command -v python)" LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh 2>&1 | tee "$RUNNER_TEMP/node-tests.log"
+      - name: failing tests (names only)
+        if: always()
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/node-tests.log"
+          sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -E '^(ℹ (tests|suites|pass|fail|cancelled|skipped)|✖ |test at )' | sed -n '1,400p' || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-tests-log
+          path: ${{ runner.temp }}/node-tests.log

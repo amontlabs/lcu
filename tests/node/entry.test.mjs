@@ -8,7 +8,7 @@
 // start children with a disposition already set to SIG_IGN by their own (spawned) parent.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -19,6 +19,7 @@ import { QUARANTINED, quarantine_environment, restore_environment } from '../../
 import { HELP_SUFFIX, USAGE } from '../../lcu/runtime.mjs';
 import { hostileEnvironments, standIns } from './path_hijack.mjs';
 import { DISPOSITION_SCRIPT, python312, tempDir } from './runtime_support.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const PYTHON = python312();
 
@@ -115,7 +116,7 @@ const PROBE = `
 const run = (file, args, env = {}, options = {}) => spawnSync(file, args, {
   encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: '/nonexistent-home', ...env }, ...options });
 
-describe('shim sources', () => {
+describe('shim sources', { skip: skipOnWindows('the generated POSIX sh launchers and their COMMON block; Windows has no sh shims') }, () => {
   it('every LCU COMMON block in the repository is lcu/shim/common.sh verbatim, and the launchers are generated', () => {
     assert.ok(COMMON.startsWith(BEGIN) && COMMON.endsWith(END));
     for (const shim of SHIMS) assert.equal(block(shimText(shim)), COMMON, shim);
@@ -167,7 +168,7 @@ describe('shim sources', () => {
   });
 });
 
-describe('static help when Node is unusable', () => {
+describe('static help when Node is unusable', { skip: skipOnWindows('the static help of the sh launchers before Node starts; Windows has no sh shims') }, () => {
   let temporary;
   let root;
   beforeEach(() => {
@@ -208,7 +209,7 @@ describe('static help when Node is unusable', () => {
   });
 });
 
-describe('pre-Node gate', () => {
+describe('pre-Node gate', { skip: skipOnWindows('the sh pre-Node gate (stat modes, ownership, codesign); Windows has no sh shims') }, () => {
   let temporary;
   beforeEach(() => { temporary = tempDir(); });
   afterEach(() => temporary.cleanup());
@@ -385,7 +386,7 @@ describe('pre-Node gate', () => {
   });
 });
 
-describe('launch (real or probe entry)', () => {
+describe('launch (real or probe entry)', { skip: skipOnWindows('the launch path of the sh launchers (/bin/sh, exec, symlinked releases); Windows has no sh shims') }, () => {
   let temporary;
   beforeEach(() => { temporary = tempDir(); });
   afterEach(() => temporary.cleanup());
@@ -548,7 +549,7 @@ sys.stdout.write(str(r.returncode) + '\\n' + r.stderr.decode() + r.stdout.decode
   });
 });
 
-describe('round-2 F3: update paths name the shell explicitly, with -p', () => {
+describe('round-2 F3: update paths name the shell explicitly, with -p', { skip: skipOnWindows('the POSIX install.sh handover (/bin/sh -p); Windows has no sh shims') }, () => {
   it('old-release trampolines and the new updater command start install.sh with -p (no xtrace leak)', (t) => {
     if (!PYTHON) return t.skip('python3.12 is not available');
     const missing = join(REPO, 'no-such-app.app');
@@ -593,7 +594,7 @@ describe('startup_vars', () => {
     assert.deepEqual(back, { A: 'b', NODE_OPTIONS: '--require x', OPENSSL_CONF: '' });
   });
 
-  it('review #2: the macOS lifecycle host started through entry.mjs never runs a caller preload', () => {
+  it('review #2: the macOS lifecycle host started through entry.mjs never runs a caller preload', { skip: skipOnWindows('the macOS lifecycle host (Unix socket); never started on Windows') }, () => {
     const tmp = tempDir();
     try {
       const marker = join(tmp.path, 'preloaded');
@@ -615,7 +616,7 @@ describe('startup_vars', () => {
   });
 });
 
-describe('installer review R6: __lcu_python_path is str(Path(x).expanduser())', () => {
+describe('installer review R6: __lcu_python_path is str(Path(x).expanduser())', { skip: skipOnWindows('the sh helper __lcu_python_path; Windows has no sh shims') }, () => {
   const cases = ['', '.', './', 'a//b/./c/', '//x//y', '///x', '/a/../b', '~', '~/', './~', '~/x/', '~root/y', '~nosuchuser-lcu/x',
     'rel/~', 'a b/c', '~/.', '..//x'];
   const python = (homeMode) => `import os, sys
@@ -643,7 +644,7 @@ done`;
   }
 });
 
-describe('round-3 N-1: links whose path contains LF inside the selected app', () => {
+describe('round-3 N-1: links whose path contains LF inside the selected app', { skip: skipOnWindows('sh link walking with LF in names; Windows has no sh shims') }, () => {
   const walk = (script) => spawnSync('/bin/sh', ['-p', '-c', `. ${JSON.stringify(join(REPO, 'lcu/shim/common.sh'))}\n__lcu_tools || exit 9\n${script}`],
     { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
 
@@ -682,7 +683,7 @@ printf '%s' "$__LCU_REAL"`);
   });
 });
 
-describe('lcu/shim/common.sh under `set -eu` (as scripts/install.sh sources it)', () => {
+describe('lcu/shim/common.sh under `set -eu` (as scripts/install.sh sources it)', { skip: skipOnWindows('the sh common block; Windows has no sh shims') }, () => {
   it('tools, gate, quarantine, signals, byte check and path helper all succeed', (t) => {
     const node = trustedNode();
     if (!node) return t.skip('the ChatGPT app is not installed');
@@ -702,7 +703,7 @@ printf '%s|%s|%s|%s\\n' "$__LCU_REAL" "$__LCU_PATH" "\${__LCU_SIGIGN-none}" "\${
   });
 });
 
-describe('entry error mapping and exit statuses', () => {
+describe('entry error mapping and exit statuses', { skip: skipOnWindows('exit statuses through the sh launcher; Windows has no sh shims') }, () => {
   const entry = (cli, args, env = {}) => run(process.execPath, ['--disable-warning=ExperimentalWarning',
     join(REPO, 'lcu/entry.mjs'), cli, ...args], { __LCU_ARGV0: '/x/bin/lcu', ...env });
 
@@ -849,34 +850,10 @@ describe('PATH hijack: the pre-Node shell code never looks a command up through 
     noHits('relay launcher');
   });
 
-  it('adapters/claude-plugin/scripts/ensure-lcu.sh: every early exit runs no stand-in', () => {
-    const hook = join(REPO, 'adapters/claude-plugin/scripts/ensure-lcu.sh');
-    assert.equal(run('/bin/sh', ['-n', hook]).status, 0);
-    const home = join(temporary.path, 'home');
-    mkdirSync(home);
-    mkdirSync(join(temporary.path, 'app-without-node'));
-    const cases = [
-      { LCU_APP: join(temporary.path, 'no-app') }, // never the default app: that would reach the network
-      { CLAUDE_CONFIG_DIR: '/somewhere', LCU_APP: join(temporary.path, 'no-app') },
-      { LCU_APP: join(temporary.path, 'app-without-node') },
-    ];
-    let n = 0;
-    for (const extra of cases) {
-      for (const env of environments({ HOME: home, ...extra })) {
-        n += 1;
-        const state = join(temporary.path, `state-${n}`);
-        const full = { ...env, CLAUDE_PLUGIN_DATA: state, TMPDIR: temporary.path };
-        const result = launch('/bin/sh', [hook], full);
-        assert.equal(result.status, 0, result.stderr);
-        assert.match(result.stdout, /^\{"systemMessage": "LCU plugin: /);
-        // A stale lock (older than the hook's timeout) is taken over with find/rmdir/mkdir.
-        mkdirSync(join(state, 'lock'), { recursive: true });
-        utimesSync(join(state, 'lock'), new Date(0), new Date(0));
-        assert.equal(launch('/bin/sh', [hook], full).status, 0);
-      }
-    }
-    noHits('plugin hook');
-  });
+  // adapters/claude-plugin/scripts/ensure-lcu.sh is deliberately not covered: it is a SessionStart hook that always runs
+  // as the user inside their own Claude Code session (never root or sudo), so a hostile PATH there is the user's own
+  // PATH and crosses no privilege boundary. It resolves its tools through PATH; tests/test_claude_plugin.py relies on
+  // stand-ins for curl, uname and plutil (and asserts that they are what PATH resolves).
 
   it('the Python trampolines hand over to an absolute /bin/sh and read no PATH', () => {
     for (const name of ['install.py', 'install_macos.py']) {

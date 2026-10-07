@@ -18,6 +18,7 @@ import { TOMLDecodeError } from '../../lcu/compat/toml.mjs';
 import * as http from '../../lcu/compat/http.mjs';
 import * as setup from '../../lcu/setup.mjs';
 import { python312 } from './runtime_support.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const PYTHON = python312();
 
@@ -103,7 +104,7 @@ for points in json.loads(sys.argv[1]):
         text.encode('utf-8')
     except UnicodeEncodeError as exc:
         print(type(exc).__name__ + ': ' + str(exc))
-`, JSON.stringify(list)], { encoding: 'utf8' }).stdout.trim().split('\n');
+`, JSON.stringify(list)], { encoding: 'utf8' }).stdout.trim().split(/\r?\n/);
 
   it('constructor(text) and pyjson.dump to an fd', () => {
     const expected = python(cases);
@@ -134,7 +135,8 @@ describe('pathlib.realpath / resolve (pypath delegates)', () => {
     assert.equal(pypath.realpath('/usr/../tmp/./x'), pathlib.realpath('/usr/../tmp/./x'));
   });
 
-  it('a NUL byte is CPython\'s ValueError from the lstat of the component, in realpath and resolve', () => {
+  it('a NUL byte is CPython\'s ValueError from the lstat of the component, in realpath and resolve', { skip: skipOnWindows(
+    'asserts the POSIX realpath walk (lstat of /tmp/a\\0b); ntpath.realpath has no such component walk') }, () => {
     for (const call of [() => pathlib.realpath('/tmp/a\0b'), () => pathlib.resolve('/tmp/a\0b'), () => pypath.realpath('/tmp/a\0b'),
       () => pathlib.realpath('/tmp/a\0b', { strict: true })]) {
       assert.throws(call, (error) => error instanceof pyjson.ValueError && error.message === 'lstat: embedded null character in path');

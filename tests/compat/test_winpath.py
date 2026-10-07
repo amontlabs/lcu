@@ -51,5 +51,68 @@ emit({
             self.assertEqual(got[key], expected[key], key)
 
 
+NT_PATHS = ['C:\\prefix\\releases\\1.0-abc', 'C:/prefix/releases/1.0-abc/', 'C:\\', 'C:/', 'C:\\a\\..\\b', 'C:\\a\\.\\b\\\\c\\',
+            '\\\\server\\share\\x\\y', '\\\\server\\share', 'D:\\a\\..\\..\\x', 'relative\\profile', 'rel/ative/../x',
+            '.', '..', 'a\\..', '\\rooted\\x', 'c:\\Users\\me\\AppData\\Local\\LCU']
+NT_ENV = {'USERPROFILE': 'C:\\Users\\me', 'USERNAME': 'me'}
+NT_EXPAND = ['~', '~\\x', '~/x/y', '~me', '~me\\z', '~other', '~other\\z', 'plain', '']
+SETUP = """
+Object.defineProperty(process, 'platform', { value: 'win32' });   // the host-flavour branches, off Windows
+const m = await import(COMPAT + 'pathlib.mjs');
+const attempt = (f) => { try { return { ok: f() }; } catch (e) { return { error: e.name + ': ' + e.message }; } };
+"""
+
+
+class PathlibWindowsHostTests(NodeTestCase):
+    """compat/pathlib.mjs with process.platform forced to win32 against CPython's ntpath / PureWindowsPath."""
+
+    def test_flavour_functions(self):
+        cwd = 'C:\\work\\dir'
+        expected = {
+            'str': [str(PureWindowsPath(p)) for p in NT_PATHS],
+            'normpath': [ntpath.normpath(p) for p in NT_PATHS],
+            'abspath': [ntpath.normpath(ntpath.join(cwd, p)) for p in NT_PATHS],
+            'absolute': [str(PureWindowsPath(p)) if PureWindowsPath(p).is_absolute()
+                         else str(PureWindowsPath(cwd) / PureWindowsPath(p)) for p in NT_PATHS],
+            'uri': [py_case(lambda p=p: PureWindowsPath(p).as_uri()) for p in NT_PATHS],
+        }
+        got = run_node(SETUP + """
+const cwd = input.cwd;
+emit({
+  str: input.paths.map((p) => m.pathStr(p)),
+  normpath: input.paths.map((p) => m.normpath(p)),
+  abspath: input.paths.map((p) => m.abspath(p, cwd)),
+  absolute: input.paths.map((p) => m.absolute(p, cwd)),
+  uri: input.paths.map((p) => attempt(() => m.asUri(p))).map((r) => ('ok' in r ? r : { error: r.error.split(': ').slice(1).join(': ') })),
+});
+""", {'paths': NT_PATHS, 'cwd': cwd})
+        for key in expected:
+            self.assertEqual(got[key], expected[key], key)
+
+    def test_expanduser(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, NT_ENV, clear=True):
+            expected = [ntpath.expanduser(p) for p in NT_EXPAND]
+        got = run_node(SETUP + "emit(input.paths.map((p) => m.expanduser(p, { env: input.env })));",
+                       {'paths': NT_EXPAND, 'env': NT_ENV})
+        self.assertEqual(got, expected)
+        env = {'USERPROFILE': 'C:\\Users\\x', 'USERNAME': 'me'}  # profile not named after the user: ~other stays
+        with mock.patch.dict(os.environ, env, clear=True):
+            expected = [ntpath.expanduser(p) for p in NT_EXPAND]
+        got = run_node(SETUP + "emit(input.paths.map((p) => m.expanduser(p, { env: input.env })));",
+                       {'paths': NT_EXPAND, 'env': env})
+        self.assertEqual(got, expected)
+        # HOMEDRIVE + HOMEPATH when USERPROFILE is absent, and nothing known at all.
+        env = {'HOMEDRIVE': 'D:', 'HOMEPATH': '\\h\\me', 'USERNAME': 'me'}
+        with mock.patch.dict(os.environ, env, clear=True):
+            expected = [ntpath.expanduser(p) for p in ['~', '~\\x', '~me']]
+        got = run_node(SETUP + "emit(input.paths.map((p) => m.expanduser(p, { env: input.env })));",
+                       {'paths': ['~', '~\\x', '~me'], 'env': env})
+        self.assertEqual(got, expected)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            expected = ntpath.expanduser('~\\x')
+        self.assertEqual(run_node(SETUP + "emit(m.expanduser('~\\\\x', { env: {} }));"), expected)
+
+
 if __name__ == '__main__':
     unittest.main()

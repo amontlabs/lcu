@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach } from 'node:test';
 
 import { io } from '../../lcu/compat/argparse.mjs';
 import { seal as hashSeal } from '../../lcu/compat/hash.mjs';
@@ -12,6 +12,9 @@ import { loads, ValueError } from '../../lcu/compat/pyjson.mjs';
 import * as install from '../../scripts/install.mjs';
 import * as installMacos from '../../scripts/install_macos.mjs';
 import { verify, VERSION } from '../../scripts/bundle_runtime.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('the macOS installer (ChatGPT.app, codesign, Application Support); never runs on Windows');
 
 const savedMac = { ...installMacos.internals, setup: { ...installMacos.internals.setup } };
 const savedInstall = { ...install.internals };

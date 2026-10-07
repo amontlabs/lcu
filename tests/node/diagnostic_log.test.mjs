@@ -5,6 +5,7 @@ import { describe, it } from 'node:test';
 
 import * as diagnostic_log from '../../lcu/diagnostic_log.mjs';
 import * as adapters from '../../adapters/diagnostics.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 describe('DiagnosticLogTests', () => {
   it('test_constants_match_the_javascript_module', () => {
@@ -13,7 +14,8 @@ describe('DiagnosticLogTests', () => {
     assert.equal(diagnostic_log.MAX_FILE_MB * 1024 * 1024, adapters.MAX_FILE_BYTES);
   });
 
-  it('test_directory_follows_platform_xdg_and_override', () => {
+  it('test_directory_follows_platform_xdg_and_override', { skip: skipOnWindows(
+    'the darwin/linux branches build POSIX paths; on a Windows host directory() always joins with win32 rules') }, () => {
     const home = '/h';
     assert.equal(diagnostic_log.directory({}, 'darwin', home), '/h/Library/Logs/LCU');
     assert.equal(diagnostic_log.directory({}, 'linux', home), '/h/.local/state/lcu/logs');
@@ -30,7 +32,8 @@ describe('DiagnosticLogTests', () => {
     assert.equal(diagnostic_log.status({ LCU_DIAGNOSTIC_LOG: '0' }, 'linux', '/h').enabled, false);
   });
 
-  it('status key order and the summary text are Python\'s', () => {
+  it('status key order and the summary text are Python\'s', { skip: skipOnWindows(
+    'expects the POSIX spelling of the linux log directory; a Windows host spells it with backslashes') }, () => {
     assert.deepEqual(Object.keys(diagnostic_log.status({}, 'linux', '/h')),
       ['dir', 'enabled', 'retention_days', 'max_total_mb', 'max_file_mb']);
     assert.equal(diagnostic_log.summary({}, 'linux', '/h'), 'Diagnostic log: /h/.local/state/lcu/logs (metadata only; ' +

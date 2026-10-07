@@ -7,9 +7,12 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach } from 'node:test';
 
 import { decide, main } from '../../lcu/sandbox_shim.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('the Linux codex sandbox shim (bubblewrap launcher, POSIX modes, /usr/bin/true); never runs on Windows');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const PREFIX = ['sandbox', '-c', 'shell_environment_policy.inherit="all"', '-c', 'default_permissions="node_repl"'];
@@ -76,7 +79,7 @@ describe('finding 5: every profile tomllib accepts is accepted (compat/toml.mjs)
   });
 });
 
-describe('finding 10: an unreadable kernel.js beside the worker is "not readable", like pathlib', { skip: process.getuid() === 0 && 'root ignores directory permissions' }, () => {
+describe('finding 10: an unreadable kernel.js beside the worker is "not readable", like pathlib', { skip: process.getuid?.() === 0 && 'root ignores directory permissions' }, () => {
   it('EACCES on the sibling check gives its own reason, and the worker stays sandboxed', () => {
     const locked = path.join(base, 'locked');
     mkdirSync(locked);

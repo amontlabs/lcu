@@ -7,10 +7,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { DISPOSITION_SCRIPT } from './runtime_support.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('the env re-ignore of ignored signals for POSIX shims (/usr/bin/env, perl, bash, execve); Windows has no shims and no inherited signal dispositions');
 
 const REPO = join(fileURLToPath(new URL('.', import.meta.url)), '../..');
 const EXPECTED = {

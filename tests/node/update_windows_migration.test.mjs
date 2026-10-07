@@ -69,7 +69,8 @@ beforeEach(() => {
   Object.assign(process.env, { HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'), SystemRoot: 'C:\\Windows',
     XDG_CACHE_HOME: path.join(home, 'xdg') });
   setup.impl.platform = 'win32';
-  setup.impl.windows_paths = false; // POSIX paths on this host; the Windows branches are selected by platform
+  // Off Windows: POSIX paths on this host, the Windows branches are selected by platform; on a Windows host its own.
+  setup.impl.windows_paths = process.platform === 'win32';
   out = ''; err = ''; calls = []; failWith = null;
   setup.io.stdout = (t) => { out += t; };
   setup.io.stderr = (t) => { err += t; };

@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { io } from '../../lcu/compat/argparse.mjs';
@@ -17,6 +17,9 @@ import * as install from '../../scripts/install.mjs';
 import * as installedApp from '../../scripts/installed_app.mjs';
 import { inventory, verify, VERSION } from '../../scripts/bundle_runtime.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('the Linux installer (scripts/install.mjs behind install.sh: apt, dpkg, chmod modes, root/sudo accounts); Windows installs through install_windows.mjs');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const seal = (root, arch, target = 'linux') => hashSeal(root, VERSION, arch, target);

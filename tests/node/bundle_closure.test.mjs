@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { closure } from './closure.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+// The archives list POSIX-style relative names whatever the host (Windows paths use backslashes).
+const relative = (file) => path.relative(ROOT, file).split(path.sep).join('/');
 
 const LIST_FILES = 'import json, sys; sys.path.insert(0, "scripts"); import build_bundle; ' +
   'print(json.dumps(build_bundle.runtime_files(sys.argv[1])))';
@@ -43,12 +45,12 @@ for (const [target, { entries, lazy }] of Object.entries(PLATFORMS)) {
   test(`the ${target} archive ships every module its entry points load`, () => {
     const files = new Set(shipped(target));
     const result = closure(entries, ROOT);
-    const needed = result.files.map((file) => path.relative(ROOT, file));
+    const needed = result.files.map((file) => relative(file));
     const absent = needed.filter((file) => !files.has(file));
     // Modules only reached through a lazy, platform-checked load of another platform's code may be absent.
     assert.deepEqual(absent.filter((file) => !lazy.includes(file)), [], `${target}: needed but not shipped`);
     // windows_host.mjs copies lcu/windows_lifetime_host.cjs next to the host entry as windows-lifetime-host.cjs.
-    assert.deepEqual(result.missing.map((file) => path.relative(ROOT, file))
+    assert.deepEqual(result.missing.map((file) => relative(file))
       .filter((file) => file !== 'lcu/windows-lifetime-host.cjs'), [],
     `${target}: imported files that do not exist in the repository`);
     for (const file of entries) assert.ok(files.has(file) || lazy.includes(file) || file.startsWith('scripts/install'),
@@ -58,7 +60,7 @@ for (const [target, { entries, lazy }] of Object.entries(PLATFORMS)) {
   test(`the ${target} archive ships no module that no entry point can load`, () => {
     const files = shipped(target).filter((file) => /\.(mjs|cjs)$/.test(file));
     const result = closure(entries, ROOT);
-    const reachable = new Set(result.files.map((file) => path.relative(ROOT, file)));
+    const reachable = new Set(result.files.map((file) => relative(file)));
     const unreachable = files.filter((file) => !reachable.has(file));
     assert.deepEqual(unreachable, [], `${target}: shipped but unreachable`);
   });

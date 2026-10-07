@@ -330,7 +330,7 @@ describe('TestedVersionTests', () => {
     record([entry()]);
     const home = join(prefix, 'home');
     mkdirSync(home);
-    const account = { pw_name: 'fixture', pw_uid: process.getuid(), pw_gid: process.getgid(), pw_dir: home };
+    const account = { pw_name: 'fixture', pw_uid: process.getuid?.() ?? 0, pw_gid: process.getgid?.() ?? 0, pw_dir: home };
     const savedImpl = { ...setup.impl };
     const savedIo = { ...setup.io };
     const savedTested = { ...tested.internals };

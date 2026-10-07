@@ -6,10 +6,13 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach } from 'node:test';
 
 import * as doctor from '../../lcu/doctor.mjs';
 import * as platforms from '../../lcu/platforms.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('the macOS lifecycle-host Unix-socket path (104-byte sun_path limit, getuid/getpwuid); never used on Windows');
 
 const SUFFIX = '/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/IPC/computeruse.sock';
 

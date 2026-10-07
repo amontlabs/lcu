@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
 
 import { findpwuid } from '../../lcu/compat/accounts.mjs';
 import { runProcess } from '../../lcu/compat/runas.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { test } = skippedOnWindows('become-another-account (setuid, supplementary groups, /bin/sh); never runs on Windows');
 
 test('capture, check and the Python error texts', () => {
   assert.deepEqual(runProcess(['/bin/sh', '-c', 'echo out; echo err >&2'], { capture: true }),

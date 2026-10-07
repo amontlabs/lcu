@@ -5,11 +5,13 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
 
 import { runProcess } from '../../lcu/compat/runas.mjs';
 import { run } from '../../lcu/compat/subprocess.mjs';
 import { python312 } from './runtime_support.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('compares with CPython subprocess errors for /usr/bin/true, /bin/sleep and chmod 0 directories (POSIX errno texts; Windows reports WinError)');
 
 const PYTHON = python312();
 const TRUE = ['/usr/bin/true'];

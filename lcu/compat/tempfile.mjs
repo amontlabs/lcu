@@ -9,8 +9,14 @@
 // cached for the process like tempfile.tempdir (os.tmpdir() would use TMPDIR even when it is unusable).
 import { closeSync, constants, mkdirSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { randomInt } from 'node:crypto';
+import { win32 } from 'node:path';
 
 import { abspath } from './pypath.mjs';
+import { expanduser } from './pathlib.mjs';
+
+// Windows hosts: names are joined with the host separator (os.path.join) and the candidate list is CPython's for nt.
+const windowsHost = () => process.platform === 'win32';
+const joinPath = (dir, name) => (windowsHost() ? win32.join(dir, name) : `${dir.replace(/\/+$/, '')}/${name}`);
 
 const CHARACTERS = 'abcdefghijklmnopqrstuvwxyz0123456789_';
 const TMP_MAX = 10000;
@@ -25,7 +31,12 @@ function candidate(prefix, suffix) {
 function candidateTempdirList(env) {
   const list = [];
   for (const name of ['TMPDIR', 'TEMP', 'TMP']) if (env[name]) list.push(env[name]);
-  list.push('/tmp', '/var/tmp', '/usr/tmp');
+  if (windowsHost()) {
+    list.push(expanduser('~\\AppData\\Local\\Temp', { env }), `${env.SYSTEMROOT ?? '%SYSTEMROOT%'}\\Temp`, 'c:\\temp',
+      'c:\\tmp', '\\temp', '\\tmp');
+  } else {
+    list.push('/tmp', '/var/tmp', '/usr/tmp');
+  }
   try {
     list.push(process.cwd());
   } catch {
@@ -43,7 +54,8 @@ export function gettempdir(env = process.env) {
   for (let dir of dirlist) {
     if (dir !== '.') dir = abspath(dir);
     for (let seq = 0; seq < 100; seq++) {
-      const filename = `${dir.replace(/\/+$/, '') || '/'}/${candidate('', '')}`.replace(/^\/\//, '/');
+      const filename = windowsHost() ? win32.join(dir, candidate('', ''))
+        : `${dir.replace(/\/+$/, '') || '/'}/${candidate('', '')}`.replace(/^\/\//, '/');
       let fd;
       try {
         fd = openSync(filename, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
@@ -88,7 +100,7 @@ export function _resetTempdir() {
 export function mkstemp({ suffix = '', prefix = 'tmp', dir = null } = {}) {
   const directory = abspath(dir ?? gettempdir());
   for (let attempt = 0; attempt < TMP_MAX; attempt++) {
-    const path = `${directory.replace(/\/+$/, '')}/${candidate(prefix, suffix)}`;
+    const path = joinPath(directory, candidate(prefix, suffix));
     try {
       return { fd: openSync(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600), path };
     } catch (error) {
@@ -104,7 +116,7 @@ export function mkstemp({ suffix = '', prefix = 'tmp', dir = null } = {}) {
 export function mkdtemp({ suffix = '', prefix = 'tmp', dir = null } = {}) {
   const directory = abspath(dir ?? gettempdir());
   for (let attempt = 0; attempt < TMP_MAX; attempt++) {
-    const path = `${directory.replace(/\/+$/, '')}/${candidate(prefix, suffix)}`;
+    const path = joinPath(directory, candidate(prefix, suffix));
     try {
       mkdirSync(path, 0o700);
       return path;

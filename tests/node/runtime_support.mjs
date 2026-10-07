@@ -73,7 +73,7 @@ export function applicationFixture(root, { version = '26.924.22138', runtime_ver
 /** A realpath'd temporary directory with cleanup(): tempfile.TemporaryDirectory().resolve(). */
 export function tempDir(prefix = 'lcu-node-test-') {
   const path = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
-  return { path, cleanup: () => rmSync(path, { recursive: true, force: true }) };
+  return { path, cleanup: () => rmSync(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) };
 }
 
 /** patch.dict(os.environ, values, clear=True) around fn (sync or async). */

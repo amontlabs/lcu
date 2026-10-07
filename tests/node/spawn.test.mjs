@@ -6,10 +6,13 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { machine } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { DISPOSITION_SCRIPT, tempDir } from './runtime_support.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('compat/spawn re-ignores signals and refuses ENOEXEC for POSIX children (/usr/bin/env, bash, shebang scripts); Windows launches children with CreateProcess');
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url));
 const SPAWN = JSON.stringify(join(REPO, 'lcu/compat/spawn.mjs'));

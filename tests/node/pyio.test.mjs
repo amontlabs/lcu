@@ -7,9 +7,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { python312 } from './runtime_support.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url));
 const PYIO = join(REPO, 'lcu/compat/pyio.mjs');
@@ -26,13 +27,14 @@ function python31210() {
   return null;
 }
 const PYTHON = python31210();
-const NO_ORACLE = PYTHON === null && 'needs CPython 3.12.10 (LCU_TEST_PYTHON)';
+const NO_ORACLE = (PYTHON === null && 'needs CPython 3.12.10 (LCU_TEST_PYTHON)') ||
+  skipOnWindows('compares with CPython\'s POSIX pipe buffering (st_blksize, no CRLF translation) using /bin/echo, /bin/sh and execve children');
 
 function node(body) {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-pyio-'));
   try {
     const file = join(directory, 'main.mjs');
-    writeFileSync(file, `import { stdout_write as out, stdout_flush as flush, stderr_write as err } from ${JSON.stringify(PYIO)};
+    writeFileSync(file, `import { stdout_write as out, stdout_flush as flush, stderr_write as err } from ${JSON.stringify(pathToFileURL(PYIO).href)};
 import { spawnSync } from 'node:child_process';
 ${body}`);
     const done = spawnSync(process.execPath, [file], { encoding: 'utf8' });
@@ -120,7 +122,7 @@ for o in json.load(open(sys.argv[1])):
     elif o[0] == 'f': sys.stdout.flush()
     else: subprocess.run(['/bin/sh', '-c', 'printf %s ' + o[1]])`, file]);
         const program = join(directory, 'main.mjs');
-        writeFileSync(program, `import { stdout_write, stdout_flush } from ${JSON.stringify(PYIO)};
+        writeFileSync(program, `import { stdout_write, stdout_flush } from ${JSON.stringify(pathToFileURL(PYIO).href)};
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 for (const o of JSON.parse(readFileSync(process.argv[2], 'utf8'))) {
@@ -147,7 +149,7 @@ for (const o of JSON.parse(readFileSync(process.argv[2], 'utf8'))) {
       const directory = mkdtempSync(join(tmpdir(), 'lcu-pyio-'));
       try {
         const program = join(directory, 'main.mjs');
-        writeFileSync(program, `import { stdout_write } from ${JSON.stringify(PYIO)};\nstdout_write('${text}');`);
+        writeFileSync(program, `import { stdout_write } from ${JSON.stringify(pathToFileURL(PYIO).href)};\nstdout_write('${text}');`);
         const got = spawnSync(process.execPath, [program], { env: runEnv });
         const want = spawnSync(PYTHON, ['-c', `import sys; sys.stdout.write('${text}')`], { env: runEnv });
         assert.equal(want.status === 0, got.status === 0, JSON.stringify(env));
@@ -168,7 +170,7 @@ for (const o of JSON.parse(readFileSync(process.argv[2], 'utf8'))) {
     const directory = mkdtempSync(join(tmpdir(), 'lcu-pyio-'));
     try {
       const file = join(directory, 'main.mjs');
-      writeFileSync(file, `import { stdout_write as out } from ${JSON.stringify(PYIO)};\nout('data\\n');`);
+      writeFileSync(file, `import { stdout_write as out } from ${JSON.stringify(pathToFileURL(PYIO).href)};\nout('data\\n');`);
       // The reader closes its end at once; the writer's status is reported on stderr after its own output.
       const script = '( "$0" "$@"; echo "status=$?" >&2 ) | ( exec 0<&-; sleep 1 )';
       const done = spawnSync('/bin/sh', ['-c', script, process.execPath, file], { encoding: 'utf8' });
@@ -185,8 +187,8 @@ function trace(body) {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-pytrace-'));
   try {
     const file = join(directory, 'main.mjs');
-    writeFileSync(file, `import { format_traceback, python_exception } from ${JSON.stringify(PYTRACE)};
-import { PyOSError } from ${JSON.stringify(join(REPO, 'lcu/compat/pyerr.mjs'))};
+    writeFileSync(file, `import { format_traceback, python_exception } from ${JSON.stringify(pathToFileURL(PYTRACE).href)};
+import { PyOSError } from ${JSON.stringify(pathToFileURL(join(REPO, 'lcu/compat/pyerr.mjs')).href)};
 ${body}`);
     const done = spawnSync(process.execPath, [file], { encoding: 'utf8' });
     assert.equal(done.status, 0, done.stderr);

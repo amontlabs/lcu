@@ -29,10 +29,10 @@ export const split = pathlib.split;
 
 export const dirname = (p) => split(p)[0];
 
-/** os.path.normpath (POSIX). */
-export const normpath = (path) => pathlib.normpath(path);
+/** os.path.normpath (POSIX, whatever the host: archive entry names). */
+export const normpath = (path) => pathlib.posixNormpath(path);
 
-/** os.path.abspath (POSIX, current directory). */
+/** os.path.abspath of the host flavour (compat/tempfile): POSIX everywhere but a Windows host. */
 export function abspath(path) {
   return pathlib.abspath(path);
 }

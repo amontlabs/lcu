@@ -42,6 +42,6 @@ export const lcu = (name) => import(new URL(`../../lcu/${name}.mjs`, import.meta
 /** tempfile.TemporaryDirectory() with a resolved path; removed after the test. */
 export function tempdir(t, prefix = 'lcu-p4-') {
   const dir = realpathSync(mkdtempSync(`${tmpdir()}/${prefix}`));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })); // Windows: a child may still release its cwd
   return dir;
 }

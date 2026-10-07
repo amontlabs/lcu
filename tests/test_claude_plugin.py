@@ -6,6 +6,7 @@ Nothing here reaches the network, a real LCU installation or Claude Code's confi
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -120,6 +121,16 @@ class ClaudePluginHookTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, '')
         return json.loads(result.stdout)['systemMessage'] if result.stdout else None
+
+    def test_every_external_tool_that_could_leave_the_sandbox_is_a_stand_in(self):
+        # The hook runs as the user in their own session, so it resolves tools through PATH (a hostile PATH there is
+        # the user's own). That is only safe here if the stand-ins are what PATH resolves: never the real curl (network),
+        # uname (platform) or plutil (the real Claude configuration), neither through PATH nor by an absolute path.
+        path = f'{self.shims}{os.pathsep}/usr/bin{os.pathsep}/bin'
+        for tool in ('curl', 'uname', 'plutil'):
+            self.assertEqual(shutil.which(tool, path=path), str(self.shims / tool), tool)
+        code = '\n'.join(line for line in SCRIPT.read_text().splitlines() if not line.lstrip().startswith('#'))
+        self.assertIsNone(re.search(r'/(?:usr/)?(?:s?bin)/(?:curl|uname|plutil)\b', code))
 
     def recorded(self, name):
         path = self.record / name

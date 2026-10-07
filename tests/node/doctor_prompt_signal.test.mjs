@@ -13,6 +13,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, it } from 'node:test';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DOCTOR = pathToFileURL(path.join(ROOT, 'lcu/doctor.mjs')).href;
@@ -112,7 +113,8 @@ describe('doctor prompt and SIGINT (R9)', () => {
     assert.ok(result.output.includes(FINISH), JSON.stringify(result.output));
   });
 
-  it('SIGINT to the waiting process (stdin an open empty pipe) finishes the guidance and exits 0', async () => {
+  it('SIGINT to the waiting process (stdin an open empty pipe) finishes the guidance and exits 0', { skip: skipOnWindows(
+    'SIGINT does not exist on Windows: child.kill(SIGINT) is TerminateProcess, there is no KeyboardInterrupt to handle') }, async () => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', SCRIPT],
       { stdio: ['pipe', 'pipe', 'pipe'], detached: true, env: { PATH: '/usr/bin:/bin', HOME: '/nonexistent' } });
     let output = '';

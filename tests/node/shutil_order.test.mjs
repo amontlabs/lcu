@@ -7,10 +7,12 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it } from 'node:test';
 
 import { rmtree } from '../../lcu/compat/shutil.mjs';
 import { python312 } from './runtime_support.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('compares rmtree order with CPython when chmod 0 makes a directory unreadable; Windows has no such permission failure');
 
 function python31210() {
   for (const candidate of [process.env.LCU_TEST_PYTHON, process.env.LCU_PYTHON312, '/opt/cpython-3.12.10/bin/python3.12',

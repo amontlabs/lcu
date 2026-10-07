@@ -2,7 +2,7 @@
 // .port/reviews/probes-platforms/doctor/ with real child processes (harmless /bin/sh and node children only).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,14 +26,18 @@ afterEach(() => {
   rmSync(base, { recursive: true, force: true });
 });
 
-// A fake "node" for the probe: a shell script printing the given bytes and exiting with `status`.
+// A fake "node" for the probe: the real Node with a --require preload (NODE_OPTIONS) that writes the given bytes and
+// exits with `status` before the probe script runs.  (A shell script would not run on Windows.)
 function fakeNode(bytes, status) {
-  const file = path.join(base, 'fake-node');
-  writeFileSync(file, `#!/bin/sh\nprintf '${[...bytes].map((b) => `\\${b.toString(8).padStart(3, '0')}`).join('')}' >&${status ? 2 : 1}\nexit ${status}\n`);
-  chmodSync(file, 0o755);
+  const file = path.join(base, 'fake-node.cjs');
+  writeFileSync(file, `require('node:fs').writeSync(${status ? 2 : 1}, Buffer.from('${Buffer.from(bytes).toString('hex')}', 'hex'));\n` +
+    `process.exit(${status});\n`);
   const runtime = path.join(base, 'runtime');
   mkdirSync(path.join(runtime, 'lib'), { recursive: true });
-  return { runtime, env: { NODE_REPL_NODE_PATH: file, PATH: '/usr/bin:/bin' } };
+  const env = { NODE_REPL_NODE_PATH: process.execPath, NODE_OPTIONS: `--require=${JSON.stringify(file.replaceAll('\\', '/'))}`,
+    PATH: '/usr/bin:/bin' };
+  if (process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
+  return { runtime, env };
 }
 
 describe('finding 11: probe stderr is read with universal newlines and replacement decoding', () => {
@@ -76,7 +80,8 @@ describe('finding 6: the sandbox probe directory follows tempfile.gettempdir()',
       const result = doctor.linux_sandbox_works({ CODEX_CLI_PATH: '/fixture/codex' });
       process.stdout.write(JSON.stringify({ result, cwd }));`;
     const done = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
-      env: { PATH: '/usr/bin:/bin', TMPDIR: path.join(base, 'missing'), TEMP: temp, TMP: temp }, encoding: 'utf8',
+      env: { PATH: '/usr/bin:/bin', TMPDIR: path.join(base, 'missing'), TEMP: temp, TMP: temp,
+        ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}) }, encoding: 'utf8',
     });
     assert.equal(done.status, 0, done.stderr);
     const { result, cwd } = JSON.parse(done.stdout);

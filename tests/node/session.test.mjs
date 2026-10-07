@@ -4,12 +4,15 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { discover } from '../../lcu/session.mjs';
 import { preflight } from '../../lcu/compat/execve.mjs';
 import { rejectsWith, tempDir } from './runtime_support.mjs';
+import { skippedOnWindows } from './windows_skip.mjs';
+
+const { describe, it } = skippedOnWindows('lcu-session picks a Linux/macOS desktop session (/proc, getuid, XFCE); never runs on Windows');
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -49,8 +52,8 @@ describe('session.discover', () => {
 
   it('test_another_users_desktop_is_rejected', async () => {
     session(123);
-    await rejectsWith(assert, () => discover(root, process.getuid() + 1), 'ValueError',
-      new RegExp(`^Expected one XFCE desktop for UID ${process.getuid() + 1}; found 0\\. Start a desktop, or use --session direct with an explicit GUI environment\\.$`));
+    await rejectsWith(assert, () => discover(root, process.getuid?.() + 1), 'ValueError',
+      new RegExp(`^Expected one XFCE desktop for UID ${process.getuid?.() + 1}; found 0\\. Start a desktop, or use --session direct with an explicit GUI environment\\.$`));
   });
 
   it('non-numeric entries, other programs, vanished and undecodable entries are skipped', () => {
@@ -84,7 +87,7 @@ describe('session.main through the entry module', () => {
   });
 
   it('another account is refused', () => {
-    if (process.getuid() === 0) return;
+    if (process.getuid?.() === 0) return;
     const result = run(['--user', 'root', '--', 'true']);
     assert.equal(result.status, 1);
     assert.equal(result.stderr, 'LCU session: Run the launcher as the selected desktop account.\n');

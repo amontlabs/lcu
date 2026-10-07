@@ -3,11 +3,18 @@
 // teardown and spawn errors. Children are this test's own Node scripts; only they are ever signalled.
 import assert from 'node:assert/strict';
 import { createHook } from 'node:async_hooks';
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 
+import { reprStr } from '../../lcu/compat/pyerr.mjs';
 import { lcu, tempdir } from './p4_support.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
+
+// Fixtures that are `#!` scripts named `codex` (executed through the kernel's shebang handling)
+// exist on POSIX only; Windows runs codex.exe.
+const SHEBANG = skipOnWindows('needs a #! script as the codex executable (Windows runs codex.exe, no shebang exec)');
 
 const { AppServer, AppServerRequestError, app_server, popen } = await lcu('app_server');
 
@@ -48,16 +55,21 @@ setTimeout(() => process.exit(0), Number(process.env.LIFE || 60000)).unref();
 `;
 
 function server(t, env = {}) {
-  const dir = tempdir(t);
+  // The directory is removed AFTER the child ended: on Windows a running child's cwd cannot be deleted.
+  const dir = realpathSync(mkdtempSync(`${tmpdir()}/lcu-p4-`));
   const script = `${dir}/server.cjs`;
   writeFileSync(script, SERVER);
   const child = popen([process.execPath, script], { cwd: dir, env: { ...process.env, ...env }, stderrFd: 'ignore' });
   child.fixtureDir = dir;
   t.after(() => {
-    child.stdin_close();
-    if (child.poll() === null) child.terminate();
-    try { child.wait(5); } catch { child.kill(); child.wait(5); }
-    child.close();
+    try {
+      child.stdin_close();
+      if (child.poll() === null) child.terminate();
+      try { child.wait(5); } catch { child.kill(); child.wait(5); }
+      child.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
   });
   return child;
 }
@@ -115,7 +127,7 @@ test('request handler envelopes are validated', (t) => {
   assert.throws(() => bad.call('go', {}), { name: 'ValueError', message: 'App-server request handler returned an invalid response envelope.' });
 });
 
-test('app_server runs the CLI with the exact argv, cwd and env and shuts it down', (t) => {
+test('app_server runs the CLI with the exact argv, cwd and env and shuts it down', { skip: SHEBANG }, (t) => {
   const dir = tempdir(t);
   const cli = `${dir}/codex`;
   writeFileSync(cli, `#!${process.execPath}\n${SERVER}`);
@@ -136,7 +148,7 @@ test('app_server runs the CLI with the exact argv, cwd and env and shuts it down
   assert.equal(lines[3], `{"id": 2, "method": "hooks/list", "params": {"cwds": ["${dir}"]}}`);
 });
 
-test('app_server terminates a child that ignores EOF, and propagates body errors', (t) => {
+test('app_server terminates a child that ignores EOF, and propagates body errors', { skip: SHEBANG }, (t) => {
   const dir = tempdir(t);
   const cli = `${dir}/codex`;
   writeFileSync(cli, `#!${process.execPath}\n${SERVER}`);
@@ -148,13 +160,16 @@ test('app_server terminates a child that ignores EOF, and propagates body errors
 
 test('spawn failures read like Python Popen errors', (t) => {
   const dir = tempdir(t);
+  // Python's message quotes repr(filename): on Windows the backslashes are doubled.
   assert.throws(() => app_server(`${dir}/missing`, dir, process.env, () => null),
-    { message: `[Errno 2] No such file or directory: '${dir}/missing'` });
+    { message: `[Errno 2] No such file or directory: ${reprStr(`${dir}/missing`)}` });
   assert.throws(() => app_server(process.execPath, `${dir}/nowhere`, process.env, () => null),
-    { message: `[Errno 2] No such file or directory: '${dir}/nowhere'` });
-  writeFileSync(`${dir}/plain`, 'x');
-  assert.throws(() => app_server(`${dir}/plain`, dir, process.env, () => null),
-    { message: `[Errno 13] Permission denied: '${dir}/plain'` });
+    { message: `[Errno 2] No such file or directory: ${reprStr(`${dir}/nowhere`)}` });
+  if (process.platform !== 'win32') { // a non-executable file: EACCES from execve (CreateProcess fails differently)
+    writeFileSync(`${dir}/plain`, 'x');
+    assert.throws(() => app_server(`${dir}/plain`, dir, process.env, () => null),
+      { message: `[Errno 13] Permission denied: '${dir}/plain'` });
+  }
   assert.equal(existsSync(`${dir}/nowhere`), false);
 });
 
@@ -180,7 +195,10 @@ test('a worker fault while in flight is reported and the child stays supervised'
   assert.ok(Date.now() - started < 2000);
   child.stdin_close();
   child.terminate();
-  assert.equal(child.wait(5), 0); // the fixture exits 0 on SIGTERM
+  // POSIX: the fixture exits 0 on SIGTERM.  Windows: TerminateProcess, there is no handler to run.
+  const status = child.wait(5);
+  if (process.platform === 'win32') assert.notEqual(status, null);
+  else assert.equal(status, 0);
 });
 
 test('worker death is detected, the child is supervised directly and terminated', async (t) => {
@@ -197,7 +215,7 @@ test('worker death is detected, the child is supervised directly and terminated'
   assert.notEqual(child.poll(), null);
 });
 
-test('app_server keeps the body error and still shuts the child down after transport loss', (t) => {
+test('app_server keeps the body error and still shuts the child down after transport loss', { skip: SHEBANG }, (t) => {
   const dir = tempdir(t);
   const cli = `${dir}/codex`;
   writeFileSync(cli, `#!${process.execPath}\n${SERVER}`);
@@ -215,7 +233,7 @@ test('app_server keeps the body error and still shuts the child down after trans
   assert.ok(Number.isInteger(pid));
 });
 
-test('app_server cleanup after the host died keeps the body error and terminates the child', (t) => {
+test('app_server cleanup after the host died keeps the body error and terminates the child', { skip: SHEBANG }, (t) => {
   const dir = tempdir(t);
   const cli = `${dir}/codex`;
   writeFileSync(cli, `#!${process.execPath}\n${SERVER}`);
@@ -240,7 +258,7 @@ test('failed spawns retain no worker', async (t) => {
   try {
     for (let i = 0; i < 3; i++) {
       assert.throws(() => popen([`${dir}/missing-${i}`], { cwd: dir, env: process.env, stderrFd: 'ignore' }),
-        { message: `[Errno 2] No such file or directory: '${dir}/missing-${i}'` });
+        { message: `[Errno 2] No such file or directory: ${reprStr(`${dir}/missing-${i}`)}` });
     }
     await sleep(300);
     assert.equal(workers.size, 0);
@@ -249,7 +267,7 @@ test('failed spawns retain no worker', async (t) => {
   }
 });
 
-test('an executable without a #! line is refused like execve (never run through a shell)', (t) => {
+test('an executable without a #! line is refused like execve (never run through a shell)', { skip: skipOnWindows('execve and ENOEXEC are POSIX; Windows has no exec-format check for extensionless files') }, (t) => {
   const dir = tempdir(t);
   const cli = `${dir}/codex`;
   writeFileSync(cli, `touch '${dir}/ran'\n`);
@@ -268,7 +286,13 @@ function fakePowershell(answer) {
     return answer(pid);
   };
 }
+const REAL_POWERSHELL = transport.internals.powershell;
 const fromHost = (pid) => {
+  // On a real Windows host the answer is the real Win32_Process query (the fixture would call itself otherwise).
+  if (process.platform === 'win32') {
+    return REAL_POWERSHELL(`$p = Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}"; ` +
+      'if ($p) { "$($p.ParentProcessId) $($p.CreationDate.ToUniversalTime().ToString(\'o\'))" } else { "none" }');
+  }
   const status = transport.internals.processStatus(pid, process.platform);
   if (!status.exists || !status.running) return { status: 0, stdout: 'none\r\n' };
   return { status: 0, stdout: `${status.ppid} 2026-10-06T08:00:00.1234567Z\r\n` };
@@ -283,7 +307,8 @@ function windowsFixture(t, answer) {
 test('Windows: after worker loss a running child is still running, times out, and is terminated', async (t) => {
   windowsFixture(t, fromHost);
   const child = server(t, { FAKE_STAY: '1' });
-  assert.equal(child.identity, '2026-10-06T08:00:00.1234567Z');
+  if (process.platform === 'win32') assert.match(child.identity, /^\d{4}-\d\d-\d\dT/);
+  else assert.equal(child.identity, '2026-10-06T08:00:00.1234567Z');
   await child.worker.terminate(); // actual loss of the transport host
   child.hostDead = 'fixture: worker terminated';
   assert.equal(child.poll(), null);
