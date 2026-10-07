@@ -21,6 +21,7 @@ import { dumps, toPlain, ValueError } from '../../lcu/compat/pyjson.mjs';
 import { TimeoutExpired } from '../../lcu/compat/subprocess.mjs';
 import { _resetTempdir } from '../../lcu/compat/tempfile.mjs';
 import { skipOnWindows } from './windows_skip.mjs';
+import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const INFO = {
@@ -44,7 +45,7 @@ beforeEach(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-update-test-')));
   home = path.join(tmp, 'home');
   fs.mkdirSync(home);
-  Object.assign(process.env, { HOME: home, XDG_CACHE_HOME: path.join(home, 'xdg'), LOCALAPPDATA: path.join(home, 'local') });
+  Object.assign(process.env, { HOME: home, USERPROFILE: home, XDG_CACHE_HOME: path.join(home, 'xdg'), LOCALAPPDATA: path.join(home, 'local') });
   delete process.env.LCU_NO_UPDATE_CHECK;
   for (const key of ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']) delete process.env[key];
   _resetTempdir();
@@ -247,7 +248,7 @@ describe('update', () => {
     const text = fs.readFileSync(cacheFile(), 'utf8');
     assert.equal(text, '{"checked_at": 1759660000.25, "latest": {"version": "0.9.2", "tag": "v0.9.2", "severity": "normal", '
       + '"release_url": "https://github.com/amontlabs/lcu/releases/tag/v0.9.2"}, "error": null}');
-    assert.equal(fs.statSync(cacheFile()).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(cacheFile()).mode & 0o777, 0o600); // Windows has no mode bits
     assert.deepEqual(fs.readdirSync(path.dirname(cacheFile())), ['update.json']);
     update._inject.now = () => 1759660000;
     await update.check(root);
@@ -788,7 +789,7 @@ describe('update', () => {
     assert.ok(text.endsWith('"}}\n'));
     const announced = siblingFile('announced.json');
     assert.match(fs.readFileSync(announced, 'utf8'), /^\{"\*": \{"version": "0\.9\.2", "at": \d+\.\d+\}, "s1": \{"version": "0\.9\.2", "at": \d+\.\d+\}\}$/);
-    assert.equal(fs.statSync(announced).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(announced).mode & 0o777, 0o600);
   });
 
   test('hook without notice is silent', async () => {
@@ -810,7 +811,7 @@ describe('update', () => {
   });
 
   test('F16: hook stdin is bounded by code points, strict UTF-8', () => {
-    const script = `import(${JSON.stringify(path.join(ROOT, 'lcu/update.mjs'))}).then((m) => { const id = m.hook_session_id(); process.stdout.write(String(id === null ? null : [...id].length)); })`;
+    const script = `import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'lcu/update.mjs')).href)}).then((m) => { const id = m.hook_session_id(); process.stdout.write(String(id === null ? null : [...id].length)); })`;
     const run = (input) => spawnSync(process.execPath, ['-e', script], { input, encoding: 'utf8' }).stdout;
     assert.equal(run(Buffer.from(`{"session_id": "${'\u{1F600}'.repeat(530000)}"}`)), '530000');
     assert.equal(run(Buffer.from(`{"session_id": "${'a'.repeat((1 << 20) + 10)}"}`)), 'null'); // cut at 1 MiB characters

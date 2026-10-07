@@ -36,6 +36,9 @@ if (nodeModule.registerHooks) {
   nodeModule.register('data:text/javascript,' + encodeURIComponent(hook));
 }
 
+/** Native spelling of a path built with `/` joins (Windows backslashes); identity elsewhere. */
+export const nat = (p) => (process.platform === 'win32' ? String(p).replaceAll('/', '\\') : p);
+
 export const ROOT = fileURLToPath(new URL('../../', import.meta.url)).replace(/\/$/, '');
 export const lcu = (name) => import(new URL(`../../lcu/${name}.mjs`, import.meta.url).href);
 

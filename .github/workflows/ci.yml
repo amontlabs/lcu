@@ -126,6 +126,9 @@ jobs:
       # .port/notes/windows-tests.md).  .github/workflows/windows-node.yml runs just this step for quick iteration.
       - name: tests/node (PATH Node only)
         shell: bash
+        # The Python oracles print UTF-8 like they do on the Linux runners (not the console code page).
+        env:
+          PYTHONUTF8: '1'
         run: LCU_TEST_PYTHON="$(command -v python)" LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
       - run: python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"
       - run: python scripts/check_archive.py (Get-ChildItem "$env:RUNNER_TEMP\dist\*.zip").FullName

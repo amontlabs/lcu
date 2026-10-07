@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { lcu, tempdir } from './p4_support.mjs';
+import { lcu, tempdir, nat } from './p4_support.mjs';
 
 const { HOST_ONLY, install } = await lcu('claude_visibility');
 const { JSONDecodeError } = await import('../../lcu/compat/pyjson.mjs');
@@ -19,8 +19,8 @@ function setup(t) {
 
 test('user scope preserves unrelated settings and is idempotent', (t) => {
   const home = setup(t);
-  const path = `${home}/.claude/settings.json`;
-  mkdirSync(`${home}/.claude`);
+  const path = nat(`${home}/.claude/settings.json`);
+  mkdirSync(nat(`${home}/.claude`));
   writeFileSync(path, pyDumps({
     model: 'sonnet',
     permissions: { allow: ['Read'], deny: ['Bash(rm *)'] },
@@ -55,8 +55,8 @@ test('user scope preserves unrelated settings and is idempotent', (t) => {
 
 test('existing hook groups are preserved and malformed hooks are refused', (t) => {
   const home = setup(t);
-  const path = `${home}/.claude/settings.json`;
-  mkdirSync(`${home}/.claude`);
+  const path = nat(`${home}/.claude/settings.json`);
+  mkdirSync(nat(`${home}/.claude`));
   const contextHook = {
     type: 'mcp_tool', server: 'lcu', tool: 'set_turn_context',
     input: {
@@ -83,8 +83,8 @@ test('existing hook groups are preserved and malformed hooks are refused', (t) =
 
 test('malformed nested hook structures are refused without writes', (t) => {
   const home = setup(t);
-  const path = `${home}/.claude/settings.json`;
-  mkdirSync(`${home}/.claude`);
+  const path = nat(`${home}/.claude/settings.json`);
+  mkdirSync(nat(`${home}/.claude`));
   for (const value of [
     { hooks: { PreToolUse: {} } },
     { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: {} }] } },
@@ -99,19 +99,19 @@ test('malformed nested hook structures are refused without writes', (t) => {
 
 test('project scope writes local file only', (t) => {
   const home = setup(t);
-  const project = `${home}/project`;
+  const project = nat(`${home}/project`);
   mkdirSync(project);
   const path = install(home, { project });
-  assert.equal(path, `${project}/.claude/settings.local.json`);
+  assert.equal(path, nat(`${project}/.claude/settings.local.json`));
   assert.deepEqual(read(path).permissions.deny, HOST_ONLY);
-  assert.equal(existsSync(`${home}/.claude/settings.json`), false);
-  assert.equal(existsSync(`${project}/.claude/settings.json`), false);
+  assert.equal(existsSync(nat(`${home}/.claude/settings.json`)), false);
+  assert.equal(existsSync(nat(`${project}/.claude/settings.json`)), false);
 });
 
 test('malformed existing settings remain unchanged', (t) => {
   const home = setup(t);
-  const path = `${home}/.claude/settings.json`;
-  mkdirSync(`${home}/.claude`);
+  const path = nat(`${home}/.claude/settings.json`);
+  mkdirSync(nat(`${home}/.claude`));
   writeFileSync(path, '{broken JSON');
   assert.throws(() => install(home), JSONDecodeError);
   assert.equal(readFileSync(path, 'utf8'), '{broken JSON');
@@ -120,8 +120,8 @@ test('malformed existing settings remain unchanged', (t) => {
 test('settings bytes match Python json.dumps(indent=2) for unrelated values', (t) => {
   // Extra (beyond the Python suite): floats, big ints and integer-like keys survive the read-modify-write.
   const home = setup(t);
-  const path = `${home}/.claude/settings.json`;
-  mkdirSync(`${home}/.claude`);
+  const path = nat(`${home}/.claude/settings.json`);
+  mkdirSync(nat(`${home}/.claude`));
   writeFileSync(path, '{"b": 1.0, "10": 2, "2": 12345678901234567890, "s": "\\u00e9"}');
   install(home);
   const text = readFileSync(path, 'utf8');

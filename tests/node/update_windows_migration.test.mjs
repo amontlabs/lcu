@@ -157,7 +157,7 @@ test('a failed migration is reported, keeps the old registration and its pin, an
   const codexBefore = fs.readFileSync(codexFile());
   const pinsBefore = fs.readFileSync(pinsFile());
   assert.equal(await update.main(root, ['--post-install']), 1); // `lcu update` prints its non-fatal hint
-  assert.match(err, /lcu update: could not move the Codex \(user\) registration off the previous launcher: MCP: installer exited 1: boom\. It keeps working through the old launcher; rerun `.*lcu\.cmd setup --agent codex` to finish\.\n/);
+  assert.match(err, /lcu update: could not move the Codex \(user\) registration off the previous launcher: MCP: installer exited 1: boom\. It keeps working through the old launcher; rerun `.*lcu\.cmd setup --agent codex` to finish\.\r?\n/);
   assert.match(err, /--agent claude-code --scope project --project /);
   assert.ok(fs.readFileSync(codexFile()).equals(codexBefore));
   assert.ok(fs.readFileSync(pinsFile()).equals(pinsBefore));

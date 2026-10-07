@@ -21,6 +21,7 @@ import { crc32 } from '../../lcu/compat/zip.mjs';
 import { dumps, ValueError } from '../../lcu/compat/pyjson.mjs';
 import { _resetTempdir } from '../../lcu/compat/tempfile.mjs';
 import { skipOnWindows } from './windows_skip.mjs';
+import { quote } from '../../lcu/compat/shlex.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const INFO = { version: '0.9.2', tag: 'v0.9.2', release_url: 'https://example.invalid/r', severity: 'normal' };
@@ -203,7 +204,7 @@ describe('apply', () => {
     assert.equal(runs.length, 0);
     assert.deepEqual(requests, []);
     assert.equal(out, `LCU update: 0.9.1 -> 0.9.2\n  prefix:  ${prefix}\n  archive: lcu-0.9.2-linux-x64.tar.gz\n  release: https://example.invalid/r\n`);
-    assert.equal(err, `Not interactive; nothing changed. To apply, run:\n  ${path.join(prefix, 'current/bin/lcu')} update --yes\n`);
+    assert.equal(err, `Not interactive; nothing changed. To apply, run:\n  ${quote(path.join(prefix, 'current/bin/lcu'))} update --yes\n`);
   });
 
   test('F28: an explicit null release_url prints None', async () => {
@@ -215,7 +216,7 @@ describe('apply', () => {
     assert.ok(out.endsWith('  release: \n'));
   });
 
-  test('interactive prompt: yes, no, EOF (F17: Python strip)', async () => {
+  test('interactive prompt: yes, no, EOF (F17: Python strip)', { skip: skipOnWindows('extracts the linux/macOS .tar.gz release archive and runs the POSIX installer handover; tar extraction is POSIX-only (compat/tar) and a Windows host updates from the .zip (windows cases below)') }, async () => {
     const release = install();
     served = { archive: tarBytes() };
     seams({ tty: true });
@@ -254,7 +255,7 @@ describe('apply', () => {
     assert.deepEqual(fs.readdirSync(tmpdir), []);
   });
 
-  test('download writes the served bytes and verifies them', async () => {
+  test('download writes the served bytes and verifies them', { skip: skipOnWindows('extracts the linux/macOS .tar.gz release archive and runs the POSIX installer handover; tar extraction is POSIX-only (compat/tar) and a Windows host updates from the .zip (windows cases below)') }, async () => {
     const release = install();
     const archive = tarBytes([['lcu-0.9.2-linux-x64/payload', crypto.randomBytes(300000)]]);
     let seen = null;
@@ -291,13 +292,13 @@ describe('apply', () => {
     assert.equal(runs.length, 0);
   });
 
-  test('archive without a release bundle', async () => {
+  test('archive without a release bundle', { skip: skipOnWindows('extracts the linux/macOS .tar.gz release archive and runs the POSIX installer handover; tar extraction is POSIX-only (compat/tar) and a Windows host updates from the .zip (windows cases below)') }, async () => {
     const release = install();
     assert.equal(await runApply(release, tarBytes([], 'other-dir')), 1);
     assert.match(err, /lcu update: The archive does not contain an LCU release bundle\.\n$/);
   });
 
-  test('linux command', async () => {
+  test('linux command', { skip: skipOnWindows('extracts the linux/macOS .tar.gz release archive and runs the POSIX installer handover; tar extraction is POSIX-only (compat/tar) and a Windows host updates from the .zip (windows cases below)') }, async () => {
     const app = path.join(temp, 'chatgpt');
     fs.mkdirSync(app);
     const release = install('linux', 'x64', app);
@@ -311,13 +312,13 @@ describe('apply', () => {
     assert.deepEqual(fs.readdirSync(tmpdir), []); // temp dir removed
   });
 
-  test('missing recorded app adds no --existing-app', async () => {
+  test('missing recorded app adds no --existing-app', { skip: skipOnWindows('extracts the linux/macOS .tar.gz release archive and runs the POSIX installer handover; tar extraction is POSIX-only (compat/tar) and a Windows host updates from the .zip (windows cases below)') }, async () => {
     const release = install('linux', 'x64', path.join(temp, 'gone'));
     await runApply(release, tarBytes());
     assert.deepEqual(runs[0].slice(3), ['--prefix', prefix, '--runtime-only', '--skip-system']);
   });
 
-  test('macos command', async () => {
+  test('macos command', { skip: skipOnWindows('extracts the linux/macOS .tar.gz release archive and runs the POSIX installer handover; tar extraction is POSIX-only (compat/tar) and a Windows host updates from the .zip (windows cases below)') }, async () => {
     const app = path.join(temp, 'ChatGPT.app');
     fs.mkdirSync(app);
     const release = install('darwin', 'arm64', app);
@@ -398,7 +399,7 @@ describe('apply', () => {
     assert.equal(calls[0].timeout, 20000);
   });
 
-  test('installer failure status', async () => {
+  test('installer failure status', { skip: skipOnWindows('extracts the linux/macOS .tar.gz release archive and runs the POSIX installer handover; tar extraction is POSIX-only (compat/tar) and a Windows host updates from the .zip (windows cases below)') }, async () => {
     const release = install();
     assert.equal(await runApply(release, tarBytes(), { status: 7 }), 7);
     assert.equal(runs.length, 1); // no post-install after a failed install
@@ -406,7 +407,7 @@ describe('apply', () => {
     assert.equal(out.includes('installed'), false);
   });
 
-  test('post-install failure is not fatal', async () => {
+  test('post-install failure is not fatal', { skip: skipOnWindows('extracts the linux/macOS .tar.gz release archive and runs the POSIX installer handover; tar extraction is POSIX-only (compat/tar) and a Windows host updates from the .zip (windows cases below)') }, async () => {
     const release = install();
     assert.equal(await runApply(release, tarBytes(), { status: (n) => (n === 1 ? 0 : 3) }), 0);
     assert.ok(err.endsWith(`lcu update: could not refresh harness integrations; rerun \`${path.join(prefix, 'current/bin/lcu')} setup\` for your agents.\n`));
@@ -423,7 +424,7 @@ describe('apply', () => {
     assert.ok(err.endsWith(`${prefix} is not writable by this account. The verified release is at ${source}; install it with:\n  sudo /bin/sh -p ${source}/scripts/install.sh --prefix ${prefix} --runtime-only --skip-system --user desk\nThen delete ${path.join(tmpdir, kept[0])}.\n`), err);
   });
 
-  test('root needs SUDO_USER and passes --user', async () => {
+  test('root needs SUDO_USER and passes --user', { skip: skipOnWindows('extracts the linux/macOS .tar.gz release archive and runs the POSIX installer handover; tar extraction is POSIX-only (compat/tar) and a Windows host updates from the .zip (windows cases below)') }, async () => {
     const release = install();
     assert.equal(await runApply(release, tarBytes(), { uid: 0 }), 1);
     assert.ok(err.endsWith('lcu update: running as root without SUDO_USER; run it as the desktop account through sudo or as that account.\n'));
@@ -437,8 +438,9 @@ describe('apply', () => {
 
   test('installer_command', () => {
     const description = new Map([['platform', 'linux']]);
-    assert.deepEqual(apply.installer_command('linux', '/p', description, '/s'), ['/bin/sh', '-p', '/s/scripts/install.sh', '--prefix', '/p', '--runtime-only', '--skip-system']);
-    assert.deepEqual(apply.installer_command('windows', '/p', description, '/s', { python: ['py', '-3'] }), ['py', '-3', '-B', '/s/scripts/install_windows.py', '--prefix', '/p', '--runtime-only']);
+    const host = (p) => (process.platform === 'win32' ? p.replaceAll('/', '\\') : p); // joins use the host separator
+    assert.deepEqual(apply.installer_command('linux', '/p', description, '/s'), ['/bin/sh', '-p', host('/s/scripts/install.sh'), '--prefix', '/p', '--runtime-only', '--skip-system']);
+    assert.deepEqual(apply.installer_command('windows', '/p', description, '/s', { python: ['py', '-3'] }), ['py', '-3', '-B', host('/s/scripts/install_windows.py'), '--prefix', '/p', '--runtime-only']);
   });
 
   test('malformed installation.json / bundle.json', async () => {

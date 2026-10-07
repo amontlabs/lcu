@@ -32,7 +32,7 @@ const pythonVersion = spawnSync(PYTHON, ['-c', 'import platform; print(platform.
 const havePython = fs.existsSync(PYTHON_SOURCE) && pythonVersion === ORACLE;
 const pythonSkip = `differential oracle is CPython ${ORACLE}; python3 is ${pythonVersion || 'missing'}`;
 const ALL = ['pi', 'codex', 'claude-code', 'omp', 'hermes'];
-const UID = process.getuid();
+const UID = process.getuid?.() ?? 1000; // Windows has no uids: any non-root number
 const IS_ROOT = UID === 0;
 const USERNAME = os.userInfo().username;
 
@@ -1559,7 +1559,7 @@ describe('review regressions (port-setup.md)', () => {
     const s = await import(${JSON.stringify(setupUrl)});
     Object.assign(s.impl, { platform: 'linux', installer_environment: () => {}, installer_paths: () => {},
       configure: () => [], report_tested_pair: () => {},
-      validate: () => [{ pw_name: 'fixture', pw_uid: process.getuid(), pw_gid: process.getgid(), pw_dir: ${JSON.stringify(home)} }, ['codex']] });
+      validate: () => [{ pw_name: 'fixture', pw_uid: process.getuid?.() ?? 1000, pw_gid: process.getgid?.() ?? 1000, pw_dir: ${JSON.stringify(home)} }, ['codex']] });
     ${extra}
     try {
       await s.main(${JSON.stringify(['--prefix', prefix, '--session', 'direct', '--yes', '--no-chrome', ...argv])});

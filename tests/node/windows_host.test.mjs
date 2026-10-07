@@ -17,6 +17,7 @@ import { own, send as sendSignal, verify } from './process_guard.mjs';
 import * as windows_host from '../../lcu/windows_host.mjs';
 import { TimeoutExpired } from '../../lcu/compat/subprocess.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
+import { reprStr } from '../../lcu/compat/pyerr.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const LCU = join(ROOT, 'lcu');
@@ -608,8 +609,10 @@ describe('windows_host (structural extraction)', () => {
       const py = spawnSync(PYTHON, ['-B', join(ORACLE_ROOT, 'scripts/check_windows_host_layout.py'), ...argv], { encoding: 'utf8' });
       const js = spawnSync(NODE, [join(ROOT, 'scripts/check_windows_host_layout.mjs'), ...argv], { encoding: 'utf8' });
       const trampoline = spawnSync(PYTHON, ['-B', join(ROOT, 'scripts/check_windows_host_layout.py'), ...argv], { encoding: 'utf8' });
-      assert.deepEqual([js.status, js.stdout, js.stderr], [py.status, py.stdout, py.stderr], argv.join(' '));
-      assert.deepEqual([trampoline.status, trampoline.stdout], [py.status, py.stdout]);
+      // CPython's text-mode stdio writes CRLF on Windows; the Node tool writes LF.
+      const lf = (text) => text.replace(/\r\n/g, '\n');
+      assert.deepEqual([js.status, js.stdout, js.stderr], [py.status, lf(py.stdout), lf(py.stderr)], argv.join(' '));
+      assert.deepEqual([trampoline.status, lf(trampoline.stdout)], [py.status, lf(py.stdout)]);
     };
     tool(['--help']);
     _asar(archive, split());
@@ -624,7 +627,7 @@ describe('windows_host (structural extraction)', () => {
     _asar(archive, split());
     mkdirSync(join(base, 'derived'));
     assert.throws(() => windows_host.materialize_original_host(app, join(base, 'derived'), { node: NODE }),
-      (error) => error.message === `[Errno 17] File exists: '${join(base, 'derived')}'`);
+      (error) => error.message === `[Errno 17] File exists: ${reprStr(join(base, 'derived'))}`);
   });
 });
 

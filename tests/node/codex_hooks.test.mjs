@@ -5,11 +5,12 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { ROOT, lcu, tempdir } from './p4_support.mjs';
+import { ROOT, lcu, nat, tempdir } from './p4_support.mjs';
 import { which } from '../../lcu/compat/which.mjs';
 import { loads as tomlLoads } from '../../lcu/compat/toml.mjs';
 import { toPlain } from '../../lcu/compat/pyjson.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const hooks = await lcu('codex_hooks');
 const { _selected_codex_home, require_cli_hook_support, install_hooks, is_notice_group, notice_hook } = hooks;
@@ -17,11 +18,11 @@ const plain = (value) => toPlain(value, { allowReorder: true });
 
 // ------------------------------------------------------------------------------------------- test_codex_hooks
 test('absent CODEX_HOME defaults to .codex', () => {
-  assert.equal(_selected_codex_home({ HOME: '/home/a' }), '/home/a/.codex');
+  assert.equal(_selected_codex_home({ HOME: '/home/a', USERPROFILE: '/home/a' }), nat('/home/a/.codex')); // USERPROFILE: Windows' home
 });
 
 test('explicit CODEX_HOME is kept', () => {
-  assert.equal(_selected_codex_home({ HOME: '/home/a', CODEX_HOME: '/x/c' }), '/x/c');
+  assert.equal(_selected_codex_home({ HOME: '/home/a', CODEX_HOME: '/x/c' }), nat('/x/c'));
 });
 
 test('empty CODEX_HOME is rejected', () => {
@@ -50,7 +51,7 @@ test('require_cli_hook_support passes without codex and with a working one', (t)
   require_cli_hook_support(env);
 });
 
-test('require_cli_hook_support probes with an isolated home and reports a failing CLI', (t) => {
+test('require_cli_hook_support probes with an isolated home and reports a failing CLI', { skip: skipOnWindows('the fake Codex CLI is a #! shell script; Windows runs codex.exe and the probe passes only a fixed environment (no way to hand a script to a copy of node.exe)') }, (t) => {
   const dir = fakeCodex(t, [
     'if [ "$1" = "--version" ]; then echo " codex-cli 0.1.0 "; exit 0; fi',
     `printf '%s\\n' "$*" "$HOME" "$CODEX_HOME" "$(pwd -P)" "\${LOG-unset}" > "${'$'}{0%/bin/codex}/probe"`,
@@ -73,7 +74,7 @@ test('require_cli_hook_support probes with an isolated home and reports a failin
   assert.equal(probe.slice(5).join('\n'), '[hooks]\nStop = [{ hooks = [{ type = "mcp_tool", server = "lcu", tool = "turn_ended", input = { session_id = "s", turn_id = "t" } }] }]\n');
 });
 
-test('require_cli_hook_support without output says unknown version and no detail', (t) => {
+test('require_cli_hook_support without output says unknown version and no detail', { skip: skipOnWindows('the fake Codex CLI is a #! shell script; Windows runs codex.exe and the probe passes only a fixed environment (no way to hand a script to a copy of node.exe)') }, (t) => {
   const dir = fakeCodex(t, 'exit 1');
   assert.throws(() => require_cli_hook_support({ PATH: `${dir}/bin:/usr/bin:/bin`, HOME: '/h' }), {
     message: `Installed Codex CLI ${dir}/bin/codex (unknown version) cannot load the original MCP lifecycle hooks. Update this standalone Codex CLI to the latest public release with MCP tool hook support (official npm package: \`npm install -g @openai/codex@latest\`), then rerun \`lcu setup --agent codex\`.`,

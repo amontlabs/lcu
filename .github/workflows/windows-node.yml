@@ -47,6 +47,9 @@ jobs:
         run: python -m unittest -b $(ls test_*.py | sed 's/\.py$//')
       - name: tests/node (PATH Node only)
         shell: bash
+        # The Python oracles print UTF-8 like they do on the Linux runners (not the console code page).
+        env:
+          PYTHONUTF8: '1'
         run: |
           set -o pipefail
           LCU_TEST_PYTHON="$(command -v python)" LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh 2>&1 | tee "$RUNNER_TEMP/node-tests.log"

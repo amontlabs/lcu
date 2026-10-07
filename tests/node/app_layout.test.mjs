@@ -79,7 +79,8 @@ describe('CodexApplicationLayoutTests', () => {
   });
 
   it('error text names the normalised resources path', async () => {
+    const escaped = resources.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&'); // backslashes of a Windows path are not regex syntax
     await rejectsWith(assert, () => locate_codex_tools(resources + '/'), 'ValueError',
-      new RegExp(`layout in application resources: ${resources}$|layout: ${resources}$`));
+      new RegExp(`layout in application resources: ${escaped}$|layout: ${escaped}$`));
   });
 });

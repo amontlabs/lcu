@@ -5,7 +5,7 @@ import { python312 } from './runtime_support.mjs';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { machine, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -17,7 +17,8 @@ import * as relay from '../../lcu/native_host.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
 
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-const PYTHON = python312(); // the pinned CPython 3.12.10 oracle (never a PATH python3)
+const PYTHON = python312();
+const WINDOWS = process.platform === 'win32'; // the pinned CPython 3.12.10 oracle (never a PATH python3)
 const temporaries = [];
 after(() => { for (const dir of temporaries) rmSync(dir, { recursive: true, force: true }); });
 const scratch = () => {
@@ -156,7 +157,7 @@ for payload in json.loads(sys.stdin.read()):
     const got = payloads.map((text) => {
       try { return relay._enable_agent_header(Buffer.from(text)).toString('hex'); } catch (e) { return `ERR ${e.name}: ${e.message}`; }
     });
-    assert.deepEqual(got, python.stdout.trim().split('\n')); // incl. 'ERR UnicodeEncodeError: ...' (class name and text)
+    assert.deepEqual(got, python.stdout.trim().split(/\r?\n/)); // incl. 'ERR UnicodeEncodeError: ...' (class name and text)
   });
 
   // ---- end to end through the real script, original host replaced by a fake ----
@@ -193,9 +194,19 @@ process.stdin.on('end', () => {
       hostDir = join(dir, 'chrome/extension-host', system, arch);
       mkdirSync(hostDir, { recursive: true });
       writeFileSync(join(dir, 'fake-host.mjs'), fakeScript);
-      writeFileSync(join(hostDir, hostName), fakeHost(join(dir, 'fake-host.mjs')));
-      chmodSync(join(hostDir, hostName), 0o755);
+      if (WINDOWS) {
+        // No #! on Windows: the "host" is a copy of this Node whose NODE_OPTIONS preload plays the fake (and does
+        // nothing in any other process, the relay included).
+        copyFileSync(process.execPath, join(hostDir, hostName));
+        writeFileSync(join(dir, 'fake-host.cjs'), `if (!/extension-host\\.exe$/i.test(process.execPath)) return;\n`
+          + fakeScript.replace("import { readFileSync, writeFileSync, writeSync } from 'node:fs';",
+            "const { readFileSync, writeFileSync, writeSync } = require('node:fs');"));
+      } else {
+        writeFileSync(join(hostDir, hostName), fakeHost(join(dir, 'fake-host.mjs')));
+        chmodSync(join(hostDir, hostName), 0o755);
+      }
     });
+    const fakeEnv = () => (WINDOWS ? { NODE_OPTIONS: `--require=${JSON.stringify(join(dir, 'fake-host.cjs').replaceAll('\\', '/'))}` } : {});
 
     // What `lcu browser __native-host <dir> ARGS` does once the stable launcher has run: native_host.run(dir, ARGS).
     const DRIVER = `const m = await import(${JSON.stringify(new URL('../../lcu/native_host.mjs', import.meta.url).href)});`
@@ -230,13 +241,14 @@ process.stdin.on('end', () => {
       rmSync(join(target, 'chrome'), { recursive: true, force: true });
       mkdirSync(join(target, 'chrome/extension-host'), { recursive: true });
       const tree = join(dir, 'chrome/extension-host', system);
-      spawnSync('cp', ['-R', tree, join(target, 'chrome/extension-host')]);
+      cpSync(tree, join(target, 'chrome/extension-host', system), { recursive: true });
+      env = { ...fakeEnv(), ...env };
       const node = await launch(process.execPath, relayArgs(target, args), input, env);
       const result = { node, nodeLog: readOptional(log), nodeArgv: readOptional(`${log}.argv`)?.toString() };
       if (PYTHON) {
         const py = join(dir, 'python');
         mkdirSync(join(py, 'chrome/extension-host'), { recursive: true });
-        spawnSync('cp', ['-R', tree, join(py, 'chrome/extension-host')]);
+        cpSync(tree, join(py, 'chrome/extension-host', system), { recursive: true });
         copyFileSync(join(ORACLE_ROOT, 'lcu/native_host.py'), join(py, 'native_host.py'));
         rmSync(log, { force: true });
         rmSync(`${log}.argv`, { force: true });
@@ -261,11 +273,13 @@ process.stdin.on('end', () => {
     it('rewrites only the extension header reply (browser to host), forwards everything else and the arguments, exits with the host status', async () => {
       const tail = [Buffer.from([0xff, 0xfe, 0x00, 0x80]), Buffer.alloc(0), Buffer.alloc(300_000, 0x61)];
       const inbound = frames('{"a":1}', hello, ...tail);
-      const result = await run(inbound, { LCU_FAKE_HELLO: hello.toString(), LCU_FAKE_EXIT: '3' }, ['chrome-extension://x/', '--flag']);
+      // On Windows the fake host is node.exe itself: the first argument is taken for a script path (resolved), the rest is kept.
+      const hostArgs = WINDOWS ? ['host-arg', '--flag'] : ['chrome-extension://x/', '--flag'];
+      const result = await run(inbound, { LCU_FAKE_HELLO: hello.toString(), LCU_FAKE_EXIT: '3' }, hostArgs);
       assert.deepEqual(result.node.stdout, frame(hello)); // host to browser is never transformed
       assert.equal(result.node.code, 3);
       assert.deepEqual(result.nodeLog, frames('{"a":1}', hello2, ...tail));
-      assert.equal(result.nodeArgv, '["chrome-extension://x/","--flag"]');
+      assert.equal(result.nodeArgv, WINDOWS ? '["--flag"]' : '["chrome-extension://x/","--flag"]');
       same(result);
     });
 

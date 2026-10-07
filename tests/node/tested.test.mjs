@@ -11,6 +11,7 @@ import * as tested from '../../lcu/tested.mjs';
 import { PySystemExit } from '../../lcu/compat/argparse.mjs';
 import { captureIo, tempDir, withEnv } from './runtime_support.mjs';
 import { mkdirSync, chmodSync } from 'node:fs';
+import { reprStr } from '../../lcu/compat/pyerr.mjs';
 
 const REPO = fileURLToPath(new URL('../..', import.meta.url));
 const PAIR = { platform: 'linux', architecture: 'arm64', app_version: '26.915.31945',
@@ -127,7 +128,7 @@ describe('TestedVersionTests', () => {
     const { mkdirSync } = process.getBuiltinModule('node:fs');
     mkdirSync(join(root, tested.RECORD));
     const [, problem] = tested.load_entries(root);
-    assert.equal(problem, `the tested-versions record is unreadable (${join(root, tested.RECORD)}: [Errno 21] Is a directory: '${join(root, tested.RECORD)}')`);
+    assert.equal(problem, `the tested-versions record is unreadable (${join(root, tested.RECORD)}: [Errno 21] Is a directory: ${reprStr(join(root, tested.RECORD))})`);
   });
 
   it('test_the_checked_in_record_is_valid_and_has_no_duplicate_pairs', () => {
@@ -336,7 +337,7 @@ describe('TestedVersionTests', () => {
     const savedTested = { ...tested.internals };
     let configured = 0;
     Object.assign(setup.impl, {
-      platform: 'linux', validate: () => [account, ['codex']], installer_environment: () => {}, installer_paths: () => {},
+      platform: 'linux', getuid: () => account.pw_uid, validate: () => [account, ['codex']], installer_environment: () => {}, installer_paths: () => {},
       configure: () => { configured += 1; return []; }, run: () => ({ returncode: 0, stdout: '', stderr: '' }),
     });
     tested.internals.paths = () => [join(current, 'app'), join(current, 'app/resources'), join(current, 'app/resources/cua_node'),

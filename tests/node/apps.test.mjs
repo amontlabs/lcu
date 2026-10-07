@@ -16,6 +16,7 @@ import { Worker } from 'node:worker_threads';
 import * as apps from '../../lcu/apps.mjs';
 import { io, PySystemExit } from '../../lcu/compat/argparse.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const APPS_URL = new URL('../../lcu/apps.mjs', import.meta.url).href;
@@ -152,7 +153,7 @@ describe('AppsTests', () => {
   });
 
   // Allow
-  it('allow authenticates with a clear reason then adds and is idempotent', () => {
+  it('allow authenticates with a clear reason then adds and is idempotent', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     let [code] = runApps(['allow', 'Zed']);
     assert.equal(code, 0);
     assert.deepEqual(calls, ['always allow Computer Use to control Zed (dev.zed.Zed)']);
@@ -176,7 +177,7 @@ describe('AppsTests', () => {
     assert.deepEqual(readFileSync(store), before);
   });
 
-  it('unknown keys and order are preserved', () => {
+  it('unknown keys and order are preserved', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     writeStore({ schema: 3, [apps.KEY]: ['b.id'], extra: { a: [1] } });
     runApps(['allow', 'Zed']);
     assert.deepEqual(JSON.parse(readFileSync(store, 'utf8')), { schema: 3, [apps.KEY]: ['b.id', 'dev.zed.Zed'], extra: { a: [1] } });
@@ -193,7 +194,7 @@ describe('AppsTests', () => {
     assert.equal(existsSync(store), false);
   });
 
-  it('high risk app warns and says so in the prompt', () => {
+  it('high risk app warns and says so in the prompt', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     const [code, , err] = runApps(['allow', 'Safari']);
     assert.equal(code, 0);
     assert.ok(err.includes('high risk'));
@@ -208,7 +209,7 @@ describe('AppsTests', () => {
   });
 
   // Revoke
-  it('revoke by name, id and for uninstalled entries', () => {
+  it('revoke by name, id and for uninstalled entries', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     writeStore({ [apps.KEY]: ['dev.zed.Zed', 'com.gone.App', 'com.apple.Safari'] });
     assert.equal(runApps(['revoke', 'zed'])[0], 0);
     assert.equal(calls.at(-1), 'stop always allowing Computer Use to control Zed (dev.zed.Zed)');
@@ -246,7 +247,7 @@ describe('AppsTests', () => {
     assert.deepEqual(calls, []);
   });
 
-  it('object without the key is empty and keeps its other keys on write', () => {
+  it('object without the key is empty and keeps its other keys on write', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     writeStore({ other: 1 });
     assert.ok(runApps(['list'])[1].includes('No apps are always allowed'));
     runApps(['allow', 'Zed']);
@@ -254,7 +255,7 @@ describe('AppsTests', () => {
   });
 
   // Concurrent writers
-  it('a writer racing the update is not lost', () => {
+  it('a writer racing the update is not lost', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     writeStore({ [apps.KEY]: ['a.id'] });
     const raced = [];
     const realFsync = apps.hooks.fsync;
@@ -272,7 +273,7 @@ describe('AppsTests', () => {
     assert.equal(raced.length, 1);
   });
 
-  it('a write clobbered right after the replace is redone', () => {
+  it('a write clobbered right after the replace is redone', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     writeStore({ [apps.KEY]: ['a.id'] });
     const clobbered = [];
     apps.modify(store, (list) => [...list, 'dev.zed.Zed'], {
@@ -286,7 +287,7 @@ describe('AppsTests', () => {
     assert.deepEqual(ids(), ['a.id', 'runtime.id', 'dev.zed.Zed']);
   });
 
-  it('gives up when the file never settles', () => {
+  it('gives up when the file never settles', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     writeStore({ [apps.KEY]: [] });
     const counter = [];
     assert.throws(() => apps.modify(store, (list) => [...list, 'x'], {
@@ -298,7 +299,7 @@ describe('AppsTests', () => {
     }), (e) => e instanceof apps.AppsError && /kept changing/.test(e.message));
   });
 
-  it('parallel updates all land', async () => {
+  it('parallel updates all land', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, async () => {
     writeStore({ [apps.KEY]: [] });
     const code = `
       import { workerData, parentPort } from 'node:worker_threads';
@@ -317,7 +318,7 @@ describe('AppsTests', () => {
     assert.deepEqual(ids().sort(), [0, 1, 2, 3, 4].map((i) => `id.${i}`));
   });
 
-  it('new store directory is created and mode is kept', () => {
+  it('new store directory is created and mode is kept', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     apps.modify(store, (list) => [...list, 'dev.zed.Zed']);
     assert.deepEqual(ids(), ['dev.zed.Zed']);
     chmodSync(store, 0o640);
@@ -336,7 +337,7 @@ describe('AppsTests', () => {
     assert.equal(existsSync(store), false);
   });
 
-  it('lone surrogates in the store fail like Python (UnicodeEncodeError) and leave every byte untouched (R3)', { skip: !PYTHON }, () => {
+  it('lone surrogates in the store fail like Python (UnicodeEncodeError) and leave every byte untouched (R3)', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') || (!PYTHON) }, () => {
     const documents = [
       `{"extra":"\\ud800","${apps.KEY}":["old.id"]}`,
       `{"${apps.KEY}":["a\\udc00b","old.id"]}`,
@@ -380,13 +381,13 @@ print(json.dumps(out))`;
   });
 
   // ---- cases that Python's suite did not cover (see .port/notes/apps.md) ----
-  it('a brand-new store is created 0600 with the exact bytes Python writes (indent 2, ensure_ascii false, newline)', () => {
+  it('a brand-new store is created 0600 with the exact bytes Python writes (indent 2, ensure_ascii false, newline)', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     apps.modify(store, (list) => [...list, 'dev.zed.Zed', 'com.exämple.ß']);
     assert.equal(statSync(store).mode & 0o777, 0o600);
     assert.equal(readFileSync(store, 'utf8'), `{\n  "${apps.KEY}": [\n    "dev.zed.Zed",\n    "com.exämple.ß"\n  ]\n}\n`);
   });
 
-  it('a BOM and non-ASCII content are read; unknown key order and integer-like keys are kept', () => {
+  it('a BOM and non-ASCII content are read; unknown key order and integer-like keys are kept', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     writeStore('');
     writeFileSync(store, Buffer.concat([Buffer.from('﻿'), Buffer.from(`{"9":1,"b":2,"${apps.KEY}":["é.app"],"1":3}`)]));
     apps.modify(store, (list) => [...list, 'z.z']);
@@ -415,7 +416,7 @@ print(json.dumps(out))`;
     assert.equal(apps.bundle_info(bare), null);
   });
 
-  it('a bundle without a name falls back to the file stem', () => {
+  it('a bundle without a name falls back to the file stem', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     const app = join(applications, 'Plain.app');
     mkdirSync(join(app, 'Contents'), { recursive: true });
     writeFileSync(join(app, 'Contents/Info.plist'), plistXml({ CFBundleIdentifier: 'plain.id' }));
@@ -450,7 +451,7 @@ print(json.dumps(out))`;
     assert.ok(err.includes('"zed" matches several approved apps: dev.zed.Zed, dev.zed.Zed-Preview.'), err);
   });
 
-  it('the default store lives under the account home (HOME) and "~" is expanded in app paths', () => {
+  it('the default store lives under the account home (HOME) and "~" is expanded in app paths', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') }, () => {
     const saveHome = process.env.HOME;
     process.env.HOME = home;
     try {
@@ -461,7 +462,7 @@ print(json.dumps(out))`;
     }
   });
 
-  it('argparse help and errors', { skip: !PYTHON }, () => {
+  it('argparse help and errors', { skip: skipOnWindows('the macOS approvals store behind `lcu apps` (Group Containers under HOME, POSIX modes); `lcu apps` refuses to run on Windows') || (!PYTHON) }, () => {
     // Differential against the Python module: usage/help/error text, exit codes and the argv normalisation.
     const script = `
 import contextlib, io, sys

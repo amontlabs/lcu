@@ -10,6 +10,14 @@ import { spawnSync } from 'node:child_process';
 const owned = new Map(); // pid -> identity string recorded at spawn
 
 function identity(pid) {
+  if (process.platform === 'win32') {
+    // No sessions or process groups on Windows: the identity is the pid plus its creation time (Win32_Process).
+    const done = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}"; if ($p) { "$($p.CreationDate.ToUniversalTime().ToString('o'))" }`],
+    { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    const text = (done.stdout ?? '').trim();
+    return text ? `win32 ${pid} ${text}` : null;
+  }
   const fields = process.platform === 'linux' ? 'pgid=,sid=,lstart=' : 'pgid=,lstart=';
   const done = spawnSync('/bin/ps', ['-o', fields, '-p', String(pid)], { encoding: 'utf8' });
   const text = (done.stdout ?? '').trim().replace(/\s+/g, ' ');

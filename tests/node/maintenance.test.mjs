@@ -25,7 +25,7 @@ describe('PruneTests', () => {
   let temp; let prefix;
 
   beforeEach(() => {
-    temp = realpathSync(mkdtempSync(join(tmpdir(), 'lcu-prune-')));
+    temp = realpathSync.native(mkdtempSync(join(tmpdir(), 'lcu-prune-'))); // native: prune resolves 8.3 names like Path.resolve()
     // A three-part prefix, as the installers create (e.g. /opt/lcu).
     prefix = join(temp, 'opt', 'lcu');
     mkdirSync(prefix, { recursive: true });
@@ -350,7 +350,7 @@ describe('PruneTests', () => {
       expected = [dir, join(dir, 'sub'), join(dir, 'a'), join(dir, 'sub', 'b'), join(dir, 'loop')]
         .reduce((sum, path) => sum + lstatSync(path).size, 0);
     }
-    assert.ok(Number.isInteger(expected) && expected >= 150 + Buffer.byteLength(dir), String(expected));
+    assert.ok(Number.isInteger(expected) && expected >= 150 + (WINDOWS ? 0 : Buffer.byteLength(dir)), String(expected));
     assert.equal(maintenance._tree_size(dir), expected);
   });
 

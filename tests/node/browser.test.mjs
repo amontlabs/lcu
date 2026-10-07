@@ -15,7 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
 import * as browser from '../../lcu/browser.mjs';
-const RELAY_CLOSURE = browser._relay_implementation(new URL('../..', import.meta.url).pathname.replace(/\/$/, ''));
+const RELAY_CLOSURE = browser._relay_implementation(fileURLToPath(new URL('../..', import.meta.url)).replace(/[\\/]$/, ''));
 import { io, PySystemExit } from '../../lcu/compat/argparse.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
 

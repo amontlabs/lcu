@@ -8,7 +8,7 @@ import {
 import { dirname } from 'node:path';
 import test from 'node:test';
 
-import { ROOT, lcu, tempdir } from './p4_support.mjs';
+import { ROOT, lcu, nat, tempdir } from './p4_support.mjs';
 import { which } from '../../lcu/compat/which.mjs';
 import { toPlain } from '../../lcu/compat/pyjson.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
@@ -29,11 +29,11 @@ const saveRecord = (home, plain) => approval.save_record(home, new Map(Object.en
 // ------------------------------------------------------------------------------------------- Claude
 function claudeSetup(t) {
   const root = tempdir(t);
-  const home = `${root}/home`;
-  const project = `${root}/project`;
+  const home = nat(`${root}/home`);
+  const project = nat(`${root}/project`);
   mkdirSync(home);
   mkdirSync(project);
-  return { home, project, user: `${home}/.claude/settings.json`, local: `${project}/.claude/settings.local.json` };
+  return { home, project, user: nat(`${home}/.claude/settings.json`), local: nat(`${project}/.claude/settings.local.json`) };
 }
 
 test('claude: auto adds the server rule at user scope and ask removes exactly it', (t) => {
@@ -61,7 +61,7 @@ test('claude: project scope uses settings.local and leaves user settings alone',
   const before = readFileSync(user);
   approval.apply_claude('auto', home, { project });
   assert.deepEqual(read(local), { permissions: { allow: ['mcp__lcu__js', 'mcp__lcu__js_reset'] } });
-  assert.equal(existsSync(`${project}/.claude/settings.json`), false);
+  assert.equal(existsSync(nat(`${project}/.claude/settings.json`)), false);
   assert.deepEqual(readFileSync(user), before);
   approval.apply_claude('ask', home, { project });
   assert.deepEqual(read(local), {});
@@ -151,16 +151,16 @@ test('claude: allow entries are exactly the model-visible tools', (t) => {
 });
 
 test('claude: model tool lists agree across the port and adapters', () => {
-  const client = readFileSync(`${ROOT}/adapters/client.mjs`, 'utf8');
-  const relay = readFileSync(`${ROOT}/adapters/claude.mjs`, 'utf8');
+  const client = readFileSync(nat(`${ROOT}/adapters/client.mjs`), 'utf8');
+  const relay = readFileSync(nat(`${ROOT}/adapters/claude.mjs`), 'utf8');
   const names = (text, constant) => text.match(new RegExp(constant + ' = new Set\\(\\[([^\\]]*)\\]\\)'))[1];
   const expected = approval.MODEL_TOOLS.map((tool) => `'${tool}'`).join(', ');
   assert.equal(names(client, 'MODEL_TOOLS'), expected);
   assert.equal(names(relay, 'PUBLIC_TOOLS'), expected);
   assert.deepEqual(approval.OMP_TOOLS, approval.MODEL_TOOLS);
   const matcher = approval.MODEL_TOOLS.map((tool) => `mcp__lcu__${tool}`).join('|');
-  assert.ok(readFileSync(`${ORACLE_ROOT}/lcu/claude_visibility.py`, 'utf8').includes(matcher));
-  assert.ok(readFileSync(`${ROOT}/lcu/claude_visibility.mjs`, 'utf8').includes(matcher));
+  assert.ok(readFileSync(nat(`${ORACLE_ROOT}/lcu/claude_visibility.py`), 'utf8').includes(matcher));
+  assert.ok(readFileSync(nat(`${ROOT}/lcu/claude_visibility.mjs`), 'utf8').includes(matcher));
   const modOnly = claude_visibility.MOD_ONLY.map((rule) => `'${rule.replace(/^mcp__lcu__/, '')}'`).join(', ');
   assert.equal(names(relay, 'MOD_ONLY_TOOLS'), modOnly);
   assert.ok(client.includes('toolu_plugin_'));
@@ -381,7 +381,7 @@ test('omp: missing omp and unexpected output fail clearly', (t) => {
 
 test('omp: real omp round trip in an isolated profile', { skip: which('omp') ? false : 'OMP is not installed' }, (t) => {
   const home = tempdir(t);
-  const env = { PATH: process.env.PATH, HOME: home, PI_CODING_AGENT_DIR: `${home}/agent`, NO_COLOR: '1' };
+  const env = { PATH: process.env.PATH, HOME: home, PI_CODING_AGENT_DIR: nat(`${home}/agent`), NO_COLOR: '1' };
   const omp = (...args) => {
     const result = spawnSync('omp', ['config', ...args], { env, encoding: 'utf8', timeout: 60000 });
     assert.equal(result.status, 0, result.stderr);
@@ -400,11 +400,11 @@ const TOOLS = { js: { approval_mode: 'approve' }, js_reset: { approval_mode: 'ap
 
 function codexSetup(t) {
   const root = tempdir(t);
-  const home = `${root}/home`;
-  const project = `${root}/project`;
+  const home = nat(`${root}/home`);
+  const project = nat(`${root}/project`);
   mkdirSync(home);
   mkdirSync(project);
-  const config = `${home}/.codex/config.toml`;
+  const config = nat(`${home}/.codex/config.toml`);
   const plan = (mode, scope = 'user') => approval.codex_plan(mode, home, { scope, project, env: { HOME: home } });
   const writeToml = (text, path = config) => {
     mkdirSync(dirname(path), { recursive: true });
@@ -489,7 +489,7 @@ test('codex: value not recorded by LCU is preserved by ask and default', (t) => 
 test('codex: project scope reads and records the project config', (t) => {
   const { project, plan, writeToml, cycle } = codexSetup(t);
   writeToml('[mcp_servers.lcu]\ndefault_tools_approval_mode = "prompt"\n');
-  writeToml('[mcp_servers.lcu]\ndefault_tools_approval_mode = "never"\n', `${project}/.codex/config.toml`);
+  writeToml('[mcp_servers.lcu]\ndefault_tools_approval_mode = "never"\n', nat(`${project}/.codex/config.toml`));
   cycle('auto', 'project');
   assert.deepEqual(plan('ask', 'user').policy, { default_tools_approval_mode: 'prompt' });
   assert.deepEqual(plan('ask', 'project').policy, { default_tools_approval_mode: 'never' });
@@ -556,7 +556,7 @@ test('null ownership fields fail like Python before anything is written', (t) =>
   assert.deepEqual(fake.calls, []); // Python fails before invoking its CLI
   assert.deepEqual(toPlain(approval.load_record(home)), { [key]: { added: null } });
 
-  const user = `${home}/.claude/settings.json`;
+  const user = nat(`${home}/.claude/settings.json`);
   write(user, { permissions: { allow: ['mcp__lcu__js'] } });
   const before = readFileSync(user);
   approval.save_record(home, new Map([[`claude-code|${user}`, new Map([['added', 5]])]]));
@@ -600,7 +600,7 @@ test('Windows: approval records and settings paths use WindowsPath semantics (fi
 test('approval records do not depend on the working directory', (t) => {
   const { home, user } = claudeSetup(t);
   const elsewhere = tempdir(t);
-  const stray = `${elsewhere}/approval.json`;
+  const stray = nat(`${elsewhere}/approval.json`);
   writeFileSync(stray, '{"unrelated": {}}\n');
   const strayBytes = readFileSync(stray);
   const previous = process.cwd();
@@ -613,6 +613,7 @@ test('approval records do not depend on the working directory', (t) => {
     process.chdir(previous);
   }
   assert.deepEqual(readFileSync(stray), strayBytes);
-  assert.equal(approval.record_path(home), `${home}/.local/state/lcu/approval.json`);
+  assert.equal(approval.record_path(home), process.platform === 'win32' ? nat(`${home}/AppData/Local/LCU/approval.json`)
+    : `${home}/.local/state/lcu/approval.json`);
   assert.deepEqual(read(user), {});
 });

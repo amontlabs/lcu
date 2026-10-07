@@ -763,13 +763,13 @@ describe('PATH hijack: the pre-Node shell code never looks a command up through 
   const launch = (file, args, env, options = {}) => spawnSync(file, args, { encoding: 'utf8', env, cwd: temporary.path, ...options });
   const noHits = (label) => assert.deepEqual(hijack.hits(), [], `${label}: a PATH stand-in ran`);
 
-  it('the stand-ins themselves are found through PATH (the harness can see a hijack)', () => {
+  it('the stand-ins themselves are found through PATH (the harness can see a hijack)', { skip: skipOnWindows('runs the POSIX sh launchers/relay under PATHs of stand-in scripts (/usr/bin:/bin, #! stubs); Windows has bin/lcu.cmd, covered by the template case below') }, () => {
     const result = spawnSync('/bin/sh', ['-c', 'cat; ls'], { env: { PATH: hijack.dir }, encoding: 'utf8' });
     assert.equal(result.status, 0);
     assert.equal(hijack.hits().length, 2);
   });
 
-  it('--help, -h and the registration forms with a missing Node: static help, no stand-in runs', () => {
+  it('--help, -h and the registration forms with a missing Node: static help, no stand-in runs', { skip: skipOnWindows('runs the POSIX sh launchers/relay under PATHs of stand-in scripts (/usr/bin:/bin, #! stubs); Windows has bin/lcu.cmd, covered by the template case below') }, () => {
     const root = release(temporary.path, null);
     for (const env of environments()) {
       for (const args of [['--help'], ['-h'], ['--chrome', '--help'], ['--audio', '--chrome', '-h']]) {
@@ -781,7 +781,7 @@ describe('PATH hijack: the pre-Node shell code never looks a command up through 
     }
   });
 
-  it('every launcher with a missing, non-executable or refused Node: the diagnostic, no stand-in runs', () => {
+  it('every launcher with a missing, non-executable or refused Node: the diagnostic, no stand-in runs', { skip: skipOnWindows('runs the POSIX sh launchers/relay under PATHs of stand-in scripts (/usr/bin:/bin, #! stubs); Windows has bin/lcu.cmd, covered by the template case below') }, () => {
     const missing = release(temporary.path, null, { name: 'missing' });
     const plain = release(temporary.path, null, { name: 'plain' });
     writeFileSync(join(plain, 'agent-tools/node/bin/node'), '#!/bin/sh\n');
@@ -814,7 +814,7 @@ describe('PATH hijack: the pre-Node shell code never looks a command up through 
     noHits('symlinked and relative invocation');
   });
 
-  it('a normal launch (real Node, probe entry) runs no stand-in, and the children keep the caller PATH', (t) => {
+  it('a normal launch (real Node, probe entry) runs no stand-in, and the children keep the caller PATH', { skip: skipOnWindows('runs the POSIX sh launchers/relay under PATHs of stand-in scripts (/usr/bin:/bin, #! stubs); Windows has bin/lcu.cmd, covered by the template case below') }, (t) => {
     const node = trustedNode();
     if (!node) return t.skip('the ChatGPT app is not installed');
     const root = release(temporary.path, node, { entry: PROBE });
@@ -828,7 +828,7 @@ describe('PATH hijack: the pre-Node shell code never looks a command up through 
     }
   });
 
-  it('the Chrome relay launcher template (browser.mjs) runs no stand-in', async () => {
+  it('the Chrome relay launcher template (browser.mjs) runs no stand-in', { skip: skipOnWindows('runs the POSIX sh launchers/relay under PATHs of stand-in scripts (/usr/bin:/bin, #! stubs); Windows has bin/lcu.cmd, covered by the template case below') }, async () => {
     const { _relay_launcher } = await import('../../lcu/browser.mjs');
     const lcu = join(temporary.path, 'stable lcu');
     const relay = join(temporary.path, 'lcu-native-host');

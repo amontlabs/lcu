@@ -5,10 +5,10 @@ import {
 } from 'node:fs';
 import test from 'node:test';
 
-import { ROOT, lcu, tempdir } from './p4_support.mjs';
+import { ROOT, lcu, tempdir, nat } from './p4_support.mjs';
 
 const claude_mod = await lcu('claude_mod');
-const MOD = `${ROOT}/adapters/claude-mod/lcu-approve`;
+const MOD = nat(`${ROOT}/adapters/claude-mod/lcu-approve`);
 const read = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 function walkFiles(root, prefix = '') {
@@ -24,20 +24,20 @@ const snapshot = (root) => Object.fromEntries(walkFiles(root).map((rel) => [rel,
 
 function setup(t) {
   const temporary = tempdir(t);
-  const home = `${temporary}/home`;
+  const home = nat(`${temporary}/home`);
   mkdirSync(home);
   return { temporary, home };
 }
 
 test('shipped mod is a function hook plugin for the lcu server', () => {
-  const manifest = read(`${MOD}/.claude-plugin/plugin.json`);
+  const manifest = read(nat(`${MOD}/.claude-plugin/plugin.json`));
   assert.equal(manifest.name, claude_mod.NAME);
-  assert.deepEqual(read(`${MOD}/hooks/hooks.json`), { modules: ['./register.tsx'] });
-  const source = readFileSync(`${MOD}/hooks/register.tsx`, 'utf8');
+  assert.deepEqual(read(nat(`${MOD}/hooks/hooks.json`)), { modules: ['./register.tsx'] });
+  const source = readFileSync(nat(`${MOD}/hooks/register.tsx`), 'utf8');
   assert.ok(source.includes("const SERVER = 'lcu'"));
   for (const event of ["'classic.Elicitation'", "'tool.call'", "'tool.check'", "'ui.render'"]) assert.ok(source.includes(event));
   for (const label of ['Allow this conversation', 'Always allow', 'Deny']) {
-    assert.ok(readFileSync(`${MOD}/hooks/views.tsx`, 'utf8').includes(label));
+    assert.ok(readFileSync(nat(`${MOD}/hooks/views.tsx`), 'utf8').includes(label));
   }
   assert.ok(source.includes("'computer-use-apps'"));
 });
@@ -45,7 +45,7 @@ test('shipped mod is a function hook plugin for the lcu server', () => {
 test('user scope install is idempotent and omits the mod tests', (t) => {
   const { home } = setup(t);
   const target = claude_mod.install(home, ROOT);
-  assert.equal(target, `${home}/.claude/skills/lcu-approve`);
+  assert.equal(target, nat(`${home}/.claude/skills/lcu-approve`));
   assert.deepEqual(new Set(walkFiles(target)), new Set(['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.tsx',
     'hooks/views.tsx', 'hooks/data.ts', 'types/index.d.ts', 'lcu.json']));
   const before = snapshot(target);
@@ -56,61 +56,61 @@ test('user scope install is idempotent and omits the mod tests', (t) => {
 test('install records where the lcu command is', (t) => {
   const { temporary, home } = setup(t);
   let target = claude_mod.install(home, ROOT);
-  assert.deepEqual(read(`${target}/lcu.json`), { lcu: `${ROOT}/bin/lcu` });
-  const release = `${temporary}/prefix/releases/1.0-abc`;
+  assert.deepEqual(read(nat(`${target}/lcu.json`)), { lcu: nat(`${ROOT}/bin/lcu`) });
+  const release = nat(`${temporary}/prefix/releases/1.0-abc`);
   cpSync(MOD, `${release}/${claude_mod.SOURCE}`, { recursive: true, filter: (src) => !src.split('/').includes('tests') });
   target = claude_mod.install(home, release);
-  assert.deepEqual(read(`${target}/lcu.json`), { lcu: `${temporary}/prefix/current/bin/lcu` });
+  assert.deepEqual(read(nat(`${target}/lcu.json`)), { lcu: nat(`${temporary}/prefix/current/bin/lcu`) });
   // The written bytes are json.dumps(..., indent=2) + '\n'.
-  assert.equal(readFileSync(`${target}/lcu.json`, 'utf8'), `{\n  "lcu": "${temporary}/prefix/current/bin/lcu"\n}\n`);
+  assert.equal(readFileSync(nat(`${target}/lcu.json`), 'utf8'), `{\n  "lcu": ${JSON.stringify(nat(`${temporary}/prefix/current/bin/lcu`))}\n}\n`);
 });
 
 test('project scope installs under the project and not the home', (t) => {
   const { temporary, home } = setup(t);
-  const project = `${temporary}/project`;
+  const project = nat(`${temporary}/project`);
   mkdirSync(project);
   const target = claude_mod.install(home, ROOT, { project });
-  assert.equal(target, `${project}/.claude/skills/lcu-approve`);
-  assert.equal(existsSync(`${home}/.claude`), false);
+  assert.equal(target, nat(`${project}/.claude/skills/lcu-approve`));
+  assert.equal(existsSync(nat(`${home}/.claude`)), false);
 });
 
 test('reinstall replaces changed files and drops files a release no longer ships', (t) => {
   const { home } = setup(t);
   const target = claude_mod.install(home, ROOT);
-  writeFileSync(`${target}/hooks/register.tsx`, 'old');
-  writeFileSync(`${target}/hooks/old.tsx`, 'stale');
+  writeFileSync(nat(`${target}/hooks/register.tsx`), 'old');
+  writeFileSync(nat(`${target}/hooks/old.tsx`), 'stale');
   claude_mod.install(home, ROOT);
-  assert.deepEqual(readFileSync(`${target}/hooks/register.tsx`), readFileSync(`${MOD}/hooks/register.tsx`));
-  assert.equal(existsSync(`${target}/hooks/old.tsx`), false);
+  assert.deepEqual(readFileSync(nat(`${target}/hooks/register.tsx`)), readFileSync(nat(`${MOD}/hooks/register.tsx`)));
+  assert.equal(existsSync(nat(`${target}/hooks/old.tsx`)), false);
 });
 
 test('a foreign plugin with the same folder name is refused and kept', (t) => {
   const { home } = setup(t);
-  const target = `${home}/.claude/skills/lcu-approve`;
-  mkdirSync(`${target}/.claude-plugin`, { recursive: true });
-  writeFileSync(`${target}/.claude-plugin/plugin.json`, '{"name": "mine"}');
+  const target = nat(`${home}/.claude/skills/lcu-approve`);
+  mkdirSync(nat(`${target}/.claude-plugin`), { recursive: true });
+  writeFileSync(nat(`${target}/.claude-plugin/plugin.json`), '{"name": "mine"}');
   assert.throws(() => claude_mod.install(home, ROOT), { name: 'ValueError', message: /not the LCU mod/ });
   assert.throws(() => claude_mod.remove(home), { name: 'ValueError', message: /not the LCU mod/ });
-  assert.deepEqual(read(`${target}/.claude-plugin/plugin.json`), { name: 'mine' });
+  assert.deepEqual(read(nat(`${target}/.claude-plugin/plugin.json`)), { name: 'mine' });
   assert.equal(claude_mod._owned(target), false);
 });
 
 test('remove deletes only the mod', (t) => {
   const { home } = setup(t);
-  const skills = `${home}/.claude/skills`;
-  mkdirSync(`${skills}/other`, { recursive: true });
-  writeFileSync(`${skills}/other/SKILL.md`, 'keep');
+  const skills = nat(`${home}/.claude/skills`);
+  mkdirSync(nat(`${skills}/other`), { recursive: true });
+  writeFileSync(nat(`${skills}/other/SKILL.md`), 'keep');
   claude_mod.install(home, ROOT);
-  assert.equal(claude_mod._owned(`${skills}/lcu-approve`), true);
+  assert.equal(claude_mod._owned(nat(`${skills}/lcu-approve`)), true);
   assert.equal(claude_mod.remove(home), true);
-  assert.equal(existsSync(`${skills}/lcu-approve`), false);
-  assert.equal(readFileSync(`${skills}/other/SKILL.md`, 'utf8'), 'keep');
+  assert.equal(existsSync(nat(`${skills}/lcu-approve`)), false);
+  assert.equal(readFileSync(nat(`${skills}/other/SKILL.md`), 'utf8'), 'keep');
   assert.equal(claude_mod.remove(home), false);
 });
 
 test('missing mod in a release names the fix', (t) => {
   const { temporary, home } = setup(t);
-  const empty = `${temporary}/release`;
+  const empty = nat(`${temporary}/release`);
   mkdirSync(empty);
   assert.throws(() => claude_mod.install(home, empty), { name: 'ValueError', message: /Reinstall LCU/ });
 });

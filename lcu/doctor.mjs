@@ -15,7 +15,7 @@ import { InvalidFileException, loads as plist_loads } from './compat/plist.mjs';
 import { isOSError, run, SubprocessError } from './compat/subprocess.mjs';
 import { mkdtemp } from './compat/tempfile.mjs';
 import { decode } from './compat/utf8.mjs';
-import { posix as path } from 'node:path';
+import { basename as hostBasename } from 'node:path'; // Path(x).name of the host flavour (pathStr spells paths that way)
 
 import { MAC_HELPER, mac_socket_path_problem } from './platforms.mjs';
 import { unshimmed_env } from './sandbox_shim.mjs';
@@ -246,8 +246,8 @@ export function _bundle_display_name(bundle, fallback) {
 export function mac_permission_targets(app) {
   const helper = pathStr(app, 'Contents', MAC_HELPER);
   return {
-    accessibility: [_bundle_display_name(helper, path.basename(helper)), helper],
-    screen_capture: [_bundle_display_name(app, path.basename(pathStr(app))), app],
+    accessibility: [_bundle_display_name(helper, hostBasename(helper)), helper],
+    screen_capture: [_bundle_display_name(app, hostBasename(pathStr(app))), app],
   };
 }
 

@@ -18,6 +18,7 @@ import * as origins from '../../lcu/origins.mjs';
 import * as runtime from '../../lcu/runtime.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
 import { python312 } from './runtime_support.mjs';
+import { skipOnWindows } from './windows_skip.mjs';
 
 const PYTHON = python312() ?? undefined;
 const ORIGINS_URL = new URL('../../lcu/origins.mjs', import.meta.url).href;
@@ -237,7 +238,7 @@ describe('OriginsTests', () => {
     ['other', new Map([['items', ['a', 'b']]])]]));
   });
 
-  it('forget keeps special characters and file mode', () => {
+  it('forget keeps special characters and file mode', { skip: skipOnWindows('asserts the 0640 mode bits; Windows keeps only the read-only attribute (mode 0666)') }, () => {
     const text = '[origins]\ndenied = ["https://bad.example"]\n"odd key" = "caf\\u00e9 \\"quoted\\" \\\\"\n';
     const path = session('abc', text);
     chmodSync(path, 0o640);
@@ -330,6 +331,7 @@ describe('OriginsTests', () => {
   });
 
   it('concurrent forgets are serialized (two worker threads, separate lock descriptors)', async () => {
+    const LONG = process.platform === 'win32' ? 90000 : 10000; // Windows locks start a PowerShell holder per acquisition
     const path = session('abc', '[origins]\nallowed = ["https://a.example", "https://b.example"]\n');
     const shared = new Int32Array(new SharedArrayBuffer(12)); // [paused, release, secondDone]
     const code = `
@@ -341,7 +343,7 @@ describe('OriginsTests', () => {
         origins.hooks.write_atomically = (target, text, mode) => {
           const t = real(target, text, mode);
           Atomics.store(flags, 0, 1); Atomics.notify(flags, 0);
-          Atomics.wait(flags, 1, 0, 10000);
+          Atomics.wait(flags, 1, 0, ${LONG});
           return t;
         };
       }
@@ -361,7 +363,7 @@ describe('OriginsTests', () => {
       while (Atomics.load(shared, index) === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
       return Atomics.load(shared, index) === 1;
     };
-    assert.ok(await waitFor(0, 10000));
+    assert.ok(await waitFor(0, LONG));
     const two = start(false, 'https://b.example');
     assert.equal(await waitFor(2, 300), false, 'the second command ran while the first held the lock');
     Atomics.store(shared, 1, 1);
@@ -509,8 +511,9 @@ describe('OriginsTests', () => {
   });
 
   it('default codex home on posix', () => {
-    assert.equal(origins.codex_home({ HOME: '/home/a' }, { windows: false }), '/home/a/.codex');
-    assert.equal(origins.codex_home({ HOME: '//home/a' }, { windows: false }), '/home/a/.codex');
+    const host = (p) => (process.platform === 'win32' ? p.replaceAll('/', '\\') : p); // a Windows host spells the POSIX flavour with its own separator
+    assert.equal(origins.codex_home({ HOME: '/home/a' }, { windows: false }), host('/home/a/.codex'));
+    assert.equal(origins.codex_home({ HOME: '//home/a' }, { windows: false }), host('/home/a/.codex'));
   });
 
   it('empty or relative CODEX_HOME is rejected', () => {
@@ -731,7 +734,7 @@ print(json.dumps([code, o.getvalue(), e.getvalue()]))`;
     return home;
   };
 
-  it('an inaccessible ancestor is a permission error, not "nothing saved" (list, named session, forget)', () => {
+  it('an inaccessible ancestor is a permission error, not "nothing saved" (list, named session, forget)', { skip: skipOnWindows('chmod 000 directories do not deny access on Windows (ACLs, not mode bits)') }, () => {
     const home = fixture();
     chmodSync(join(home, 'browser'), 0o000);
     const sessionsDir = join(home, 'browser/sessions');
@@ -745,7 +748,7 @@ print(json.dumps([code, o.getvalue(), e.getvalue()]))`;
     }
   });
 
-  it('a sessions folder that cannot be listed is skipped like Path.glob does', () => {
+  it('a sessions folder that cannot be listed is skipped like Path.glob does', { skip: skipOnWindows('chmod 000 directories do not deny access on Windows (ACLs, not mode bits)') }, () => {
     const home = fixture();
     chmodSync(join(home, 'browser/sessions'), 0o000);
     for (const argv of [['list'], ['list', '--json'], ['forget', 'https://bad.example']]) {
