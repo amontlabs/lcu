@@ -391,7 +391,8 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
     4. this instance (pid and start time) was never asked to quit before;
     5. it is the only process holding the socket lock (among those lsof can see), and
        `codesign --verify` rejects its running code as different from the code on disk;
-    6. the instance is recorded as asked (no record, no signal; cleared if no signal follows);
+    6. the instance is recorded as asked (no record, no signal; the previous record is put
+       back if no signal follows);
     7. last, with nothing slow after the process read: the lock holders, then the bundle's
        change times, then the process itself (`ps -p`) and its kernel executable all match
        what was checked, the recovery is within its time budget on this host's monotonic
@@ -413,11 +414,14 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             if diagnosis.get('unparsed'):
                 return nothing('the process listing was incomplete')
             stale = [item for item in diagnosis['services'] if item['stale']]
+            previous = peer.previous or {}
             if not stale:
-                if peer.waited:
-                    # Another LCU host was recovering meanwhile and no stale service is left. The
-                    # request never reached a service, so it may be tried once more.
-                    return {'ok': True, 'recovered': True, 'reason': 'no stale service is left after another LCU process'}
+                running = {(item['pid'], item['started']) for item in diagnosis['services']}
+                if (peer.waited and type(previous.get('pid')) is int and
+                        (previous['pid'], previous.get('started')) not in running):
+                    # This host waited for another one, which asked an instance to quit that is
+                    # now gone, and no stale service is left: the request may be tried once more.
+                    return {'ok': True, 'recovered': True, 'reason': 'recovered by another LCU process'}
                 return nothing('no stale service')
             if len(stale) != 1:
                 return nothing('more than one stale service')
@@ -432,7 +436,6 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             kernel = kernel_path(pid)
             if not (kernel and os.path.basename(kernel) == SKY_SERVICE_NAME and realpath(kernel) == realpath(path)):
                 return nothing('the kernel does not report the known executable for the stale service')
-            previous = peer.previous or {}
             if previous.get('pid') == pid and previous.get('started') == start:
                 # Never twice for one instance: a service that outlived SIGTERM is left alone.
                 return nothing('this service was already asked to quit')
@@ -461,7 +464,8 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             except Exception as exc:
                 reason = f'check failed: {str(exc)[:200]}'
             if reason:
-                peer.record({})
+                # Back to the previous record, so an instance asked earlier stays recorded.
+                peer.record(peer.previous or {})
                 return nothing(reason)
             kill(pid, signal.SIGTERM)
             exited = False
@@ -507,12 +511,56 @@ def answer_recover(connection):
             pass
 
 
+# The original helper starts the CUAService app and its XPC transport waits up
+# to 5 s to connect, so a healthy run takes about 5.2 s. Allow for a slower launch.
+# lcu/macos_sky_service.mjs derives its own wait from this value.
+TURN_ENDED_CLI_TIMEOUT_SECONDS = 10
+# Log successful runs only when they are close to the helper's own 5 s deadline.
+TURN_ENDED_CLI_SLOW_SECONDS = 4.5
+STDERR_LOG_BYTES = 512
+
+
 def turn_ended_payload(session_id, turn_id):
     return json.dumps({
         'type': 'agent-turn-complete',
         'thread-id': session_id,
         'turn-id': turn_id,
     }, separators=(',', ':'))
+
+
+def run_turn_ended(client, payload, timeout=TURN_ENDED_CLI_TIMEOUT_SECONDS):
+    """Run the original turn-ended command; report slow or failed runs on stderr.
+
+    The helper exits 0 even when it cannot reach the service (it only writes to
+    os_log), so a zero status does not prove delivery.
+    """
+    started = time.monotonic()
+    status = 'timeout'
+    stderr = b''
+    failure = None
+    try:
+        result = subprocess.run([client, 'turn-ended', payload], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=timeout, check=False)
+        status = result.returncode
+        stderr = result.stderr or b''
+        if status != 0:
+            failure = RuntimeError(f'Original turn-ended command exited with status {status}.')
+    except subprocess.TimeoutExpired as exc:
+        stderr = exc.stderr or b''
+        failure = RuntimeError(
+            f'Original turn-ended command timed out after {timeout} seconds.')
+    except OSError as exc:
+        status = 'launch-failed'
+        stderr = str(exc).encode()
+        failure = RuntimeError(f'Original turn-ended command could not start: {exc.strerror or exc}.')
+    elapsed = time.monotonic() - started
+    if failure is not None or elapsed >= TURN_ENDED_CLI_SLOW_SECONDS:
+        text = bytes(stderr)[:STDERR_LOG_BYTES].decode('utf-8', 'replace').strip()
+        print(f'LCU macOS turn-ended command: exit={status} elapsed={round(elapsed * 1000)} ms'
+              f'{" stderr=" + repr(text) if text else ""}', file=sys.stderr, flush=True)
+    if failure is not None:
+        raise failure
 
 
 def start_original_host(*, python, client: Path, entry: Path, env: dict[str, str],
@@ -778,12 +826,7 @@ def serve(address, client, control_address=None):
                             not isinstance(turn_id, str) or not turn_id.strip()):
                         raise ValueError('Original macOS turn IDs are missing.')
                     payload = turn_ended_payload(session_id, turn_id)
-                    result = subprocess.run([client, 'turn-ended', payload],
-                                            stdin=subprocess.DEVNULL,
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                            timeout=3, check=False)
-                    if result.returncode != 0:
-                        raise RuntimeError(f'Original turn-ended command exited with status {result.returncode}.')
+                    run_turn_ended(client, payload)
                     response = {'notified': True}
                 except Exception as exc:
                     response = {'notified': False, 'error': str(exc)[:512]}

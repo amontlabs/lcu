@@ -589,16 +589,28 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(peer.recorded, [{'pid': 4242, 'started': epoch(STALE_START)}],
                          'a service that did not exit stays recorded as asked')
 
-    def test_a_host_that_waited_for_another_retries_only_when_no_stale_service_is_left(self):
+    def test_a_host_that_waited_retries_only_when_the_instance_another_asked_is_gone(self):
+        asked = {'pid': 4242, 'started': epoch(STALE_START)}
+
+        def attempt(waited, previous, table=()):
+            world = FakeWorld()
+            world.table = list(table)
+            result = world.run(exclusive=lambda: self.Peer(True, waited, previous))
+            self.assertEqual(world.kills, [])
+            return result['recovered']
+
+        self.assertTrue(attempt(True, asked))
+        fresh = FakeWorld.line(5151, 501, 'Wed Oct  7 00:34:53 2026', EXECUTABLE)
+        self.assertTrue(attempt(True, asked, [fresh]), 'a current service replaced it')
+        self.assertFalse(attempt(False, asked), 'a host that did not wait has no link to another recovery')
+        for previous in (None, {}, {'pid': '4242'}):
+            self.assertFalse(attempt(True, previous), 'nothing was asked to quit')
+        still = FakeWorld.line(4242, 501, STALE_START, EXECUTABLE)
         world = FakeWorld()
-        world.table = []
-        result = world.run(exclusive=lambda: self.Peer(True, True))
-        self.assertTrue(result['recovered'])
-        self.assertEqual(world.kills, [])
-        world = FakeWorld()
-        world.table = []
-        self.assertFalse(world.run(exclusive=lambda: self.Peer(True, False))['recovered'],
-                         'a host that did not wait has no link to another recovery')
+        world.stat = stat_with(whole_bundle(EXECUTABLE, 'Mon Oct  5 00:00:00 2026'))  # no longer reads as stale
+        world.table = [still]
+        self.assertFalse(world.run(exclusive=lambda: self.Peer(True, True, asked))['recovered'],
+                         'the asked instance is still running')
 
     def test_a_host_that_waited_still_runs_every_check_when_a_service_is_stale(self):
         world = FakeWorld()
@@ -617,6 +629,12 @@ class RecoveryTests(unittest.TestCase):
         peer = self.Peer()
         self.assertNothingSignaled(world, world.run(exclusive=lambda: peer, waiting=lambda: False), 'stopped waiting')
         self.assertEqual(peer.recorded[-1], {})
+        # An instance asked earlier (which outlived SIGTERM) stays recorded after an attempt on another.
+        earlier = {'pid': 777, 'started': 5.0}
+        world = FakeWorld()
+        peer = self.Peer(previous=earlier)
+        self.assertNothingSignaled(world, world.run(exclusive=lambda: peer, waiting=lambda: False), 'stopped waiting')
+        self.assertEqual(peer.recorded[-1], earlier)
 
     def test_no_record_no_signal(self):
         class Unwritable(self.Peer):
@@ -943,8 +961,8 @@ class SingleFlightTests(unittest.TestCase):
     def test_the_leaders_arguments_reach_the_work(self):
         seen = []
         flight = SingleFlight(lambda *args: (seen.append(args), {'ok': True})[1])
-        self.assertEqual(flight({'deadline_unix_ms': 5}), {'ok': True})
-        self.assertEqual(seen, [({'deadline_unix_ms': 5},)])
+        self.assertEqual(flight('leader'), {'ok': True})
+        self.assertEqual(seen, [('leader',)])
 
     def test_a_failing_run_frees_the_flight_and_waiters_do_not_hang(self):
         calls = []
@@ -971,11 +989,17 @@ class HostRequestTests(unittest.TestCase):
             client.chmod(0o755)
             # The real host loop with a slow stand-in for the recovery, so nothing real is inspected.
             entry = Path(base) / 'slow_host.py'
-            entry.write_text(f'''import sys, time
+            entry.write_text(f'''import os, sys, time
 sys.path.insert(0, {str(root)!r})
 import lcu.macos_host as host
+calls = []
 def slow_recovery(waiting=None):
-    time.sleep(1.5)
+    # Each call is held until the test releases it, so no step depends on timing.
+    calls.append(1)
+    release = os.path.join({str(base)!r}, f'release{{len(calls)}}')
+    deadline = time.monotonic() + 10
+    while not os.path.exists(release) and time.monotonic() < deadline:
+        time.sleep(0.01)
     return {{'ok': True, 'recovered': False, 'reason': 'fixture', 'waiting': waiting()}}
 host.shared_recovery = host.SingleFlight(slow_recovery, wait_seconds=5)
 host.serve(sys.argv[2], sys.argv[3])
@@ -987,14 +1011,13 @@ host.serve(sys.argv[2], sys.argv[3])
                     slow.settimeout(8)
                     slow.connect(address)
                     slow.sendall(b'{"type":"recover"}\n')
-                    time.sleep(0.3)
-                    started = time.monotonic()
                     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                         connection.settimeout(8)
                         connection.connect(address)
                         connection.sendall(b'{"session_id":"s","turn_id":"t"}\n')
                         self.assertEqual(json.loads(read_line(connection)), {'notified': True})
-                    self.assertLess(time.monotonic() - started, 1.0)
+                    # Only now may the recovery finish: cleanup was answered while it was held.
+                    (Path(base) / 'release1').touch()
                     self.assertEqual(json.loads(read_line(slow)),
                                      {'ok': True, 'recovered': False, 'reason': 'fixture', 'waiting': True})
                 # A requester that gave up (closed its end) is seen as no longer waiting.
@@ -1003,6 +1026,7 @@ host.serve(sys.argv[2], sys.argv[3])
                     gone.connect(address)
                     gone.sendall(b'{"type":"recover"}\n')
                     gone.shutdown(socket.SHUT_WR)
+                    (Path(base) / 'release2').touch()
                     self.assertFalse(json.loads(read_line(gone))['waiting'])
                 # The removed read-only diagnosis is just an invalid cleanup request now.
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtemp, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createConnection, createServer} from 'node:net';
@@ -28,6 +28,12 @@ const recoverRequests = [];
 const recoverClosed = [];
 let recoverReply;
 let recoverDelayMs = 0;
+// When set, the recover reply waits for this promise.
+let recoverHold;
+let lifetimeReplies = 0;
+// Decides how the private lifetime host answers: {notified, error?, hold?}, where
+// hold is a promise the reply waits for.
+let lifetimeBehavior = () => ({notified: true});
 
 await writeFile(servicePath, `export async function handleRpc(request) {
   globalThis.originalRpcCount = (globalThis.originalRpcCount || 0) + 1;
@@ -119,15 +125,19 @@ const lifetimeServer = createServer(socket => consumeLines(socket, message => {
     socket.once('end', () => recoverClosed.push(message));
     // undefined: never answer, as a host stuck behind other work would.
     if (recoverReply === undefined) return;
-    setTimeout(() => {
+    Promise.resolve(recoverHold).then(() => setTimeout(() => {
       // The host reports `recovered` only after the stale service has exited.
       try { if (JSON.parse(recoverReply).recovered === true) globalThis.hostRecovered = true; } catch {}
       socket.end(`${recoverReply}\n`);
-    }, recoverDelayMs);
+    }, recoverDelayMs));
     return;
   }
   lifetimeMessages.push(message);
-  socket.end('{"notified":true}\n');
+  const {hold, ...reply} = lifetimeBehavior(message);
+  Promise.resolve(hold).then(() => {
+    lifetimeReplies += 1;
+    socket.end(`${JSON.stringify(reply)}\n`);
+  });
 }));
 
 function listen(server, path) {
@@ -177,7 +187,8 @@ try {
     nativePipe: {createConnection: connect},
     addTurnEndedHandler: handler => { turnEnded = handler; },
   };
-  const {handleRpc} = await import(pathToFileURL(new URL(wrapperPath).pathname).href);
+  const {handleRpc, LIFETIME_SIGNAL_TIMEOUT_MS} = await import(
+    pathToFileURL(new URL(wrapperPath).pathname).href);
   const action = handleRpc({type: 'execute', method: 'click',
     args: [{app: 'com.fixture.A'}], wait: true});
   await waitFor(() => Boolean(turnEnded), 'original turn-ended hook was not registered');
@@ -185,6 +196,12 @@ try {
   // slower cleanup stays pending and is retried before the next Sky request.
   assert.ok(turnEnded.timeoutMs > 0 && turnEnded.timeoutMs <= 4_000);
   assert.ok(turnEnded.timeoutMs < 5_000);
+  // The JS wait for the private lifetime host must outlast the host's own limit.
+  const hostSource = await readFile(new URL('../lcu/macos_host.py', import.meta.url), 'utf8');
+  const hostTimeoutSeconds = Number(
+    hostSource.match(/^TURN_ENDED_CLI_TIMEOUT_SECONDS = (\d+)$/m)?.[1]);
+  assert.ok(hostTimeoutSeconds >= 6, 'the host must outlast the helper\'s ~5.2 s run');
+  assert.equal(LIFETIME_SIGNAL_TIMEOUT_MS, hostTimeoutSeconds * 1000 + 2000);
   await waitFor(() => observedContexts.some(context => context.app === 'com.fixture.A'),
     'trusted service did not publish the current app context');
   metadata.turn_id = 'mutated-after-dispatch';
@@ -356,6 +373,86 @@ try {
   assert.equal(globalThis.originalRpcCount, rpcCountBeforeSlow + 1);
   await turnEnded.run({session_id: 'after-slow', turn_id: 'after-slow-turn'});
 
+  // The original CLI command is not the gate for native cleanup: a failing or
+  // slow one must never fail a Sky request or stop another turn's cleanup.
+  const originalConsoleError = console.error;
+  const stderr = [];
+  console.error = (...args) => { stderr.push(args.join(' ')); };
+  try {
+    const withoutMetadata = () => { globalThis.nodeRepl.requestMeta = {}; };
+    const countFor = session => lifetimeMessages.filter(message => message.session_id === session).length;
+    const startTurn = async name => {
+      const turn = {session_id: `${name}-session`, turn_id: `${name}-turn`, call_id: `${name}-call`};
+      globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': turn};
+      await handleRpc({type: 'execute', method: 'list_apps', args: []});
+      return turn;
+    };
+    const endTurn = turn => turnEnded.run({session_id: turn.session_id, turn_id: turn.turn_id});
+    lifetimeBehavior = message => message.session_id === 'cli-fail-session'
+      ? {notified: false, error: 'fixture CLI failure'} : {notified: true};
+    const failTurn = await startTurn('cli-fail');
+    const okTurn = await startTurn('cli-ok');
+    const thirdTurn = await startTurn('cli-third');
+    const cliLifetimeStart = lifetimeMessages.length;
+    globalThis.turnEndedGate = new Promise(resolve => { globalThis.releaseTurnEnded = resolve; });
+    const cliHooks = [endTurn(failTurn), endTurn(okTurn)];
+    globalThis.releaseTurnEnded();
+    globalThis.turnEndedGate = undefined;
+    // A CLI failure is not a hook failure: the native step was acknowledged.
+    await Promise.all(cliHooks);
+    await waitFor(() => lifetimeMessages.length >= cliLifetimeStart + 2,
+      'the failing turn must not stop cleanup of the next one');
+    await waitFor(() => stderr.some(line => /failed for cli-fail-session\/cli-fail-turn after \d+ ms.*retrying once/.test(line)),
+      'the first CLI failure was not recorded');
+    assert.equal(countFor('cli-fail-session'), 1);
+    assert.equal(countFor('cli-ok-session'), 1);
+    // Another turn ending runs its own background cleanup but must not spend the
+    // failed command's retry, which belongs to the next Sky request.
+    await endTurn(thirdTurn);
+    await waitFor(() => countFor('cli-third-session') === 1, 'the next turn was not cleaned up');
+    assert.equal(countFor('cli-fail-session'), 1);
+    // The next Sky request retries once; the failure drops the item without failing it.
+    withoutMetadata();
+    const rpcBeforeRetry = globalThis.originalRpcCount;
+    assert.deepEqual(await handleRpc({type: 'execute', method: 'list_apps', args: []}), {ok: true});
+    assert.equal(globalThis.originalRpcCount, rpcBeforeRetry + 1);
+    assert.equal(countFor('cli-fail-session'), 2);
+    assert.equal(countFor('cli-ok-session'), 1);
+    assert.equal(stderr.filter(line => /failed for cli-fail-session\/cli-fail-turn after \d+ ms; native turn-ended was acknowledged; continuing$/.test(line)).length, 1);
+    // The following request dispatches without retrying again.
+    const lifetimeAfterDrop = lifetimeMessages.length;
+    assert.deepEqual(await handleRpc({type: 'execute', method: 'list_apps', args: []}), {ok: true});
+    assert.equal(lifetimeMessages.length, lifetimeAfterDrop);
+    assert.equal(globalThis.originalRpcCount, rpcBeforeRetry + 2);
+
+    // The hook only waits for native cleanup. A slow CLI command finishes in the
+    // background and holds back the next Sky request until it is done.
+    let releaseLifetime;
+    lifetimeBehavior = () => ({notified: true,
+      hold: new Promise(resolve => { releaseLifetime = resolve; })});
+    const lateTurn = await startTurn('cli-late');
+    const repliesBeforeLate = lifetimeReplies;
+    await endTurn(lateTurn);
+    await waitFor(() => countFor('cli-late-session') === 1, 'the CLI command was not started in the background');
+    assert.equal(lifetimeReplies, repliesBeforeLate, 'the hook must not wait for the CLI command');
+    withoutMetadata();
+    const rpcBeforeLate = globalThis.originalRpcCount;
+    let lateDispatched = false;
+    const afterLate = handleRpc({type: 'execute', method: 'list_apps', args: []})
+      .then(() => { lateDispatched = true; });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(lateDispatched, false, 'a Sky request must wait for the running CLI command');
+    assert.equal(globalThis.originalRpcCount, rpcBeforeLate);
+    releaseLifetime();
+    await afterLate;
+    assert.equal(lifetimeReplies, repliesBeforeLate + 1);
+    assert.equal(globalThis.originalRpcCount, rpcBeforeLate + 1);
+    assert.equal(countFor('cli-late-session'), 1);
+    lifetimeBehavior = () => ({notified: true});
+  } finally {
+    console.error = originalConsoleError;
+  }
+
   globalThis.nodeRepl.env.LCU_MAC_CONTROL_SOCKET = undefined;
   const noControlMetadata = {session_id: 'no-control-session', turn_id: 'no-control-turn',
     call_id: 'no-control-call'};
@@ -446,10 +543,16 @@ try {
 
   // Concurrent failures share one recovery, and each is retried once.
   reset();
-  recoverDelayMs = 150;
+  let releaseRecovery;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
   recoveriesBefore = recoverRequests.length;
   rpcBefore = countOriginal();
-  const results = await Promise.all([1, 2, 3].map(() => rpc({failUntilRecovered: true})));
+  const concurrent = Promise.all([1, 2, 3].map(() => rpc({failUntilRecovered: true})));
+  // The host answers only once all three have failed, so all three join the one recovery.
+  await waitFor(() => countOriginal() === rpcBefore + 3, 'the three requests did not all fail first');
+  releaseRecovery();
+  const results = await concurrent;
+  recoverHold = undefined;
   assert.deepEqual(results, [{ok: true}, {ok: true}, {ok: true}]);
   assert.equal(recoverRequests.length, recoveriesBefore + 1, 'concurrent requests share one recovery');
   assert.equal(countOriginal(), rpcBefore + 6);
@@ -491,13 +594,14 @@ try {
   assert.deepEqual(await rpc(), {ok: true});
   const realCreateConnection = globalThis.nodeRepl.nativePipe.createConnection;
   globalThis.nodeRepl.nativePipe.createConnection = () => new Promise(() => {});
-  const cleanupStarted = Date.now();
-  await assert.rejects(turnEnded.run({session_id: hangMetadata.session_id, turn_id: hangMetadata.turn_id}),
-    /connection timed out/);
-  assert.ok(Date.now() - cleanupStarted < 6_000);
-  globalThis.nodeRepl.nativePipe.createConnection = realCreateConnection;
+  // The hook waits only for the native step; the command step behind it gives up on the
+  // connection, so the next request is not held behind it.
+  await turnEnded.run({session_id: hangMetadata.session_id, turn_id: hangMetadata.turn_id});
   globalThis.nodeRepl.requestMeta = {};
-  assert.deepEqual(await rpc(), {ok: true}, 'the retried cleanup completes and the request proceeds');
+  const cleanupStarted = Date.now();
+  assert.deepEqual(await rpc(), {ok: true}, 'the request proceeds after the bounded connection attempt');
+  assert.ok(Date.now() - cleanupStarted < 12_000);
+  globalThis.nodeRepl.nativePipe.createConnection = realCreateConnection;
 
   // A native cleanup step that never settles is abandoned after a hard bound, so the request
   // behind it is not held forever; the cleanup is retried by the next request.
@@ -514,28 +618,6 @@ try {
   globalThis.nodeRepl.env.LCU_MAC_CLEANUP_STEP_TIMEOUT_MS = undefined;
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true}, 'the abandoned cleanup is retried and the request proceeds');
-
-  // Turns that end while a cleanup runs are left for the next request: a steady stream of
-  // them cannot keep one request waiting for ever.
-  const turnA = {session_id: 'snap-a', turn_id: 'snap-a-turn', call_id: 'snap-a-call'};
-  const turnB = {session_id: 'snap-b', turn_id: 'snap-b-turn', call_id: 'snap-b-call'};
-  for (const turn of [turnA, turnB]) {
-    globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': turn};
-    assert.deepEqual(await rpc(), {ok: true});
-  }
-  const nativeEndedCount = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest').length;
-  const nativeCountBefore = nativeEndedCount();
-  globalThis.turnEndedGate = new Promise(resolve => { globalThis.releaseTurnEnded = resolve; });
-  const hookA = turnEnded.run({session_id: turnA.session_id, turn_id: turnA.turn_id});
-  await waitFor(() => nativeEndedCount() === nativeCountBefore + 1, 'the first native cleanup did not start');
-  const hookB = turnEnded.run({session_id: turnB.session_id, turn_id: turnB.turn_id});
-  globalThis.releaseTurnEnded();
-  globalThis.turnEndedGate = undefined;
-  await Promise.all([hookA, hookB]);
-  assert.equal(nativeEndedCount(), nativeCountBefore + 1, 'the turn that ended during the cleanup waits for the next request');
-  globalThis.nodeRepl.requestMeta = {};
-  assert.deepEqual(await rpc(), {ok: true});
-  assert.equal(nativeEndedCount(), nativeCountBefore + 2);
 
   // Retried turn cleanup uses the same pipe and fails the same way: a recovery makes the
   // cleanup retry and the request proceed; without one the original error is thrown.
