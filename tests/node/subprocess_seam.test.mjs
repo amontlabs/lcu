@@ -52,5 +52,5 @@ print(round(time.time() - t, 1))`, []).split('\n');
     }
   });
 
-  it('cleanup', () => { chmodSync(cases.blocked, 0o700); rmSync(base, { recursive: true, force: true }); });
+  it('cleanup', () => { chmodSync(cases.blocked, 0o700); rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
 });

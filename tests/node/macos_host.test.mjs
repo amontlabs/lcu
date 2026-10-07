@@ -25,7 +25,7 @@ const skip = process.platform === 'win32' ? 'macOS launcher and its Unix-socket 
 
 let root;
 before(() => { if (!skip) root = mkdtempSync('/tmp/lcu-mh-'); });
-after(() => { if (root) rmSync(root, { recursive: true, force: true }); });
+after(() => { if (root) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
 
 const clientScript = (body) => `#!${process.execPath}\n${body}\n`;
 function writeClient(name, body) {
@@ -539,7 +539,7 @@ describe('macos_host', { skip }, () => {
       assert.equal(accepted.status, 0, accepted.stderr);
       assert.equal(accepted.stdout, `{"ready": true, "socket": "${fill(limit - 1)}"}\n`);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 

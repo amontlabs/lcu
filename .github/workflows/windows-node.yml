@@ -2,18 +2,11 @@ name: Windows Node suite
 
 # Just the Windows runner's runtime tests, for a quick answer (a few minutes instead of the whole CI):
 # tests/node on the hosted Windows image plus the top-level Python tests on the pinned Python 3.12.10.
-# Same commands as the `windows` job of ci.yml; run it by hand with
+# Same commands as the `windows` job of ci.yml, which runs them on every pull request; this workflow is only for a quick
+# answer on a branch, started by hand with
 #   gh workflow run windows-node.yml --ref <branch>
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - '.github/workflows/windows-node.yml'
-      - 'lcu/**'
-      - 'scripts/**'
-      - 'bin/**'
-      - 'adapters/**'
-      - 'tests/**'
 
 permissions:
   contents: read

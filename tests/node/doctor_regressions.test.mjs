@@ -23,7 +23,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   Object.assign(internals, saved);
-  rmSync(base, { recursive: true, force: true });
+  rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 // A fake "node" for the probe: the real Node with a --require preload (NODE_OPTIONS) that writes the given bytes and

@@ -127,7 +127,7 @@ describe('SocketPathTests', () => {
       assert.equal(bind(103), 0);
       assert.notEqual(bind(104), 0);
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 });
@@ -145,7 +145,7 @@ describe('DoctorSocketTests', () => {
     doctor.internals.isatty = () => false;
     doctor.internals.mac_instructions = () => {};
   });
-  afterEach(() => rmSync(root, { recursive: true, force: true }));
+  afterEach(() => rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   const run_doctor = async (home, platform_name = 'darwin') => {
     writeFileSync(path.join(root, 'installation.json'), JSON.stringify({ platform: platform_name }));

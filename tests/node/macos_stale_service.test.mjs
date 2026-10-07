@@ -334,7 +334,7 @@ describe('DiagnoseTests', { skip }, () => {
       assert.deepEqual(stale_pids(await diagnose_sky_services({ run: ps(`10 501 ${older} ${executable}`) })), [10]);
       assert.deepEqual(stale_pids(await diagnose_sky_services({ run: ps(`10 501 ${newer} ${executable}`) })), []);
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 
@@ -963,7 +963,7 @@ describe('RecoveryTests', { skip }, () => {
     } finally {
       for (const reader of hostSide) reader.close();
       server.close();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 
@@ -1170,7 +1170,7 @@ describe('PeerLockTests', { skip }, () => {
       assert.equal(later.acquired, true);
       later.exit();
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 
@@ -1198,7 +1198,7 @@ describe('PeerLockTests', { skip }, () => {
       writeFileSync(path, 'not json');
       await holdOnce((fourth) => assert.equal(fourth.previous, null));
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 
@@ -1248,7 +1248,7 @@ describe('PeerLockTests', { skip }, () => {
       assert.deepEqual(plain(again.previous), { signaled: true });
       again.exit();
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 
@@ -1264,7 +1264,7 @@ describe('PeerLockTests', { skip }, () => {
       lock = await new PeerLock(join(base, 'missing-dir', 'x.lock')).enter();
       assert.equal(lock.acquired, false);
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 
@@ -1279,7 +1279,7 @@ describe('PeerLockTests', { skip }, () => {
       lock.exit();
       assert.equal(readFileSync(path, 'utf8'), '{"pid": 4242, "started": 1792895400.0}');
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 });
@@ -1341,7 +1341,7 @@ describe('SingleFlightTests', { skip }, () => {
 describe('HostRequestTests', { skip }, () => {
   let base;
   before(() => { if (!skip) base = mkdtempSync('/tmp/lcu-hr-'); });
-  after(() => { if (base) rmSync(base, { recursive: true, force: true }); });
+  after(() => { if (base) rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
 
   /** One reply line; a closed connection ends the read instead of spinning. */
   const readLine = (socket, limit = 65536) => new Promise((resolve, reject) => {

@@ -128,7 +128,7 @@ afterEach(() => {
   Object.assign(apply._inject, SAVED_INJECT);
   Object.assign(update._inject, SAVED_UPDATE);
   _resetTempdir();
-  fs.rmSync(temp, { recursive: true, force: true });
+  fs.rmSync(temp, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 function install(platform = 'linux', arch = 'x64', app = null, bundle = true) {

@@ -50,7 +50,7 @@ function trustedNode() {
   if (process.platform === 'darwin') return existsSync(APP_NODE) ? APP_NODE : null;
   if (linuxApp === null) {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'lcu-entry-app-')));
-    process.on('exit', () => rmSync(base, { recursive: true, force: true }));
+    process.on('exit', () => rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
     linuxApp = join(base, 'chatgpt');
     mkdirSync(join(linuxApp, 'resources/cua_node/bin'), { recursive: true });
     cpSync(process.execPath, join(linuxApp, NODE_IN_APP));
@@ -274,7 +274,7 @@ describe('pre-Node gate', { skip: skipOnWindows('the sh pre-Node gate (stat mode
     const moved = join(app, process.platform === 'darwin' ? 'Contents/Resources/relocated-bin' : 'resources/relocated-bin');
     mkdirSync(moved, { recursive: true });
     const node = join(moved, 'node');
-    rmSync(join(binParent, 'bin'), { recursive: true, force: true });
+    rmSync(join(binParent, 'bin'), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     writeFileSync(node, `#!/bin/sh\ntouch '${marker}'\nexit 0\n`);
     chmodSync(node, 0o755);
     symlinkSync('../relocated-bin', join(binParent, 'bin'));
@@ -309,7 +309,7 @@ describe('pre-Node gate', { skip: skipOnWindows('the sh pre-Node gate (stat mode
     }
     // Case 1: bin -> a directory outside the app.
     cpSync(join(binParent, 'bin'), join(outside, 'bin'), { recursive: true });
-    rmSync(join(binParent, 'bin'), { recursive: true, force: true });
+    rmSync(join(binParent, 'bin'), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     symlinkSync(join(outside, 'bin'), join(binParent, 'bin'));
     let root = release(temporary.path, join(binParent, 'bin/node'), { app, name: 'r1' });
     let result = run(join(root, 'bin/lcu'), ['--version']);
@@ -660,7 +660,7 @@ printf '%s' "$__LCU_LN" ; printf '|'; printf '%s' "$__LCU_L1"; printf '|'; print
       assert.equal(result.status, 0, result.stdout + result.stderr);
       assert.equal(result.stdout, `2|${join(base, 'app/top')}|${join(base, 'app/a\nb/l\n')}|${join(base, 'app/real')}`);
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 
@@ -678,7 +678,7 @@ printf '%s' "$__LCU_LN" ; printf '|'; printf '%s' "$__LCU_L1"; printf '|'; print
 printf '%s' "$__LCU_REAL"`);
       assert.equal(result.stdout, join(bin, 'nodereal'), result.stderr);
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 });

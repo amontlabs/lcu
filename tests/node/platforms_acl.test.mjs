@@ -81,7 +81,7 @@ describe('Linux app selection with real POSIX ACLs', { skip }, () => {
     _testing.reset();
     for (const key of Object.keys(process.env)) if (!(key in env)) delete process.env[key];
     Object.assign(process.env, env);
-    rmSync(base, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   const resolve = () => resolve_installed_linux_app(app, { arch: 'arm64' });

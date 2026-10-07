@@ -99,7 +99,7 @@ afterEach(() => {
   Object.assign(setup.impl, SAVED_SETUP);
   Object.assign(setup.io, SAVED_IO);
   Object.assign(update._inject, SAVED_UPDATE);
-  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 function legacyFixture() {

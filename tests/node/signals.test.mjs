@@ -36,7 +36,7 @@ function harness(body, { ignored = 'INT,HUP', env = {} } = {}) {
     assert.equal(done.status, 0, done.stderr);
     return JSON.parse(done.stdout);
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 }
 

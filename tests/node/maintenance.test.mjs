@@ -31,7 +31,7 @@ describe('PruneTests', () => {
     mkdirSync(prefix, { recursive: true });
     writeFileSync(join(prefix, '.lcu-install'), '');
   });
-  afterEach(() => rmSync(temp, { recursive: true, force: true }));
+  afterEach(() => rmSync(temp, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   const gen = (name, { windows = false } = {}) => {
     const path = windows ? join(prefix, 'apps', name, 'app') : join(prefix, 'apps', name, 'payload/usr/lib/chatgpt');

@@ -90,7 +90,7 @@ function sandbox() {
   const archive = path.join(base, 'archive');
   fs.mkdirSync(path.join(archive, 'scripts'), { recursive: true });
   fs.copyFileSync(SCRIPT, path.join(archive, 'scripts/install.sh'));
-  return { base, archive, cleanup: () => fs.rmSync(base, { recursive: true, force: true }) };
+  return { base, archive, cleanup: () => fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) };
 }
 
 const run = (archive, args, env = {}) => spawnSync('/bin/sh', [path.join(archive, 'scripts/install.sh'), ...args], {
@@ -309,7 +309,7 @@ test('startup_env.mjs refuses non-UTF-8 environment bytes as lcu/entry.mjs does'
     }
     assert.equal(spawnSync(process.execPath, [entry], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } }).stdout, 'RAN\n');
   } finally {
-    fs.rmSync(path.dirname(entry), { recursive: true, force: true });
+    fs.rmSync(path.dirname(entry), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 

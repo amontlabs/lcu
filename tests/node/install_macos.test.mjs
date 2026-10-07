@@ -49,7 +49,7 @@ describe('MacInstallationTests', () => {
     hashSeal(source, VERSION, 'arm64', 'darwin');
     prefix = path.join(base, 'lcu');
   });
-  afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
+  afterEach(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   const patchApp = (resolver) => {
     installMacos.internals.SOURCE = source;

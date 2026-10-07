@@ -42,7 +42,7 @@ function makeApp(directory, name, identifier, display = null) {
 }
 
 const temporaries = [];
-after(() => { for (const dir of temporaries) rmSync(dir, { recursive: true, force: true }); });
+after(() => { for (const dir of temporaries) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
 
 describe('AppsTests', () => {
   let home; let applications; let store; let calls; let saved;
@@ -64,7 +64,7 @@ describe('AppsTests', () => {
 
   afterEach(() => {
     Object.assign(apps.hooks, saved);
-    rmSync(home, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   const auth = (approve = true) => (_root, reason) => {

@@ -155,5 +155,5 @@ print(json.dumps({n: [getattr(errno, n, None), os.strerror(getattr(errno, n))] i
     assert.deepEqual(wrong.map((name) => [name, expected[name]]), [], `interpreter's values: ${JSON.stringify(expected)}`);
   });
 
-  it('cleanup', () => { rmSync(scratch, { recursive: true, force: true }); });
+  it('cleanup', () => { rmSync(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
 });

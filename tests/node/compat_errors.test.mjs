@@ -122,7 +122,7 @@ for points in json.loads(sys.argv[1]):
       }
       fs.closeSync(fd);
     } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 });
@@ -160,7 +160,7 @@ describe('pathlib.realpath / resolve (pypath delegates)', () => {
       assert.equal(pypath.realpath(name), target);
       assert.equal(pathlib.resolve(name), target);
     } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 });

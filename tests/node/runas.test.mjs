@@ -70,7 +70,7 @@ const cases = (account) => {
     assert.equal(runProcess([newlines], { capture: true, ...extra }).stdout, 'one\ntwo\nthree\n');
     assert.throws(() => runProcess([invalid], { capture: true, ...extra }), { name: 'UnicodeDecodeError' });
   } finally {
-    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 };
 

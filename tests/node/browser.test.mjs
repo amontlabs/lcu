@@ -23,7 +23,7 @@ import { ORACLE_ROOT } from './oracle_root.mjs';
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const PYTHON = python312() ?? undefined; // exactly CPython 3.12.10 (never a PATH python3: 3.12.3 and 3.14 word argparse differently)
 const temporaries = [];
-after(() => { for (const dir of temporaries) rmSync(dir, { recursive: true, force: true }); });
+after(() => { for (const dir of temporaries) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
 const scratch = () => {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'lcu-browser-'))); // native: the product resolves 8.3 names
   temporaries.push(dir);

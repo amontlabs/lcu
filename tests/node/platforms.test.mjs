@@ -48,7 +48,7 @@ function temporary() {
   const directory = realpathSync(mkdtempSync(path.join(tmpdir(), 'lcu-platforms-')));
   after(() => {
     try {
-      rmSync(directory, { recursive: true, force: true });
+      rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     } catch { /* ignore */ }
   });
   return directory;

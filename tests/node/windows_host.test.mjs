@@ -158,7 +158,7 @@ describe('windows_host (structural extraction)', () => {
     archive = join(app, 'app/resources/app.asar');
     mkdirSync(dirname(archive), { recursive: true });
   });
-  afterEach(() => rmSync(base, { recursive: true, force: true }));
+  afterEach(() => rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   const members = (mainSource, extra = {}) => {
     const out = { [main_name]: Buffer.isBuffer(mainSource) ? mainSource : B(mainSource) };
@@ -637,7 +637,7 @@ describe('windows_host (lifetime host)', () => {
   beforeEach(() => {
     base = mkdtempSync(join(tmpdir(), 'lcu-whl-'));
   });
-  afterEach(() => rmSync(base, { recursive: true, force: true }));
+  afterEach(() => rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   test('host ready handshake and owned child disposal', async () => {
     const entry = join(base, 'host.mjs');

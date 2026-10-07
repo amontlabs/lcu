@@ -54,7 +54,7 @@ describe('ShimTests', { skip }, () => {
   afterEach(() => {
     Object.assign(internals, saved);
     chmodSync(folder, 0o700);
-    rmSync(base, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   const argv = (command) => [...PREFIX, '-c', PROFILE, '--', ...command];

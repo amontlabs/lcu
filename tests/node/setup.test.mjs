@@ -57,7 +57,7 @@ afterEach(() => {
 });
 
 const temps = [];
-after(() => { for (const dir of temps) fs.rmSync(dir, { recursive: true, force: true }); });
+after(() => { for (const dir of temps) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
 function tempdir() {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-setup-test-')));
   temps.push(dir);

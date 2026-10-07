@@ -40,7 +40,7 @@ ${body}`);
     const done = spawnSync(process.execPath, [file], { encoding: 'utf8' });
     return { status: done.status, signal: done.signal, stdout: done.stdout, stderr: done.stderr };
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 }
 
@@ -132,7 +132,7 @@ for (const o of JSON.parse(readFileSync(process.argv[2], 'utf8'))) {
         const got = spawnSync(process.execPath, [program, file]);
         assert.equal(got.stdout.toString('latin1'), want.stdout.toString('latin1'), `seed ${seed}: ${JSON.stringify(ops.map((o) => (o[0] === 'w' ? ['w', o[1].length] : o)))}`);
       } finally {
-        rmSync(directory, { recursive: true, force: true });
+        rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
       }
     }
   });
@@ -156,7 +156,7 @@ for (const o of JSON.parse(readFileSync(process.argv[2], 'utf8'))) {
         assert.equal(got.stdout.toString('latin1'), want.stdout.toString('latin1'), JSON.stringify(env));
         if (want.status !== 0) assert.match(got.stderr.toString(), /UnicodeEncodeError: 'utf-8' codec can't encode character '\\udcff' in position 1: surrogates not allowed/);
       } finally {
-        rmSync(directory, { recursive: true, force: true });
+        rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
       }
     }
   });
@@ -178,7 +178,7 @@ for (const o of JSON.parse(readFileSync(process.argv[2], 'utf8'))) {
       const want = spawnSync('/bin/sh', ['-c', script, PYTHON, '-c', 'print(1)'], { encoding: 'utf8' });
       assert.match(want.stderr, /status=120\n$/);
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 });
@@ -194,7 +194,7 @@ ${body}`);
     assert.equal(done.status, 0, done.stderr);
     return JSON.parse(done.stdout);
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 }
 

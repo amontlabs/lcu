@@ -66,7 +66,7 @@ afterEach(() => {
   Object.assign(process.env, SAVED_ENV);
   Object.assign(update._inject, SAVED_INJECT);
   _resetTempdir();
-  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 const cacheFile = () => update.cache_path();

@@ -35,7 +35,7 @@ afterEach(async () => {
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 async function listen(handler) {

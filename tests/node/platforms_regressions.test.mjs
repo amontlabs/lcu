@@ -30,7 +30,7 @@ afterEach(() => {
     } catch { /* ignore */ }
   };
   restore(path.join(base, 'app/resources/cua_node'));
-  rmSync(base, { recursive: true, force: true });
+  rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 function macApp(infoPlist) {

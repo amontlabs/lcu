@@ -44,7 +44,7 @@ afterEach(() => {
   try {
     chmodSync(path.join(base, 'locked'), 0o755);
   } catch { /* ignore */ }
-  rmSync(base, { recursive: true, force: true });
+  rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 const kernel = () => [node, '--experimental-vm-modules', path.join(folder, 'kernel.js'), '--session-id', 'abc', '--working-dir', '/work'];

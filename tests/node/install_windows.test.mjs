@@ -93,7 +93,7 @@ describe('WindowsInstallerTests', () => {
       checked_prefix: () => prefix, windows: fakeWindows, materialize_original_host: () => {}, paths: () => {},
     });
   });
-  afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
+  afterEach(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   it('windows installer forwards the audio option to shared setup', () => {
     const release = path.join(base, 'release');
@@ -265,7 +265,7 @@ describe('WindowsInstallHostTests (Node publication)', () => {
       checked_prefix: () => prefix, windows: fakeWindows, materialize_original_host: () => {}, paths: () => {},
     });
   });
-  afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
+  afterEach(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   const releases = () => (fs.existsSync(path.join(prefix, 'releases')) ? fs.readdirSync(path.join(prefix, 'releases')) : []);
 
@@ -366,7 +366,7 @@ describe('WindowsInstallerReviewTests', () => {
       checked_prefix: () => prefix, windows: fakeWindows, materialize_original_host: () => {}, paths: () => {},
     });
   });
-  afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
+  afterEach(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   it('R7: descriptors are written with the platform line separator, as Path.write_text did (CRLF on Windows)', () => {
     installWindows.internals.linesep = () => '\r\n';
@@ -447,7 +447,7 @@ describe('WindowsLauncherTests', () => {
     prefix = path.join(base, 'prefix');
     fs.mkdirSync(prefix);
   });
-  afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
+  afterEach(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   it('rejects pointer escapes and selects the versioned release', () => {
     const release = path.join(prefix, 'releases', '0.3.0-123abc');

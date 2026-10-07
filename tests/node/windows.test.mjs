@@ -72,7 +72,7 @@ describe('windows package', () => {
   });
   afterEach(() => {
     Object.assign(hooks, original);
-    rmSync(base, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   test('selects original registered package without copying', () => {

@@ -98,7 +98,7 @@ describe('rmtree order matches CPython 3.12.10', { skip: (PYTHON === null && 'ne
             } catch { /* not there */ }
           }
         }
-        rmSync(base, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
       }
     });
   }

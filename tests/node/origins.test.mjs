@@ -36,7 +36,7 @@ describe('OriginsTests', () => {
   });
   afterEach(() => {
     Object.assign(origins.hooks, saved);
-    rmSync(temporary, { recursive: true, force: true });
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   const session = (name, text = SAMPLE) => {
@@ -647,7 +647,7 @@ else setTimeout(() => {
   });
   afterEach(() => {
     lockTesting.reset();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   const select = (mode) => lockTesting.set({
@@ -695,7 +695,7 @@ describe('inaccessible session folders (unprivileged; compared with the Python o
     for (const dir of [join(base, 'codex/browser'), join(base, 'codex/browser/sessions')]) {
       try { chmodSync(dir, 0o755); } catch { /* gone */ }
     }
-    rmSync(base, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   function python(home, argv) {

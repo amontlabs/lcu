@@ -20,7 +20,7 @@ const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const PYTHON = python312();
 const WINDOWS = process.platform === 'win32'; // the pinned CPython 3.12.10 oracle (never a PATH python3)
 const temporaries = [];
-after(() => { for (const dir of temporaries) rmSync(dir, { recursive: true, force: true }); });
+after(() => { for (const dir of temporaries) rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
 const scratch = () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'lcu-relay-')));
   temporaries.push(dir);
@@ -239,7 +239,7 @@ process.stdin.on('end', () => {
       const target = join(dir, 'private');
       mkdirSync(target, { recursive: true });
       // The relay finds the original host next to itself.
-      rmSync(join(target, 'chrome'), { recursive: true, force: true });
+      rmSync(join(target, 'chrome'), { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
       mkdirSync(join(target, 'chrome/extension-host'), { recursive: true });
       const tree = join(dir, 'chrome/extension-host', system);
       cpSync(tree, join(target, 'chrome/extension-host', system), { recursive: true });

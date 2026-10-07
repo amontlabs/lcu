@@ -134,7 +134,7 @@ describe('InstallationTests', () => {
   beforeEach(() => {
     root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'lcu-install-')));
   });
-  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   it('foreign prefix is untouched', () => {
     fs.writeFileSync(path.join(root, 'keep'), 'valuable');
@@ -422,7 +422,7 @@ describe('BundleTests (install-time half)', () => {
     fs.symlinkSync('node', path.join(rootDir, 'runtime/bin/alias'));
     seal(rootDir, 'arm64');
   });
-  afterEach(() => fs.rmSync(base, { recursive: true, force: true }));
+  afterEach(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
 
   it('VERSION matches scripts/bundle.py (the build and the Windows bridge still read that one)', () => {
     assert.match(fs.readFileSync(path.join(ROOT, 'scripts/bundle.py'), 'utf8'), new RegExp(`^VERSION = '${VERSION.replaceAll('.', '\\.')}'$`, 'm'));

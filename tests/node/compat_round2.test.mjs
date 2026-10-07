@@ -24,7 +24,7 @@ function fakeTool(body) {
   const path = join(dir, 'tool');
   writeFileSync(path, `#!/bin/sh\n${body}\n`);
   chmodSync(path, 0o755);
-  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) };
 }
 
 describe('R01 malformed account rows fail closed', () => {
@@ -132,7 +132,7 @@ describe('R05 the zip fallback never turns its output limit into a successful en
       }
     } finally {
       Object.assign(inflate.inflateConfig, previous);
-      rmSync(directory, { recursive: true, force: true });
+      rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 
@@ -148,7 +148,7 @@ describe('R05 the zip fallback never turns its output limit into a successful en
       assert.equal(readFileSync(join(directory, 'out', 'f')).length, 5000);
     } finally {
       Object.assign(inflate.inflateConfig, previous);
-      rmSync(directory, { recursive: true, force: true });
+      rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 });
@@ -209,7 +209,7 @@ describe('R08 rmtree removes names that are not UTF-8', () => {
       rmtree(`${base}/r\udcff`);
       assert.equal(existsSync(second), false);
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 
@@ -230,7 +230,7 @@ describe('R08 rmtree removes names that are not UTF-8', () => {
         chmodSync(join(base, 'locked'), 0o700);
       } else t.diagnostic('root: the unreadable-directory case is skipped');
     } finally {
-      rmSync(base, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 });
@@ -265,7 +265,7 @@ describe('http AbortSignal and the curl-missing wording', () => {
       assert.equal(serverSide.destroyed, true, 'the server saw the connection close');
     } finally {
       stop(fixture);
-      rmSync(directory, { recursive: true, force: true });
+      rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   });
 

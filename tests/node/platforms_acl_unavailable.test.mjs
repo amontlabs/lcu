@@ -42,6 +42,6 @@ it('refuses when ACLs cannot be read on Linux, and ignores ACLs elsewhere', () =
     assert.equal(_posix_acl(file), null);
     _check_trusted_tree(app, [file], [], trusted);
   } finally {
-    rmSync(base, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
