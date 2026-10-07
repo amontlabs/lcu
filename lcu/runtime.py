@@ -516,8 +516,9 @@ def main(root, argv):
             # account whose HOME is elsewhere is talking to a different socket.
             import pwd
             account_home = pwd.getpwuid(os.getuid()).pw_dir
-            client_home = env.get('HOME') or account_home
-            if overridden or os.path.realpath(client_home) != os.path.realpath(account_home):
+            # An unset HOME makes Node fall back to the account home; an empty one gives ''.
+            client_home = env['HOME'] if 'HOME' in env else account_home
+            if overridden or not client_home or os.path.realpath(client_home) != os.path.realpath(account_home):
                 env.pop('LCU_MAC_SERVICE_LOCK', None)
             else:
                 env['LCU_MAC_SERVICE_LOCK'] = socket_path + '.lock'

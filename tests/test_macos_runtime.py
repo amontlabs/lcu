@@ -118,14 +118,16 @@ class MacRuntimeTests(unittest.TestCase):
         client.parent.mkdir(parents=True)
         client.write_text('fixture')
         client.chmod(0o755)
-        with patch('lcu.platforms.resolve_installed_mac_app', return_value=self.selected), \
-             patch('lcu.macos_host.start_original_host', return_value=(object(), object(), '/tmp/lcu.sock')) as start, \
-             patch('lcu.macos_host.stop_original_host'), \
-             patch('lcu.runtime.subprocess.run', return_value=SimpleNamespace(returncode=0)), \
-             patch.dict(os.environ, {'HOME': '/tmp/isolated-home', 'LCU_MAC_SERVICE_LOCK': '/inherited.lock'}, clear=True):
-            with self.assertRaises(SystemExit):
-                main(self.root, [])
-        self.assertNotIn('LCU_MAC_SERVICE_LOCK', start.call_args.kwargs['env'])
+        # An empty HOME too: Node's os.homedir() then returns '' and the socket path is relative.
+        for home in ('/tmp/isolated-home', ''):
+            with patch('lcu.platforms.resolve_installed_mac_app', return_value=self.selected), \
+                 patch('lcu.macos_host.start_original_host', return_value=(object(), object(), '/tmp/lcu.sock')) as start, \
+                 patch('lcu.macos_host.stop_original_host'), \
+                 patch('lcu.runtime.subprocess.run', return_value=SimpleNamespace(returncode=0)), \
+                 patch.dict(os.environ, {'HOME': home, 'LCU_MAC_SERVICE_LOCK': '/inherited.lock'}, clear=True):
+                with self.assertRaises(SystemExit):
+                    main(self.root, [])
+            self.assertNotIn('LCU_MAC_SERVICE_LOCK', start.call_args.kwargs['env'], repr(home))
 
     def test_reports_current_metadata_after_descriptor_and_lock_become_stale(self):
         with patch('lcu.platforms.resolve_installed_mac_app', return_value=self.selected) as resolve:
