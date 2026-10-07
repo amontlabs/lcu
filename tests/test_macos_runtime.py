@@ -97,19 +97,22 @@ class MacRuntimeTests(unittest.TestCase):
                          str(self.root / 'lcu/macos_sky_service.mjs'))
 
     def test_a_custom_socket_path_leaves_the_service_lock_unknown_to_the_host(self):
+        import pwd  # POSIX only; this module is imported on Windows too
         client = self.runtime / 'lib/node_modules/@oai/sky/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient'
         client.parent.mkdir(parents=True)
         client.write_text('fixture')
         client.chmod(0o755)
-        with patch('lcu.platforms.resolve_installed_mac_app', return_value=self.selected), \
-             patch('lcu.macos_host.start_original_host', return_value=(object(), object(), '/tmp/lcu.sock')) as start, \
-             patch('lcu.macos_host.stop_original_host'), \
-             patch('lcu.runtime.subprocess.run', return_value=SimpleNamespace(returncode=0)), \
-             patch.dict(os.environ, {'HOME': '/fixture', 'SKY_CUA_SERVICE_NATIVE_PIPE_PATH': '/tmp/custom.sock',
-                                 'LCU_MAC_SERVICE_LOCK': '/inherited/computeruse.sock.lock'}, clear=True):
-            with self.assertRaises(SystemExit):
-                main(self.root, [])
-        self.assertNotIn('LCU_MAC_SERVICE_LOCK', start.call_args.kwargs['env'])
+        # Set but empty too: what the original client makes of it is not the default socket.
+        for custom in ('/tmp/custom.sock', ''):
+            with patch('lcu.platforms.resolve_installed_mac_app', return_value=self.selected), \
+                 patch('lcu.macos_host.start_original_host', return_value=(object(), object(), '/tmp/lcu.sock')) as start, \
+                 patch('lcu.macos_host.stop_original_host'), \
+                 patch('lcu.runtime.subprocess.run', return_value=SimpleNamespace(returncode=0)), \
+                 patch.dict(os.environ, {'HOME': pwd.getpwuid(os.getuid()).pw_dir, 'SKY_CUA_SERVICE_NATIVE_PIPE_PATH': custom,
+                                     'LCU_MAC_SERVICE_LOCK': '/inherited/computeruse.sock.lock'}, clear=True):
+                with self.assertRaises(SystemExit):
+                    main(self.root, [])
+            self.assertNotIn('LCU_MAC_SERVICE_LOCK', start.call_args.kwargs['env'], repr(custom))
 
     def test_a_home_that_is_not_the_accounts_leaves_the_service_lock_unknown_to_the_host(self):
         # The original client builds its socket path from $HOME, so it is then not talking to

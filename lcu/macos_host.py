@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 from queue import Empty, Queue
+from types import SimpleNamespace
 from threading import Condition, Event, Lock, Thread
 from uuid import uuid4
 
@@ -62,8 +63,10 @@ def parse_process_table(text):
         # (which may contain spaces).
         match = _PROCESS_ROW.fullmatch(line.rstrip('\r'))
         started = parse_process_start(match.group(3, 4, 5, 6, 7)) if match else None
-        path = match.group(8).strip() if match else ''
-        if (started is None or _UNSAFE_PATH.search(path) or not os.path.isabs(path) or
+        # Checked before trimming: only trailing spaces are padding.
+        raw = match.group(8) if match else ''
+        path = raw.rstrip(' ')
+        if (started is None or _UNSAFE_PATH.search(raw) or not os.path.isabs(path) or
                 os.path.basename(path) != SKY_SERVICE_NAME):
             unparsed += 1
             continue
@@ -100,7 +103,27 @@ def _ps_environment():
     return environment
 
 
-def list_sky_services(*, run=subprocess.run, pid=None):
+def bounded_run(args, *, timeout, env=None, popen=subprocess.Popen, **_options):
+    """Run a system tool and return its status and text output, never waiting much past `timeout`.
+
+    subprocess.run waits without a bound for a child it killed; a tool blocked in the kernel
+    (a hung network volume) can outlive SIGKILL. After one second more it is abandoned.
+    """
+    process = popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=env, encoding='utf-8', errors='replace')
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        raise subprocess.TimeoutExpired(args, timeout) from None
+    return SimpleNamespace(returncode=process.returncode, stdout=stdout, stderr=stderr)
+
+
+def list_sky_services(*, run=bounded_run, pid=None):
     """Running Sky services (or just `pid`) from `ps`, and how many service rows could not be read."""
     selection = ['-axo'] if pid is None else ['-p', str(pid), '-o']
     result = run([PS, *selection, 'pid=,uid=,lstart=,comm='], stdin=subprocess.DEVNULL,
@@ -112,7 +135,7 @@ def list_sky_services(*, run=subprocess.run, pid=None):
     return parse_process_table(result.stdout)
 
 
-def diagnose_sky_services(*, run=subprocess.run, stat=os.stat):
+def diagnose_sky_services(*, run=bounded_run, stat=os.stat):
     """List running Sky services and flag those started before their bundle was replaced. Kills nothing."""
     found, unparsed = list_sky_services(run=run)
     services = []
@@ -172,7 +195,7 @@ _CS_DARWIN_USER_TEMP_DIR = 65537
 SERVICE_EXECUTABLE = Path('Contents/MacOS') / SKY_SERVICE_NAME
 
 
-def verify_service_signature(pid, *, run=subprocess.run):
+def verify_service_signature(pid, *, run=bounded_run):
     """'valid', 'invalid' (the running code differs from the code on disk) or 'unknown'.
 
     `codesign --verify <pid>` validates the running code against its signature on disk, so
@@ -192,7 +215,7 @@ def verify_service_signature(pid, *, run=subprocess.run):
     return 'unknown'
 
 
-def lock_holders(lock_path, *, run=subprocess.run):
+def lock_holders(lock_path, *, run=bounded_run):
     """The complete set of pids with the service's socket lock file open, or None when unsure.
 
     Only a clean answer counts: pids and no diagnostics, or no pids, no diagnostics and
@@ -391,7 +414,8 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             diagnosis = diagnose()
             if diagnosis.get('unparsed'):
                 return nothing('the process listing was incomplete')
-            stale = [item for item in diagnosis['services'] if item['stale']]
+            # Only this account's services: another user's cannot hold this account's lock.
+            stale = [item for item in diagnosis['services'] if item['stale'] and item['uid'] == uid]
             if not stale:
                 return nothing('no stale service')
             if len(stale) != 1:

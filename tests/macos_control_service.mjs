@@ -42,7 +42,8 @@ await writeFile(servicePath, `export async function handleRpc(request) {
   }
   if (request.fail) {
     const error = Object.assign(new Error(request.fail), {code: -10001, errorName: 'fixtureFailure'});
-    throw request.freeze ? Object.freeze(error) : error;
+    globalThis.lastThrown = request.freeze ? Object.freeze(error) : error;
+    throw globalThis.lastThrown;
   }
   if (request.wait) return new Promise(resolve => { globalThis.completeAction = resolve; });
   return {ok: true};
@@ -515,6 +516,7 @@ try {
     rpcBefore = countOriginal();
     recoveriesBefore = recoverRequests.length;
     const error = await failure({fail: startupFailure});
+    assert.equal(error, globalThis.lastThrown, 'the very same error object');
     assert.equal(error.message, startupFailure, reply);
     assert.equal(error.errorName, 'fixtureFailure');
     assert.equal(countOriginal(), rpcBefore + 1, `no retry for ${reply}`);

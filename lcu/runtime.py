@@ -509,8 +509,10 @@ def main(root, argv):
         client = _configure_macos_lifecycle(root, runtime, env)
         if client is not None:
             from .macos_host import start_original_host, stop_original_host
-            from .platforms import mac_socket_path
-            socket_path, overridden = mac_socket_path(env)
+            from .platforms import MAC_SOCKET_ENV, mac_socket_path
+            socket_path, _ = mac_socket_path(env)
+            # Any override, even an empty one, means the client may not use the default socket.
+            overridden = MAC_SOCKET_ENV in env
             # Always decided here, never inherited: only the default location is known, and the
             # original client builds its socket path from $HOME (Node's os.homedir), so an
             # account whose HOME is elsewhere is talking to a different socket.

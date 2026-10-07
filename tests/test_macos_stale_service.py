@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 if sys.platform == 'win32':
     raise unittest.SkipTest('macOS private host')
 
-from lcu.macos_host import (CODESIGN, LSOF, PS, SIGNAL_BUDGET_SECONDS, SKY_SERVICE_NAME, SingleFlight,
+from lcu.macos_host import (CODESIGN, bounded_run, LSOF, PS, SIGNAL_BUDGET_SECONDS, SKY_SERVICE_NAME, SingleFlight,
                             bundle_change_times, diagnose_sky_services, list_sky_services,
                             parse_process_start, parse_process_table, SIGNATURE_MISMATCH_MARKERS, PeerLock,
                             executable_path, known_service_executables, lock_holders, recover_response,
@@ -93,6 +93,13 @@ class ProcessTableTests(unittest.TestCase):
         self.assertEqual((services, unparsed), ([], 1))
         services, _ = parse_process_table(f'4242 501 Wed Oct  7 00:34:53 2026 {EXECUTABLE}\r')
         self.assertEqual([item['pid'] for item in services], [4242], 'a trailing CR from the terminal is just trimmed')
+
+    def test_trailing_control_or_separator_characters_are_refused_not_stripped(self):
+        for character in ('\x0b', '\x0c', '\x1c', '\x1f', '\x85', '\u2028', '\u2029', '\x00'):
+            services, unparsed = parse_process_table(f'4242 501 Wed Oct  7 00:34:53 2026 {EXECUTABLE}{character}')
+            self.assertEqual((services, unparsed), ([], 1), repr(character))
+        services, _ = parse_process_table(f'4242 501 Wed Oct  7 00:34:53 2026 {EXECUTABLE}  ')
+        self.assertEqual([item['path'] for item in services], [EXECUTABLE], 'trailing spaces are padding')
 
     def test_keeps_non_ascii_path_characters(self):
         path = f'/Users/Jos\u00e9/ChatGPT.app/Contents/MacOS/{SKY_SERVICE_NAME}'
@@ -416,10 +423,20 @@ class RecoveryTests(unittest.TestCase):
             self.assertNothingSignaled(world, world.run())
 
     def test_a_process_of_another_user_is_never_signaled(self):
-        world = FakeWorld(uid=0)
-        self.assertNothingSignaled(world, world.run(), 'another user')
-        world = FakeWorld(uid=502)
-        self.assertNothingSignaled(world, world.run(), 'another user')
+        for uid in (0, 502):
+            world = FakeWorld(uid=uid)
+            self.assertNothingSignaled(world, world.run(), 'no stale service')
+            self.assertEqual(world.verified, [])
+
+    def test_another_users_stale_service_does_not_block_recovery_of_ours(self):
+        world = FakeWorld()
+        world.table.append(world.line(5151, 502, STALE_START, EXECUTABLE))
+        self.assertTrue(world.run()['recovered'])
+        self.assertEqual([pid for pid, _ in world.kills], [4242])
+        # Two of our own stale services still refuse.
+        world = FakeWorld()
+        world.table.append(world.line(5151, 501, STALE_START, EXECUTABLE))
+        self.assertNothingSignaled(world, world.run(), 'more than one')
 
     def test_a_process_with_another_name_is_never_signaled(self):
         world = FakeWorld(path=EXECUTABLE.replace(SKY_SERVICE_NAME, 'ChatGPT'))
@@ -804,6 +821,50 @@ class CodesignAndLockTests(unittest.TestCase):
         verify_service_signature(4242, run=run)
         self.assertEqual(run.call_args.kwargs['env']['LC_TIME'], 'C')
         self.assertNotIn('LC_ALL', run.call_args.kwargs['env'])
+
+    def test_system_tools_run_with_a_bound_even_when_the_child_cannot_be_killed(self):
+        import inspect
+        for function in (list_sky_services, verify_service_signature, lock_holders):
+            self.assertIs(inspect.signature(function).parameters['run'].default, bounded_run, function)
+
+        class Unkillable:
+            returncode = None
+
+            def __init__(self, *args, **kwargs):
+                self.args, self.kwargs, self.kills, self.waits = args, kwargs, 0, []
+
+            def communicate(self, timeout=None):
+                self.waits.append(timeout)
+                raise subprocess.TimeoutExpired('lsof', timeout)  # blocked in the kernel, even after SIGKILL
+
+            def kill(self):
+                self.kills += 1
+
+        made = []
+        with self.assertRaises(subprocess.TimeoutExpired):
+            bounded_run([LSOF, '-t'], timeout=3, popen=lambda *a, **k: made.append(Unkillable(*a, **k)) or made[-1])
+        child, = made
+        self.assertEqual(child.kills, 1)
+        self.assertEqual(child.waits, [3, 1], 'one bounded wait after the kill, then the child is abandoned')
+        self.assertEqual(lock_holders(LOCK, run=lambda *a, **k: bounded_run(
+            *a, **k, popen=lambda *b, **c: Unkillable(*b, **c))), None)
+
+    def test_bounded_run_returns_the_output_and_status(self):
+        class Done:
+            returncode = 1
+
+            def __init__(self, args, **kwargs):
+                self.kwargs = kwargs
+
+            def communicate(self, timeout=None):
+                return 'out', 'err'
+
+        made = []
+        result = bounded_run(['/bin/ps'], timeout=2, env={'TZ': 'UTC'},
+                             popen=lambda *a, **k: made.append(Done(*a, **k)) or made[-1])
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (1, 'out', 'err'))
+        self.assertEqual(made[0].kwargs['env'], {'TZ': 'UTC'})
+        self.assertIs(made[0].kwargs['stdin'], subprocess.DEVNULL)
 
     def test_lock_holders_parses_lsof_terse_output(self):
         self.assertEqual(lock_holders(LOCK, run=self.run_with(0, stdout='4242\n')), {4242})
