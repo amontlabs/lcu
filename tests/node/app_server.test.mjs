@@ -31,7 +31,7 @@ process.stdin.on('data', (chunk) => {
     if (!('id' in req) || !('method' in req)) continue;
     if (req.method === 'initialize') { out({ id: req.id, result: mode === 'echo' ? { method: 'initialize' } : {} }); continue; }
     if (mode === 'echo') out({ id: req.id, result: { method: req.method } });
-    else if (mode === 'sleep-exit' && req.method === 'ping') setTimeout(() => process.exit(0), 200);
+    else if (mode === 'sleep-exit' && req.method === 'ping') setTimeout(() => process.exit(0), Number(process.env.EXIT_MS || 200));
     else if (mode === 'error') out({ id: req.id, error: { code: -1, message: 'no such method: ' + req.method } });
     else if (mode === 'request') {
       // A server-originated request and a notification arrive before the reply.
@@ -71,7 +71,9 @@ test('real subprocess pipe handles two rpc replies', (t) => {
 });
 
 test('timeout then eof remain distinct', (t) => {
-  const child = server(t, { FAKE_MODE: 'sleep-exit' });
+  // The server exits EXIT_MS after the first ping; both 20 ms timeouts must happen before that, also on a loaded
+  // CI runner (a 200 ms budget was missed on macOS runners).
+  const child = server(t, { FAKE_MODE: 'sleep-exit', EXIT_MS: '2000' });
   const client = new AppServer(child);
   assert.throws(() => client.call('ping', {}, 0.02), { name: 'ValueError', message: /timed out: ping/ });
   assert.throws(() => client.call('ping', {}, 0.02), { message: 'Bundled Codex app-server timed out: ping' });
