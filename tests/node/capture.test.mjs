@@ -51,7 +51,7 @@ describe('capture.run', () => {
 
   it('a missing program is FileNotFoundError text', () => {
     assert.throws(() => run(['/nonexistent/tool']),
-      (error) => error.message === (process.platform === 'win32' ? '[WinError 3] The system cannot find the path specified'
+      (error) => error.message === (process.platform === 'win32' ? '[WinError 2] The system cannot find the file specified'
         : "[Errno 2] No such file or directory: '/nonexistent/tool'"));
   });
 

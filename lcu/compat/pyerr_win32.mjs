@@ -38,7 +38,7 @@ const CRT = [
   ['EROFS', 30, 'Read-only file system'],
   ['EMLINK', 31, 'Too many links'],
   ['EPIPE', 32, 'Broken pipe'],
-  ['EDOM', 33, 'Numerical argument out of domain'],
+  ['EDOM', 33, 'Domain error'],
   ['ERANGE', 34, 'Result too large'],
   ['EDEADLK', 36, 'Resource deadlock avoided'],
   ['ENAMETOOLONG', 38, 'Filename too long'],

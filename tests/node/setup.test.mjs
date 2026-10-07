@@ -513,7 +513,7 @@ describe('ReconcileTests', () => {
     const waiter = spawn(process.execPath, ['--input-type=module', '-e',
       `const s = await import(${JSON.stringify(setupUrl)});
        const registered = [];
-       Object.assign(s.impl, { platform: 'linux', installer_environment: () => {}, installer_paths: () => {},
+       Object.assign(s.impl, { platform: 'linux', getuid: () => ${UID}, installer_environment: () => {}, installer_paths: () => {},
          run: () => ({ returncode: 0, stdout: '', stderr: '' }), which: (e) => (e === 'pi' ? '/fixture/pi' : null),
          getpwuid: () => (${JSON.stringify(f.account)}), getpwnam: () => (${JSON.stringify(f.account)}),
          configure: (names) => { registered.push(names); return []; } });
@@ -521,10 +521,12 @@ describe('ReconcileTests', () => {
        process.stdout.write('done ' + JSON.stringify(registered) + '\\n');`], { stdio: ['ignore', 'pipe', 'pipe'] });
     let waiterOut = '';
     waiter.stdout.on('data', (chunk) => { waiterOut += chunk; });
+    let waiterErr = '';
+    waiter.stderr.on('data', (chunk) => { waiterErr += chunk; });
     const finished = new Promise((resolve) => waiter.once('close', resolve));
     try {
       const early = await Promise.race([finished.then(() => 'finished'), new Promise((r) => setTimeout(() => r('waiting'), 700))]);
-      assert.equal(early, 'waiting', 'reconcile must wait for the setup lock');
+      assert.equal(early, 'waiting', `reconcile must wait for the setup lock: ${waiterOut}${waiterErr}`);
       // The lock holder finishes the registration itself and clears the pending entry.
       setup.save_setup_state(f.home, { chrome: false, audio: true, approval: 'auto' });
       holder.stdin.end();

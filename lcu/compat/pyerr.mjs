@@ -325,7 +325,8 @@ function windowsError(err, { filename, filename2, parentExists }) {
     else if (typeof (spawning ? (filename ?? err.path) : name) === 'string') {
       const parent = ntpath.dirname(spawning ? (filename ?? err.path) : name);
       const exists = parentExists ?? ((p) => existsSync(p));
-      if (parent !== '' && parent !== '.' && !exists(parent)) winerror = 3;
+      // CreateProcess reports a missing program as 2 even when its directory is missing (checked against CPython).
+      if (!spawning && parent !== '' && parent !== '.' && !exists(parent)) winerror = 3;
     }
   }
   const [message, mapped] = WINERROR[winerror];

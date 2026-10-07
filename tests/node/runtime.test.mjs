@@ -1106,6 +1106,6 @@ describe('supervised launch exit statuses (macOS/Windows)', () => {
 
   it('a missing executable is an OSError with Python text', async () => {
     await assert.rejects(runtime.supervise(['/nonexistent/lcu-node', 'x'], process.env),
-      process.platform === 'win32' ? /^\[WinError 3\] The system cannot find the path specified$/ : /\[Errno 2\] No such file or directory: '\/nonexistent\/lcu-node'/);
+      process.platform === 'win32' ? /^\[WinError 2\] The system cannot find the file specified$/ : /\[Errno 2\] No such file or directory: '\/nonexistent\/lcu-node'/);
   });
 });

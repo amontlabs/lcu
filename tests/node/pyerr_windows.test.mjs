@@ -38,7 +38,7 @@ describe('Windows OSError text (unit)', () => {
       ['PermissionError', 13, 5, "[WinError 5] Access is denied: 'C:\\\\t'"]);
     assert.deepEqual(show(nodeError('EBUSY', 'rename', 'C:\\a', 'C:\\b'), { parentExists: present }),
       ['PermissionError', 13, 32, "[WinError 32] The process cannot access the file because it is being used by another process: 'C:\\\\a' -> 'C:\\\\b'"]);
-    assert.deepEqual(show(nodeError('ENOENT', 'spawn C:\\x.exe', 'C:\\x.exe'), { parentExists: present }),
+    assert.deepEqual(show(nodeError('ENOENT', 'spawn C:\\x.exe', 'C:\\x.exe'), { parentExists: absent }),
       ['FileNotFoundError', 2, 2, '[WinError 2] The system cannot find the file specified']);
   });
 
