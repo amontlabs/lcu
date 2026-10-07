@@ -516,16 +516,16 @@ async function gateOnCleanup() {
 export async function handleRpc(request) {
   register();
   const runtime = globalThis.nodeRepl;
-  // Read before any wait, so both are this request's turn.
+  // Read before any wait, so both are this request's turn (used after a recovery).
   const metadata = readTurnMetadata(runtime);
   const context = controlContext(runtime, request);
   const turnKey = metadata && JSON.stringify([metadata.session_id, metadata.turn_id]);
   const state = {ended: Boolean(turnKey) && endedTurns.has(turnKey), recoveryError: undefined, resent: false};
-  if (!turnKey) return dispatch(runtime, request, metadata, context, undefined, state);
+  if (!turnKey) return dispatch(runtime, request, metadata, context, state);
   const requests = inFlightTurns.get(turnKey) ?? new Set();
   inFlightTurns.set(turnKey, requests.add(state));
   try {
-    return await dispatch(runtime, request, metadata, context, turnKey, state);
+    return await dispatch(runtime, request, metadata, context, state);
   } catch (error) {
     // A turn that ended after a recovery, with nothing sent since, gets the error that led to
     // the recovery whatever failed later; a retry that was sent fails with its own error.
@@ -536,7 +536,7 @@ export async function handleRpc(request) {
   }
 }
 
-async function dispatch(runtime, request, metadata, context, turnKey, state) {
+async function dispatch(runtime, request, metadata, context, state) {
   // After a stale service recovery, nothing is retried, registered or sent for a turn that
   // ended (Stop or Interrupt) meanwhile; the error that led to the recovery is thrown instead.
   const turnActive = () => !state.ended;
@@ -549,19 +549,23 @@ async function dispatch(runtime, request, metadata, context, turnKey, state) {
   // Retried turn cleanup talks to the same native pipe and fails the same way.
   await withStaleServiceRecovery(runtime, gateOnCleanup, retryIfActive);
   original ??= import(pathToFileURL(runtime.env.LCU_MAC_SKY_SERVICE_PATH).href);
-  // A turn that ended after a recovery is not registered again. Without a recovery a request
-  // is registered as before, even for a turn ID used again after its turn-ended (a harness
-  // that continues the same prompt), which also reopens that turn for later requests.
-  const registrable = () => !(state.recoveryError && state.ended);
-  if (metadata && registrable()) {
-    if (!turnMetadata.has(turnKey) && turnMetadata.size >= TURN_METADATA_LIMIT) {
+  // Without a recovery, registration is exactly as before: the turn and control context are
+  // read now, after the cleanup gate (a turn ID a harness uses again is registered again).
+  // After a recovery, this request's own turn is registered, and nothing for a turn that ended.
+  const recovered = Boolean(state.recoveryError);
+  const register = recovered ? (state.ended ? undefined : metadata) : readTurnMetadata(runtime);
+  const registerContext = recovered ? (state.ended ? undefined : context) : controlContext(runtime, request);
+  if (register) {
+    const key = JSON.stringify([register.session_id, register.turn_id]);
+    if (!turnMetadata.has(key) && turnMetadata.size >= TURN_METADATA_LIMIT) {
       throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
     }
-    turnMetadata.set(turnKey, metadata);
-    endedTurns.delete(turnKey);
+    turnMetadata.set(key, register);
+    endedTurns.delete(key);
   }
   const controlReady = await startControlChannel(runtime);
-  if (context && controlReady && registrable()) {
+  if (registerContext && controlReady && !(state.recoveryError && state.ended)) {
+    const context = registerContext;
     const token = JSON.stringify([context.session_id, context.turn_id, context.app]);
     if (context.app && (activeContexts.has(token) || activeContexts.size < 128)) {
       activeContexts.set(token, context);

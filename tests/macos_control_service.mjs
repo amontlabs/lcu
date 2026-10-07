@@ -756,6 +756,31 @@ try {
   assert.equal(reusedEnded(), 2, 'the second turn-ended of a reused turn reaches the native service');
   globalThis.nodeRepl.requestMeta = {};
 
+  // Without a recovery, registration is as on main: the turn is read after the cleanup gate,
+  // so a request that waited while its turn ended and the next turn began registers the next.
+  reset();
+  const parityPrior = {session_id: 'parity-prior-session', turn_id: 'parity-prior-turn', call_id: 'parity-prior-call'};
+  const parityOld = {session_id: 'parity-old-session', turn_id: 'parity-old-turn', call_id: 'parity-old-call'};
+  const parityNew = {session_id: 'parity-new-session', turn_id: 'parity-new-turn', call_id: 'parity-new-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': parityPrior};
+  assert.deepEqual(await rpc(), {ok: true});
+  let releaseParity;
+  globalThis.turnEndedGate = new Promise(resolve => { releaseParity = resolve; });
+  const parityPriorEnded = turnEnded.run({session_id: parityPrior.session_id, turn_id: parityPrior.turn_id});
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': parityOld};
+  const parityRequest = rpc();
+  await turnEnded.run({session_id: parityOld.session_id, turn_id: parityOld.turn_id}).catch(() => {});
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': parityNew};
+  globalThis.turnEndedGate = undefined;
+  releaseParity();
+  await parityPriorEnded;
+  assert.deepEqual(await parityRequest, {ok: true});
+  const parityNewEnded = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest' &&
+    call.payload?.turnID === parityNew.turn_id).length;
+  await turnEnded.run({session_id: parityNew.session_id, turn_id: parityNew.turn_id});
+  assert.equal(parityNewEnded(), 1, 'the request registered the turn current after the gate, as on main');
+  globalThis.nodeRepl.requestMeta = {};
+
   // A turn that is still active is retried, after the pending turn cleanup.
   reset();
   const activeMetadata = {session_id: 'active-session', turn_id: 'active-turn', call_id: 'active-call'};
