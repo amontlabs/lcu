@@ -32,7 +32,17 @@ function lifetimeSignal(runtime, session_id, turn_id) {
   if (!address || typeof runtime.nativePipe?.createConnection !== 'function') {
     throw Error('Original macOS native-pipe lifetime channel is unavailable');
   }
-  return runtime.nativePipe.createConnection(address).then(socket => new Promise((resolve, reject) => {
+  // Bound the connection itself too: a connection that never settles must not hold every
+  // later request behind this cleanup.
+  const connecting = Promise.resolve().then(() => runtime.nativePipe.createConnection(address));
+  let connectTimer;
+  const connectDeadline = new Promise((_, reject) => {
+    connectTimer = setTimeout(() => {
+      connecting.then(late => { try { late.end(); } catch {} }, () => {});
+      reject(Error('macOS native turn cleanup connection timed out'));
+    }, 4000);
+  });
+  return Promise.race([connecting, connectDeadline]).finally(() => clearTimeout(connectTimer)).then(socket => new Promise((resolve, reject) => {
     let data = Buffer.alloc(0);
     let finished = false;
     const timer = setTimeout(() => finish(Error('macOS native turn cleanup timed out')), 4000);
@@ -62,10 +72,14 @@ function lifetimeSignal(runtime, session_id, turn_id) {
   }));
 }
 
-const NATIVE_PIPE_FAILURE = /native pipe startup failed/i;
+// The exact message of the original transport error; a longer message that merely contains
+// these words (a validation or approval error) is not a native pipe failure.
+const NATIVE_PIPE_FAILURE = 'Sky Computer Use native pipe startup failed';
 // Upper bound on what a failed request waits for the host's recovery attempt: the host
 // bounds its own checks and the service's exit to under this.
 const RECOVER_TIMEOUT_MS = 15_000;
+// Time the host may still need after its signal (its wait for the service to exit).
+const RECOVER_EXIT_WAIT_MS = 3_500;
 let recovering;
 
 // Ask the private host to recover from a stale Computer Use service. It stops one only
@@ -110,7 +124,9 @@ function askHostToRecover(runtime) {
       });
       socket.on('error', () => finish(false));
       socket.on('close', () => finish(false));
-      socket.write(Buffer.from(JSON.stringify({type: 'recover'}) + '\n'));
+      // The host must not signal after this time: by then this request has given up.
+      const deadline_unix_ms = Date.now() + timeoutMs - RECOVER_EXIT_WAIT_MS;
+      socket.write(Buffer.from(JSON.stringify({type: 'recover', deadline_unix_ms}) + '\n'));
     }).catch(() => finish(false));
   });
 }
@@ -130,7 +146,7 @@ async function withStaleServiceRecovery(runtime, attempt) {
   } catch (error) {
     let recovered = false;
     try {
-      recovered = typeof error?.message === 'string' && NATIVE_PIPE_FAILURE.test(error.message) &&
+      recovered = typeof error?.message === 'string' && error.message === NATIVE_PIPE_FAILURE &&
         await recoverOnce(runtime);
     } catch {}
     if (!recovered) throw error;

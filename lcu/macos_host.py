@@ -16,6 +16,8 @@ from uuid import uuid4
 
 
 SKY_SERVICE_NAME = 'SkyComputerUseService'
+# The system tools by absolute path, so a caller's PATH cannot stand in for them.
+PS, LSOF, CODESIGN = '/bin/ps', '/usr/sbin/lsof', '/usr/bin/codesign'
 # `ps` reports the start time in whole seconds and the file time has sub-second
 # precision, so a change this close to the start is never read as an update.
 STALE_MARGIN_SECONDS = 2
@@ -89,7 +91,7 @@ def _ps_environment():
 
 def diagnose_sky_services(*, run=subprocess.run, stat=os.stat):
     """List running Sky services and flag those older than their bundle. Kills nothing."""
-    result = run(['ps', '-axo', 'pid=,uid=,lstart=,comm='], stdin=subprocess.DEVNULL,
+    result = run([PS, '-axo', 'pid=,uid=,lstart=,comm='], stdin=subprocess.DEVNULL,
                  capture_output=True, timeout=2, check=False,
                  encoding='utf-8', errors='replace', env=_ps_environment())
     if result.returncode != 0:
@@ -121,7 +123,7 @@ class SingleFlight:
         self.lock = Lock()
         self.current = None
 
-    def __call__(self):
+    def __call__(self, *args):
         with self.lock:
             flight = self.current
             leader = flight is None
@@ -129,7 +131,7 @@ class SingleFlight:
                 flight = self.current = {'done': Event(), 'result': None}
         if leader:
             try:
-                flight['result'] = self.work()
+                flight['result'] = self.work(*args)
             finally:
                 with self.lock:
                     self.current = None
@@ -160,6 +162,8 @@ RECOVERY_WAIT_SECONDS = 16
 # disk` and exits 0. Any other failure (a vanished pid, a usage error, a broken seal) does
 # not prove that the running service is stale, so it is not enough.
 SIGNATURE_MISMATCH_MARKERS = ('the code on disk does not match what is running',)
+# confstr(3) name for the per-user temporary directory (Python has no constant for it).
+_CS_DARWIN_USER_TEMP_DIR = 65537
 SERVICE_EXECUTABLE = Path('Contents/MacOS') / SKY_SERVICE_NAME
 
 
@@ -170,7 +174,7 @@ def verify_service_signature(pid, *, run=subprocess.run):
     a bundle replaced under a running process fails it, and a healthy service passes.
     """
     try:
-        result = run(['codesign', '--verify', '--strict', str(pid)], stdin=subprocess.DEVNULL,
+        result = run([CODESIGN, '--verify', '--strict', str(pid)], stdin=subprocess.DEVNULL,
                      capture_output=True, timeout=CODESIGN_TIMEOUT_SECONDS, check=False,
                      encoding='utf-8', errors='replace', env=_ps_environment())
     except (OSError, subprocess.SubprocessError):
@@ -192,7 +196,7 @@ def lock_holders(lock_path, *, run=subprocess.run):
     if not lock_path or not os.path.isabs(lock_path):
         return None
     try:
-        result = run(['lsof', '-t', '--', lock_path], stdin=subprocess.DEVNULL, capture_output=True,
+        result = run([LSOF, '-t', '--', lock_path], stdin=subprocess.DEVNULL, capture_output=True,
                      timeout=LSOF_TIMEOUT_SECONDS, check=False, encoding='utf-8', errors='replace')
     except (OSError, subprocess.SubprocessError):
         return None
@@ -229,11 +233,21 @@ class PeerLock:
     """
 
     def __init__(self, path=None, wait_seconds=PEER_LOCK_WAIT_SECONDS, sleep=time.sleep, monotonic=time.monotonic):
-        self.path = path or os.path.join(tempfile.gettempdir(), f'lcu-stale-service-recovery-{os.getuid()}.lock')
+        self.path = path or self.default_path()
         self.wait_seconds, self.sleep, self.monotonic = wait_seconds, sleep, monotonic
         self.descriptor, self.acquired, self.waited, self.previous = None, False, False, None
 
+    @staticmethod
+    def default_path():
+        """The account's private temporary directory by the system's own answer, not $TMPDIR."""
+        try:
+            return os.path.join(os.confstr(_CS_DARWIN_USER_TEMP_DIR), f'lcu-stale-service-recovery-{os.getuid()}.lock')
+        except (ValueError, OSError, KeyError):
+            return None
+
     def __enter__(self):
+        if not self.path:
+            return self
         try:
             import fcntl
             descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -339,7 +353,7 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
                           verify=verify_service_signature, holders=lock_holders,
                           kernel_path=executable_path, kill=os.kill, exists=_process_exists,
                           realpath=os.path.realpath, sleep=time.sleep, monotonic=time.monotonic,
-                          wallclock=time.time, exclusive=_NoPeerLock, log=None):
+                          wallclock=time.time, exclusive=_NoPeerLock, signal_deadline=None, log=None):
     """Quit the one Computer Use service that is provably stale and holds the connection.
 
     Every one of these must hold, otherwise nothing is signaled:
@@ -348,14 +362,17 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
     - it is a single process (pid > 1, not this one), owned by the current user, named
       exactly SkyComputerUseService, and the executable the kernel reports for it is the
       one in a known bundle;
-    - it is the only process holding the socket lock file;
+    - it is the only process holding the socket lock file (among those lsof can see);
     - `codesign --verify` rejects the running code as different from the code on disk.
-    Then lock holders, process (pid, owner, start time, path) and kernel executable are read
-    again, in that order so the process is read last, and must still agree exactly, within the
-    pre-signal time budget. The signal is SIGTERM to that one pid, never a group, never
-    SIGKILL: a service that ignores it is left alone. Only one LCU host per account does this
-    at a time, through the end of the wait for the service to exit. Returns the reason when it
-    did nothing.
+    Then the process, its bundle's change time, the kernel executable and the lock holders
+    are read again and must agree exactly (pid, owner, start time, path, bundle time), the
+    lock being read last of the slow checks, within the pre-signal time budget and before the
+    requester's own deadline. The kernel executable is read once more immediately before the
+    signal. The signal is SIGTERM to that one pid, never a group, never SIGKILL: a service
+    that ignores it is left alone. Only one LCU host per account does this at a time,
+    through the end of the wait for the service to exit. Returns the reason when it did
+    nothing. (A pid can still be recycled in the instants between the last read and the
+    signal; macOS has no handle that closes that gap.)
     """
     def nothing(reason):
         return {'ok': True, 'recovered': False, 'reason': reason}
@@ -363,9 +380,13 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
     uid = os.getuid() if uid is None else uid
     started = monotonic()
 
+    def known_executable(pid, service):
+        actual = kernel_path(pid)
+        return bool(actual and os.path.basename(actual) == SKY_SERVICE_NAME and
+                    realpath(actual) == realpath(service['path']) and realpath(actual) in executables)
+
     def candidate():
         """The single stale service that passes every identity check, or the reason there is none."""
-        held = holders(lock_path)  # the slow part first; the process is read after it
         diagnosis = diagnose()
         if diagnosis.get('unparsed'):
             return None, 'the process listing was incomplete'
@@ -382,13 +403,14 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             return None, 'the stale service belongs to another user'
         if os.path.basename(service['path']) != SKY_SERVICE_NAME or realpath(service['path']) not in executables:
             return None, 'the stale service is not in a known Computer Use bundle'
-        if held != {pid}:
-            return None, 'the stale service is not the only holder of the socket lock'
-        actual = kernel_path(pid)  # last: closest to the signal
-        if (not actual or os.path.basename(actual) != SKY_SERVICE_NAME or
-                realpath(actual) != realpath(service['path']) or realpath(actual) not in executables):
+        if not known_executable(pid, service):
             return None, 'the kernel does not report the known executable for the stale service'
+        if holders(lock_path) != {pid}:  # the slowest read, last
+            return None, 'the stale service is not the only holder of the socket lock'
         return service, None
+
+    def identity(service):
+        return (service['pid'], service['uid'], service['started'], service['path'], service['bundle_replaced'])
 
     try:
         with exclusive() as peer:
@@ -397,21 +419,25 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             service, reason = candidate()
             if service is None:
                 previous = peer.previous or {}
-                if (reason == 'no stale service' and previous.get('recovered') is True and
+                if (peer.waited and reason == 'no stale service' and previous.get('recovered') is True and
                         0 <= wallclock() - float(previous.get('at', 0)) <= RECENT_RECOVERY_SECONDS):
+                    # This host waited for another one that stopped the stale service.
                     return {'ok': True, 'recovered': True, 'reason': 'recovered by another LCU process'}
                 return nothing(reason)
             pid = service['pid']
             if verify(pid) != 'invalid':
                 return nothing('the running service passes signature verification, or it could not be checked')
-            # Read everything again, then signal at once: a recycled pid, a replaced service or
-            # a lock that changed hand during the slower checks must not be signaled.
+            # Read everything again, then signal at once: a recycled pid, a replaced or restored
+            # bundle, or a lock that changed hands during the slower checks must not be signaled.
             again, reason = candidate()
-            if again is None or (again['pid'], again['uid'], again['started'], again['path']) != (
-                    pid, service['uid'], service['started'], service['path']):
+            if again is None or identity(again) != identity(service):
                 return nothing('the service changed while it was being checked')
             if monotonic() - started > PRE_SIGNAL_BUDGET_SECONDS:
                 return nothing('the checks took too long to act on')
+            if signal_deadline is not None and wallclock() >= signal_deadline:
+                return nothing('the request stopped waiting for the recovery')
+            if not known_executable(pid, service):
+                return nothing('the service changed while it was being checked')
             kill(pid, signal.SIGTERM)
             deadline = monotonic() + TERMINATE_WAIT_SECONDS
             while exists(pid):
@@ -429,25 +455,37 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
     return {'ok': True, 'recovered': True, 'pid': pid, 'path': service['path'], 'elapsed_ms': elapsed_ms}
 
 
-def recover_response():
+def requested_signal_deadline(request, now_ms=None):
+    """The wall-clock second after which nothing may be signaled, from a request's deadline."""
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    ceiling = now_ms + RECOVERY_WAIT_SECONDS * 1000
+    deadline = request.get('deadline_unix_ms') if isinstance(request, dict) else None
+    if type(deadline) is int and now_ms <= deadline <= ceiling:
+        return deadline / 1000
+    return None if deadline is None else now_ms / 1000  # an invalid deadline allows no signal
+
+
+def recover_response(request=None):
     if sys.platform != 'darwin':
         return {'ok': True, 'recovered': False, 'reason': 'not macOS'}
     return recover_stale_service(
         lock_path=os.environ.get('LCU_MAC_SERVICE_LOCK'), executables=known_service_executables(),
-        exclusive=PeerLock, log=lambda line: print(line, file=sys.stderr, flush=True))
+        exclusive=PeerLock, signal_deadline=requested_signal_deadline(request),
+        log=lambda line: print(line, file=sys.stderr, flush=True))
 
 
 shared_recovery = SingleFlight(recover_response, wait_seconds=RECOVERY_WAIT_SECONDS,
                                unfinished='The Computer Use service recovery did not finish.')
 
 
-def answer_diagnose(connection, flight=None):
+def answer_diagnose(connection, flight=None, request=None):
     """Send a flight's result (the diagnosis by default) on a private duplicate, then close it."""
     flight = flight or shared_diagnosis
     with connection:
         try:
             connection.settimeout(3)
-            connection.sendall((json.dumps(flight(), separators=(',', ':')) + '\n').encode())
+            connection.sendall((json.dumps(flight(request) if flight is shared_recovery else flight(),
+                                           separators=(',', ':')) + '\n').encode())
         except OSError:
             pass
 
@@ -720,7 +758,7 @@ def serve(address, client, control_address=None):
                         continue
                     if isinstance(request, dict) and request.get('type') == 'recover':
                         # Also off the accept loop: it waits on codesign, lsof and the service's exit.
-                        Thread(target=answer_diagnose, args=(connection.dup(), shared_recovery),
+                        Thread(target=answer_diagnose, args=(connection.dup(), shared_recovery, request),
                                daemon=True).start()
                         continue
                     session_id = request.get('session_id') if isinstance(request, dict) else None

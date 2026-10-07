@@ -383,7 +383,13 @@ try {
   recoverReply = recovered;
   let rpcBefore = countOriginal();
   assert.deepEqual(await rpc({failUntilRecovered: true}), {ok: true});
-  assert.deepEqual(recoverRequests, [{type: 'recover'}]);
+  assert.equal(recoverRequests.length, 1);
+  assert.equal(recoverRequests[0].type, 'recover');
+  // The host is told when to stop signaling: before this request gives up (15 s minus the
+  // host's 3.5 s wait for the exit), and not in the past.
+  const sentDeadline = recoverRequests[0].deadline_unix_ms;
+  assert.ok(Number.isSafeInteger(sentDeadline));
+  assert.ok(sentDeadline > Date.now() + 5_000 && sentDeadline <= Date.now() + 11_500, String(sentDeadline - Date.now()));
   assert.equal(countOriginal(), rpcBefore + 2, 'the request runs once, fails, and is retried exactly once');
 
   // The retry is the last attempt: a persisting failure is thrown after exactly one retry
@@ -417,6 +423,17 @@ try {
     assert.equal(countOriginal(), rpcBefore + 1, `no retry for ${reply}`);
     assert.equal(recoverRequests.length, recoveriesBefore + 1);
   }
+
+  // Messages that only contain the words (a validation or approval error) are not a native
+  // pipe startup failure and never reach the host.
+  reset();
+  recoverReply = recovered;
+  recoveriesBefore = recoverRequests.length;
+  for (const message of [`Sky runtime method is not available: ${startupFailure}`, `${startupFailure}: more`,
+    'Sky Computer Use service startup request failed', startupFailure.toLowerCase()]) {
+    assert.equal((await failure({fail: message})).message, message);
+  }
+  assert.equal(recoverRequests.length, recoveriesBefore);
 
   // Other failures never ask the host to do anything.
   reset();
@@ -465,6 +482,20 @@ try {
   reset();
   recoverReply = notRecovered;
   assert.equal((await failure({fail: startupFailure, freeze: true})).message, startupFailure);
+
+  // A lifetime connection that never settles cannot hold later requests behind its cleanup.
+  const hangMetadata = {session_id: 'hang-session', turn_id: 'hang-turn', call_id: 'hang-call'};
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': hangMetadata};
+  assert.deepEqual(await rpc(), {ok: true});
+  const realCreateConnection = globalThis.nodeRepl.nativePipe.createConnection;
+  globalThis.nodeRepl.nativePipe.createConnection = () => new Promise(() => {});
+  const cleanupStarted = Date.now();
+  await assert.rejects(turnEnded.run({session_id: hangMetadata.session_id, turn_id: hangMetadata.turn_id}),
+    /connection timed out/);
+  assert.ok(Date.now() - cleanupStarted < 6_000);
+  globalThis.nodeRepl.nativePipe.createConnection = realCreateConnection;
+  globalThis.nodeRepl.requestMeta = {};
+  assert.deepEqual(await rpc(), {ok: true}, 'the retried cleanup completes and the request proceeds');
 
   // Retried turn cleanup uses the same pipe and fails the same way: a recovery makes the
   // cleanup retry and the request proceed; without one the original error is thrown.

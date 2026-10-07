@@ -14,10 +14,11 @@ from unittest.mock import Mock, patch
 if sys.platform == 'win32':
     raise unittest.SkipTest('macOS private host')
 
-from lcu.macos_host import (SKY_SERVICE_NAME, SingleFlight, bundle_replaced_at, diagnose_response,
+from lcu.macos_host import (CODESIGN, LSOF, PS, SKY_SERVICE_NAME, SingleFlight, bundle_replaced_at, diagnose_response,
                             diagnose_sky_services, parse_process_start, parse_process_table,
                             SIGNATURE_MISMATCH_MARKERS, PeerLock, executable_path, known_service_executables, lock_holders,
-                            recover_response, recover_stale_service, verify_service_signature)
+                            recover_response, recover_stale_service, requested_signal_deadline,
+                            verify_service_signature)
 
 BUNDLE = '/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app'
 EXECUTABLE = f'{BUNDLE}/Contents/MacOS/{SKY_SERVICE_NAME}'
@@ -40,6 +41,17 @@ def stat_with(times):
         return SimpleNamespace(st_ctime=epoch(times[str(path)]) if isinstance(times[str(path)], str)
                                else times[str(path)])
     return stat
+
+
+def read_line(connection, limit=65536):
+    """One reply line; a closed connection ends the read instead of spinning."""
+    data = bytearray()
+    while b'\n' not in data and len(data) < limit:
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
 
 
 def whole_bundle(executable, when):
@@ -130,7 +142,7 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(diagnosis['stale'], [45404])
         self.assertTrue(diagnosis['services'][0]['stale'])
         self.assertNotIn('message', diagnosis)
-        self.assertEqual(run.call_args.args[0], ['ps', '-axo', 'pid=,uid=,lstart=,comm='])
+        self.assertEqual(run.call_args.args[0], ['/bin/ps', '-axo', 'pid=,uid=,lstart=,comm='])
         env = run.call_args.kwargs['env']
         self.assertEqual((env['LC_TIME'], env['LC_CTYPE'], env['TZ']), ('C', 'UTF-8', 'UTC'))
         self.assertNotIn('LC_ALL', env)
@@ -478,6 +490,8 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(attempt({'recovered': False, 'at': 1000.0}))
         self.assertFalse(attempt({'recovered': 'yes', 'at': 1000.0}))
         self.assertFalse(attempt(None), 'waiting for a peer is not evidence of a recovery')
+        self.assertFalse(attempt({'recovered': True, 'pid': 4242, 'at': 1000.0}, waited=False),
+                         'a host that did not wait has no link to that recovery')
         self.assertFalse(attempt({'recovered': True, 'at': 'soon'}))
 
     def test_a_host_that_waited_still_runs_every_check_when_a_service_is_stale(self):
@@ -488,10 +502,26 @@ class RecoveryTests(unittest.TestCase):
 
     def test_a_pid_reused_during_the_final_lock_read_is_not_signaled(self):
         world = FakeWorld()
-        replacement = lambda: setattr(world, 'table', [world.line(4242, 501, 'Wed Oct  7 00:40:00 2026', '/usr/bin/other')])
-        world.on_holders = lambda call: replacement() if call == 2 else None
+
+        def reuse(call):
+            if call == 2:
+                world.table = [world.line(4242, 501, 'Wed Oct  7 00:40:00 2026', '/usr/bin/other')]
+                world.kernel = '/usr/bin/other'
+
+        world.on_holders = reuse
         self.assertNothingSignaled(world, world.run(), 'changed while')
-        # The process is the last thing read before the signal, after the lock holders.
+
+    def test_the_kernel_executable_is_read_again_immediately_before_the_signal(self):
+        world = FakeWorld()
+        calls = []
+
+        def kernel_path(pid):
+            calls.append(pid)
+            return world.kernel if len(calls) < 3 else '/usr/bin/other'
+
+        self.assertNothingSignaled(world, world.run(kernel_path=kernel_path), 'changed while')
+        self.assertEqual(len(calls), 3)
+        # Order of the final pass: process, kernel executable, lock holders (the slowest), kernel again.
         order = []
         world = FakeWorld()
         world.on_holders = lambda call: order.append(f'holders{call}')
@@ -499,7 +529,32 @@ class RecoveryTests(unittest.TestCase):
         world.diagnose = lambda: (order.append('ps'), original())[1]
         world.kernel_path = lambda pid: (order.append('kernel'), world.kernel)[1]
         world.run()
-        self.assertEqual(order[-3:], ['holders2', 'ps', 'kernel'])
+        self.assertEqual(order[-4:], ['ps', 'kernel', 'holders2', 'kernel'])
+
+    def test_a_bundle_restored_after_the_signature_check_is_not_signaled(self):
+        # The mismatch was seen against the replacement; restoring the old bundle gives all
+        # three files new change times, so the service still looks stale but is not the same case.
+        world = FakeWorld()
+        world.after_check = lambda: setattr(world, 'stat', stat_with(whole_bundle(world.path, 'Wed Oct 7 00:30:00 2026')))
+        self.assertNothingSignaled(world, world.run(), 'changed while')
+
+    def test_nothing_is_signaled_after_the_requesters_deadline(self):
+        world = FakeWorld()
+        result = world.run(signal_deadline=1000.0, wallclock=lambda: 1000.5)
+        self.assertNothingSignaled(world, result, 'stopped waiting')
+        world = FakeWorld()
+        self.assertTrue(world.run(signal_deadline=1000.0, wallclock=lambda: 990.0)['recovered'])
+        world = FakeWorld()
+        self.assertTrue(world.run(signal_deadline=None)['recovered'])
+
+    def test_the_requests_deadline_is_validated(self):
+        now = 1_000_000
+        self.assertEqual(requested_signal_deadline({'deadline_unix_ms': now + 5000}, now), (now + 5000) / 1000)
+        self.assertIsNone(requested_signal_deadline({}, now))
+        self.assertIsNone(requested_signal_deadline(None, now))
+        for bad in (now - 1, now + 17_000, 'soon', 1.5, True, None, [], 10 ** 18):
+            expected = None if bad is None else now / 1000
+            self.assertEqual(requested_signal_deadline({'deadline_unix_ms': bad}, now), expected, bad)
 
     def test_a_service_that_does_not_exit_is_waited_for_a_bounded_time_and_never_force_killed(self):
         import signal
@@ -545,14 +600,19 @@ class RecoveryTests(unittest.TestCase):
         kill.assert_not_called()
         run.assert_not_called()
 
-    def test_the_default_response_without_a_lock_location_does_nothing(self):
+    def test_the_default_response_passes_the_environments_lock_path_and_no_deadline_invention(self):
         with patch('lcu.macos_host.sys.platform', 'darwin'), \
-             patch('lcu.macos_host.diagnose_sky_services', return_value={'services': []}), \
-             patch('os.kill') as kill, patch.dict(os.environ, {}, clear=False):
-            os.environ.pop('LCU_MAC_SERVICE_LOCK', None)
-            result = recover_response()
-        self.assertFalse(result['recovered'])
-        kill.assert_not_called()
+             patch('lcu.macos_host.recover_stale_service', return_value={'ok': True, 'recovered': False}) as recover, \
+             patch.dict(os.environ, {'LCU_MAC_SERVICE_LOCK': LOCK}):
+            recover_response({'type': 'recover'})
+            os.environ.pop('LCU_MAC_SERVICE_LOCK')
+            recover_response(None)
+        first, second = (call.kwargs for call in recover.call_args_list)
+        self.assertEqual((first['lock_path'], first['signal_deadline'], first['exclusive']), (LOCK, None, PeerLock))
+        self.assertIsNone(second['lock_path'])
+
+    def test_system_tools_are_used_by_absolute_path(self):
+        self.assertEqual((PS, LSOF, CODESIGN), ('/bin/ps', '/usr/sbin/lsof', '/usr/bin/codesign'))
 
 
 class CodesignAndLockTests(unittest.TestCase):
@@ -564,7 +624,7 @@ class CodesignAndLockTests(unittest.TestCase):
         run = self.run_with(0, stderr='4242: dynamically valid\n4242: valid on disk\n'
                                        '4242: satisfies its Designated Requirement\n')
         self.assertEqual(verify_service_signature(4242, run=run), 'valid')
-        self.assertEqual(run.call_args.args[0], ['codesign', '--verify', '--strict', '4242'])
+        self.assertEqual(run.call_args.args[0], ['/usr/bin/codesign', '--verify', '--strict', '4242'])
         self.assertIsInstance(run.call_args.kwargs['timeout'], int)
 
     def test_only_a_running_versus_disk_mismatch_is_invalid(self):
@@ -594,7 +654,7 @@ class CodesignAndLockTests(unittest.TestCase):
         self.assertEqual(lock_holders(LOCK, run=self.run_with(1, stdout='')), set())
         run = self.run_with(0, stdout='4242\n')
         lock_holders(LOCK, run=run)
-        self.assertEqual(run.call_args.args[0], ['lsof', '-t', '--', LOCK])
+        self.assertEqual(run.call_args.args[0], ['/usr/sbin/lsof', '-t', '--', LOCK])
 
     def test_lock_holders_is_unknown_unless_lsof_answered_cleanly(self):
         for run in (self.run_with(2, stdout=''), self.run_with(0, stdout='lsof: WARNING\n'),
@@ -680,6 +740,20 @@ class PeerLockTests(unittest.TestCase):
             with PeerLock(path) as fourth:
                 self.assertIsNone(fourth.previous)
 
+    def test_the_default_lock_file_does_not_depend_on_tmpdir(self):
+        if sys.platform == 'darwin':
+            with patch.dict(os.environ, {'TMPDIR': '/somewhere/else'}):
+                path = PeerLock.default_path()
+            self.assertTrue(path.startswith('/'))
+            self.assertNotIn('somewhere', path)
+            self.assertTrue(path.endswith(f'lcu-stale-service-recovery-{os.getuid()}.lock'))
+        else:
+            self.assertIsNone(PeerLock.default_path())
+        with patch('lcu.macos_host.os.confstr', side_effect=ValueError('unknown')):
+            self.assertIsNone(PeerLock.default_path())
+            with PeerLock() as lock:
+                self.assertFalse(lock.acquired)
+
     def test_an_unusable_lock_file_means_not_acquired(self):
         with tempfile.TemporaryDirectory() as base:
             target = os.path.join(base, 'real')
@@ -736,6 +810,12 @@ class SingleFlightTests(unittest.TestCase):
         self.assertEqual(results, [{'ok': True, 'run': 1}] * 8)
         self.assertEqual(flight()['run'], 2)
 
+    def test_the_leaders_arguments_reach_the_work(self):
+        seen = []
+        flight = SingleFlight(lambda *args: (seen.append(args), {'ok': True})[1])
+        self.assertEqual(flight({'deadline_unix_ms': 5}), {'ok': True})
+        self.assertEqual(seen, [({'deadline_unix_ms': 5},)])
+
     def test_a_failing_run_frees_the_flight_and_waiters_do_not_hang(self):
         calls = []
 
@@ -766,10 +846,7 @@ class HostRequestTests(unittest.TestCase):
                     connection.settimeout(8)
                     connection.connect(address)
                     connection.sendall(b'{"type":"diagnose"}\n')
-                    response = bytearray()
-                    while b'\n' not in response:
-                        response.extend(connection.recv(4096))
-                reply = json.loads(response)
+                    reply = json.loads(read_line(connection))
                 self.assertTrue(reply['ok'], reply)
                 self.assertIsInstance(reply['services'], list)
                 self.assertIsInstance(reply['stale'], list)
@@ -778,42 +855,56 @@ class HostRequestTests(unittest.TestCase):
                     connection.settimeout(8)
                     connection.connect(address)
                     connection.sendall(b'{"session_id":"s","turn_id":"t"}\n')
-                    self.assertEqual(json.loads(connection.recv(1024)), {'notified': True})
+                    self.assertEqual(json.loads(read_line(connection)), {'notified': True})
             finally:
                 stop_original_host(process, temporary)
 
-    def test_a_slow_diagnosis_does_not_delay_turn_cleanup(self):
+    def test_slow_diagnosis_and_recovery_do_not_delay_turn_cleanup(self):
         from lcu.macos_host import start_original_host, stop_original_host
+        root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as base:
             client = Path(base) / 'client'
             client.write_text('#!/bin/sh\nexit 0\n')
             client.chmod(0o755)
-            fake_ps = Path(base) / 'bin' / 'ps'
-            fake_ps.parent.mkdir()
-            fake_ps.write_text('#!/bin/sh\nsleep 1.5\n')
-            fake_ps.chmod(0o755)
-            env = {**os.environ, 'PATH': f'{fake_ps.parent}{os.pathsep}{os.environ["PATH"]}'}
+            # The real host loop with slow stand-ins for the two flights, so nothing real is inspected.
+            entry = Path(base) / 'slow_host.py'
+            entry.write_text(f'''import sys, time
+sys.path.insert(0, {str(root)!r})
+import lcu.macos_host as host
+def slow_diagnosis(*args):
+    time.sleep(1.5)
+    return {{'ok': True, 'services': [], 'stale': [], 'unparsed': 0}}
+def slow_recovery(request=None):
+    time.sleep(1.5)
+    return {{'ok': True, 'recovered': False, 'reason': 'fixture', 'seen': request}}
+host.shared_diagnosis = host.SingleFlight(slow_diagnosis)
+host.shared_recovery = host.SingleFlight(slow_recovery, wait_seconds=5)
+host.serve(sys.argv[2], sys.argv[3])
+''')
             process, temporary, address = start_original_host(
-                python=Path(sys.executable), client=client,
-                entry=Path(__file__).resolve().parents[1] / 'lcu/macos_host.py', env=env)
+                python=Path(sys.executable), client=client, entry=entry, env=os.environ.copy())
             try:
-                slow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                slow.settimeout(8)
-                slow.connect(address)
-                slow.sendall(b'{"type":"diagnose"}\n')
-                time.sleep(0.2)
+                slow = []
+                for raw in (b'{"type":"diagnose"}\n', b'{"type":"recover","deadline_unix_ms":7}\n'):
+                    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    connection.settimeout(8)
+                    connection.connect(address)
+                    connection.sendall(raw)
+                    slow.append(connection)
+                time.sleep(0.3)
                 started = time.monotonic()
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                     connection.settimeout(8)
                     connection.connect(address)
                     connection.sendall(b'{"session_id":"s","turn_id":"t"}\n')
-                    self.assertEqual(json.loads(connection.recv(1024)), {'notified': True})
+                    self.assertEqual(json.loads(read_line(connection)), {'notified': True})
                 self.assertLess(time.monotonic() - started, 1.0)
-                response = bytearray()
-                while b'\n' not in response:
-                    response.extend(slow.recv(4096))
-                self.assertTrue(json.loads(response)['ok'])
-                slow.close()
+                diagnosis, recovery = (json.loads(read_line(connection)) for connection in slow)
+                self.assertTrue(diagnosis['ok'])
+                self.assertEqual(recovery, {'ok': True, 'recovered': False, 'reason': 'fixture',
+                                            'seen': {'type': 'recover', 'deadline_unix_ms': 7}})
+                for connection in slow:
+                    connection.close()
             finally:
                 stop_original_host(process, temporary)
 
