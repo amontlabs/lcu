@@ -158,6 +158,15 @@ class StartTimeTests(unittest.TestCase):
         diagnose_sky_services(run=run, stat=stat_with({}))
         self.assertEqual(run.call_args.kwargs['env']['TZ'], 'UTC')
 
+    def test_ps_is_never_given_a_column_limit_that_would_cut_paths(self):
+        # A caller's COLUMNS makes `ps` cut the last column, hiding the service name from the listing.
+        with patch.dict(os.environ, {'COLUMNS': '80'}):
+            for call in (lambda run: diagnose_sky_services(run=run, stat=stat_with({})),
+                         lambda run: list_sky_services(run=run, pid=4242)):
+                run = ps()
+                call(run)
+                self.assertNotIn('COLUMNS', run.call_args.kwargs['env'])
+
 
 class DiagnoseTests(unittest.TestCase):
     def test_flags_a_service_started_before_its_bundle_was_replaced(self):

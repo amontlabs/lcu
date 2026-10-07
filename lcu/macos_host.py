@@ -99,8 +99,11 @@ def bundle_change_times(executable, stat=os.stat):
 
 
 def _ps_environment():
-    """English month names and UTC times; UTF-8 so `ps` does not escape non-ASCII paths."""
-    environment = {key: value for key, value in os.environ.items() if key != 'LC_ALL'}
+    """English month names and UTC times; UTF-8 so `ps` does not escape non-ASCII paths.
+
+    No COLUMNS, which would make `ps` cut paths and hide services from the listing.
+    """
+    environment = {key: value for key, value in os.environ.items() if key not in ('LC_ALL', 'COLUMNS')}
     environment.update(LC_TIME='C', LC_CTYPE='UTF-8', TZ='UTC')
     return environment
 
