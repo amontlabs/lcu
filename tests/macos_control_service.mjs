@@ -769,6 +769,19 @@ try {
   assert.equal((await missingRequest).message, startupFailure);
   recoverHold = undefined;
   assert.equal(countOriginal(), rpcBefore + 1, 'nothing is sent again after any turn end');
+  // Nor does a turn end with no event object at all.
+  reset();
+  recoverReply = recovered;
+  recoverHold = new Promise(resolve => { releaseRecovery = resolve; });
+  recoveriesBefore = recoverRequests.length;
+  rpcBefore = countOriginal();
+  const noEventRequest = failure({failUntilRecovered: true});
+  await waitFor(() => recoverRequests.length === recoveriesBefore + 1, 'the request did not ask for recovery');
+  await assert.rejects(turnEnded.run(undefined));
+  releaseRecovery();
+  assert.equal((await noEventRequest).message, startupFailure);
+  recoverHold = undefined;
+  assert.equal(countOriginal(), rpcBefore + 1);
 
   // A turn that is still active is retried, after the pending turn cleanup.
   reset();

@@ -166,9 +166,10 @@ function register() {
   if (typeof runtime?.addTurnEndedHandler !== 'function') {
     throw Error('Original node_repl turn-ended hook is unavailable');
   }
-  runtime.addTurnEndedHandler({timeoutMs: TURN_CLEANUP_HOOK_TIMEOUT_MS, run: async ({session_id, turn_id}) => {
+  runtime.addTurnEndedHandler({timeoutMs: TURN_CLEANUP_HOOK_TIMEOUT_MS, run: async event => {
     // Counted first, so even a turn end rejected below blocks recovery retries.
     turnsEnded++;
+    const {session_id, turn_id} = event ?? {};
     if (typeof session_id !== 'string' || !session_id.trim() ||
         typeof turn_id !== 'string' || !turn_id.trim()) {
       throw Error('Original node_repl turn IDs are missing');
