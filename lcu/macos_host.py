@@ -72,24 +72,16 @@ def parse_process_table(text):
     return services, unparsed
 
 
-def bundle_replaced_at(executable, stat=os.stat):
-    """When the service bundle on disk was last replaced, or None when that is unknown.
+def bundle_change_times(executable, stat=os.stat):
+    """The change times (ctime) of the executable, Info.plist and code-signature seal, or None.
 
-    This is the oldest inode change time (ctime) among the executable, the bundle
-    Info.plist and its code-signature seal. An app update replaces the whole bundle:
-    observed live, all 167 files had the update time as ctime while their mtimes
-    (build time) and creation times were days to months older, so neither of those
-    can detect it. Requiring all three to have changed keeps one metadata change
-    (chmod, an extended attribute) on a single file from reading as an update, so
-    when any of them is missing or unreadable the answer is None, not a guess.
+    An app update replaces the whole bundle: observed live, all 167 files had the update
+    time as ctime while their mtimes (build time) and creation times were days to months
+    older, so neither of those can detect it. The bundle counts as replaced at the oldest
+    of the three, so one metadata change (chmod, an extended attribute) on a single file
+    does not read as an update, and a missing or unreadable file gives None, not a guess.
     Starting the service does not change ctime.
     """
-    times = bundle_change_times(executable, stat)
-    return None if times is None else min(times)
-
-
-def bundle_change_times(executable, stat=os.stat):
-    """The change times of the executable, Info.plist and code-signature seal, or None."""
     try:
         contents = Path(executable).parents[1]
         return tuple(stat(path).st_ctime for path in (
@@ -126,12 +118,9 @@ def diagnose_sky_services(*, run=subprocess.run, stat=os.stat):
     services = []
     for service in found:
         times = bundle_change_times(service['path'], stat)
-        replaced = None if times is None else min(times)
-        services.append({
-            **service, 'bundle_replaced': replaced, 'bundle_times': times, 'bundle_missing': replaced is None,
-            'stale': replaced is not None and replaced > service['started'] + STALE_MARGIN_SECONDS})
-    stale = sorted(service['pid'] for service in services if service['stale'])
-    return {'services': services, 'stale': stale, 'unparsed': unparsed}
+        services.append({**service, 'bundle_times': times, 'stale': times is not None and
+                         min(times) > service['started'] + STALE_MARGIN_SECONDS})
+    return {'services': services, 'unparsed': unparsed}
 
 
 class SingleFlight:
@@ -348,19 +337,6 @@ def _process_exists(pid):
     return True
 
 
-class _NoPeerLock:
-    acquired, previous = True, None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def record(self, outcome):
-        return True
-
-
 def requester_waiting(connection):
     """True while the requester's connection is open and it has sent nothing more.
 
@@ -380,7 +356,7 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
                           verify=verify_service_signature, holders=lock_holders,
                           kernel_path=executable_path, kill=os.kill, exists=_process_exists,
                           realpath=os.path.realpath, sleep=time.sleep, monotonic=time.monotonic,
-                          exclusive=_NoPeerLock, waiting=lambda: False, log=None):
+                          exclusive=PeerLock, waiting=lambda: False, log=None):
     """Quit the one Computer Use service that is provably stale and holds the connection.
 
     In this order, and any failed or inconclusive step means nothing is signaled:
@@ -489,7 +465,7 @@ def recover_response(waiting=None):
         return {'ok': True, 'recovered': False, 'reason': 'not macOS'}
     return recover_stale_service(
         lock_path=os.environ.get('LCU_MAC_SERVICE_LOCK'), executables=known_service_executables(),
-        exclusive=PeerLock, waiting=waiting or (lambda: False),
+        waiting=waiting or (lambda: False),
         log=lambda line: print(line, file=sys.stderr, flush=True))
 
 

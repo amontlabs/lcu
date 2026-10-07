@@ -15,7 +15,7 @@ if sys.platform == 'win32':
     raise unittest.SkipTest('macOS private host')
 
 from lcu.macos_host import (CODESIGN, LSOF, PS, SIGNAL_BUDGET_SECONDS, SKY_SERVICE_NAME, SingleFlight,
-                            bundle_change_times, bundle_replaced_at, diagnose_sky_services, list_sky_services,
+                            bundle_change_times, diagnose_sky_services, list_sky_services,
                             parse_process_start, parse_process_table, SIGNATURE_MISMATCH_MARKERS, PeerLock,
                             executable_path, known_service_executables, lock_holders, recover_response,
                             recover_stale_service, requester_waiting, verify_service_signature)
@@ -41,6 +41,15 @@ def stat_with(times):
         return SimpleNamespace(st_ctime=epoch(times[str(path)]) if isinstance(times[str(path)], str)
                                else times[str(path)])
     return stat
+
+
+def stale_pids(diagnosis):
+    return sorted(service['pid'] for service in diagnosis['services'] if service['stale'])
+
+
+def replaced_at(executable, stat):
+    times = bundle_change_times(executable, stat)
+    return None if times is None else min(times)
 
 
 def read_line(connection, limit=65536):
@@ -108,24 +117,24 @@ class ProcessTableTests(unittest.TestCase):
 class BundleTimeTests(unittest.TestCase):
     def test_uses_the_oldest_change_among_executable_plist_and_seal(self):
         stat = stat_with({EXECUTABLE: 300.0, PLIST: 250.0, SEAL: 280.0})
-        self.assertEqual(bundle_replaced_at(EXECUTABLE, stat), 250.0)
+        self.assertEqual(replaced_at(EXECUTABLE, stat), 250.0)
 
     def test_one_file_with_a_metadata_change_does_not_read_as_a_replacement(self):
         # chmod or an extended attribute on the executable alone: the plist and seal keep their old ctime.
         stat = stat_with({EXECUTABLE: 900.0, PLIST: 100.0, SEAL: 100.0})
-        self.assertEqual(bundle_replaced_at(EXECUTABLE, stat), 100.0)
+        self.assertEqual(replaced_at(EXECUTABLE, stat), 100.0)
         run = ps(f'45404 501 Thu Jan  1 00:10:00 1970 {EXECUTABLE}')
-        self.assertEqual(diagnose_sky_services(run=run, stat=stat)['stale'], [])
+        self.assertEqual(stale_pids(diagnose_sky_services(run=run, stat=stat)), [])
 
     def test_a_missing_or_unreadable_file_makes_the_time_unknown_not_a_guess(self):
         for present in ({EXECUTABLE: 900.0}, {EXECUTABLE: 900.0, PLIST: 900.0},
                         {EXECUTABLE: 900.0, SEAL: 900.0}, {PLIST: 250.0, SEAL: 250.0}):
-            self.assertIsNone(bundle_replaced_at(EXECUTABLE, stat_with(present)), present)
+            self.assertIsNone(replaced_at(EXECUTABLE, stat_with(present)), present)
         run = ps(f'45404 501 Thu Jan  1 00:10:00 1970 {EXECUTABLE}')
         diagnosis = diagnose_sky_services(run=run, stat=stat_with({EXECUTABLE: 900.0}))
-        self.assertEqual(diagnosis['stale'], [])
-        self.assertTrue(diagnosis['services'][0]['bundle_missing'])
-        self.assertIsNone(bundle_replaced_at('/' + SKY_SERVICE_NAME, stat_with({'/' + SKY_SERVICE_NAME: 5.0})))
+        self.assertEqual(stale_pids(diagnosis), [])
+        self.assertIsNone(diagnosis['services'][0]['bundle_times'])
+        self.assertIsNone(replaced_at('/' + SKY_SERVICE_NAME, stat_with({'/' + SKY_SERVICE_NAME: 5.0})))
 
 
 class StartTimeTests(unittest.TestCase):
@@ -173,7 +182,7 @@ class DiagnoseTests(unittest.TestCase):
         run = ps(f'45404 501 Tue Oct  6 11:00:00 2026   {EXECUTABLE}')
         stat = stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026'))
         diagnosis = diagnose_sky_services(run=run, stat=stat)
-        self.assertEqual(diagnosis['stale'], [45404])
+        self.assertEqual(stale_pids(diagnosis), [45404])
         self.assertTrue(diagnosis['services'][0]['stale'])
         self.assertNotIn('message', diagnosis)
         self.assertEqual(run.call_args.args[0], ['/bin/ps', '-axo', 'pid=,uid=,lstart=,comm='])
@@ -185,7 +194,7 @@ class DiagnoseTests(unittest.TestCase):
         run = ps(f'45404 501 Wed Oct  7 00:34:53 2026   {EXECUTABLE}')
         stat = stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026'))
         diagnosis = diagnose_sky_services(run=run, stat=stat)
-        self.assertEqual(diagnosis['stale'], [])
+        self.assertEqual(stale_pids(diagnosis), [])
         self.assertNotIn('message', diagnosis)
         self.assertFalse(diagnosis['services'][0]['stale'])
 
@@ -194,24 +203,23 @@ class DiagnoseTests(unittest.TestCase):
         run = ps(f'45404 501 Wed Oct  7 00:34:53 2026   {EXECUTABLE}')
         for replaced, stale in ((start + 1.9, False), (start + 2.5, True)):
             diagnosis = diagnose_sky_services(run=run, stat=stat_with(whole_bundle(EXECUTABLE, replaced)))
-            self.assertEqual(diagnosis['stale'] == [45404], stale, replaced)
+            self.assertEqual(stale_pids(diagnosis) == [45404], stale, replaced)
 
     def test_no_service_running(self):
         diagnosis = diagnose_sky_services(run=ps('    1 501 Tue Oct  6 08:00:00 2026 /sbin/launchd'),
                                           stat=stat_with({}))
-        self.assertEqual(diagnosis, {'services': [], 'stale': [], 'unparsed': 0})
+        self.assertEqual(diagnosis, {'services': [], 'unparsed': 0})
 
     def test_missing_bundle_is_reported_but_not_flagged(self):
         diagnosis = diagnose_sky_services(run=ps(f'45404 501 Tue Oct  6 11:00:00 2026 {EXECUTABLE}'),
                                           stat=stat_with({}))
-        self.assertEqual(diagnosis['stale'], [])
-        self.assertTrue(diagnosis['services'][0]['bundle_missing'])
-        self.assertIsNone(diagnosis['services'][0]['bundle_replaced'])
+        self.assertEqual(stale_pids(diagnosis), [])
+        self.assertIsNone(diagnosis['services'][0]['bundle_times'])
 
     def test_unparseable_output_flags_nothing(self):
         diagnosis = diagnose_sky_services(run=ps(f'??? {EXECUTABLE}', 'not a process table'),
                                           stat=stat_with(whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026')))
-        self.assertEqual((diagnosis['services'], diagnosis['stale'], diagnosis['unparsed']), ([], [], 1))
+        self.assertEqual((diagnosis['services'], diagnosis['unparsed']), ([], 1))
 
     def test_only_the_older_of_two_services_is_flagged(self):
         other = '/Users/x/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/' + SKY_SERVICE_NAME
@@ -220,7 +228,7 @@ class DiagnoseTests(unittest.TestCase):
         stat = stat_with({**whole_bundle(EXECUTABLE, 'Wed Oct 7 00:21:00 2026'),
                           **whole_bundle(other, 'Wed Oct 7 00:34:50 2026')})
         diagnosis = diagnose_sky_services(run=run, stat=stat)
-        self.assertEqual(diagnosis['stale'], [200])
+        self.assertEqual(stale_pids(diagnosis), [200])
         self.assertEqual([service['pid'] for service in diagnosis['services']], [45404, 200])
 
     def test_ps_failure_is_an_error_not_a_guess(self):
@@ -238,8 +246,8 @@ class DiagnoseTests(unittest.TestCase):
             changed = os.stat(executable).st_ctime
             older = time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(changed - 600))
             newer = time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(changed + 600))
-            self.assertEqual(diagnose_sky_services(run=ps(f'10 501 {older} {executable}'))['stale'], [10])
-            self.assertEqual(diagnose_sky_services(run=ps(f'10 501 {newer} {executable}'))['stale'], [])
+            self.assertEqual(stale_pids(diagnose_sky_services(run=ps(f'10 501 {older} {executable}'))), [10])
+            self.assertEqual(stale_pids(diagnose_sky_services(run=ps(f'10 501 {newer} {executable}'))), [])
 
     def test_the_diagnosis_only_lists_processes_and_never_signals_one(self):
         run = ps(f'45404 501 Tue Oct  6 11:00:00 2026 {EXECUTABLE}')
@@ -256,6 +264,19 @@ LOCK = '/Users/x/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/I
 EXECUTABLES = {EXECUTABLE, HOME_EXECUTABLE}
 STALE_START = 'Tue Oct  6 11:00:00 2026'
 REPLACED = 'Wed Oct 7 00:21:00 2026'
+
+
+class NoPeerLock:
+    acquired, previous = True, None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def record(self, outcome):
+        return True
 
 
 class FakeWorld:
@@ -337,7 +358,7 @@ class FakeWorld:
                        read_process=self.read_process, change_times=self.change_times,
                        verify=self.verify, holders=self.holders, kernel_path=self.kernel_path, kill=self.kill,
                        exists=self.exists, realpath=lambda path: path, sleep=self.sleep, monotonic=self.monotonic,
-                       waiting=lambda: True, log=self.logs.append)
+                       waiting=lambda: True, exclusive=NoPeerLock, log=self.logs.append)
         options.update(overrides)
         return recover_stale_service(**options)
 
@@ -502,6 +523,12 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(asked, [world.order[:world.order.index('kill')]], 'asked once, right before the signal')
         world = FakeWorld()
         self.assertNothingSignaled(world, world.run(waiting=Mock(side_effect=OSError('closed'))), 'check failed')
+
+    def test_the_default_is_the_real_peer_lock_and_no_requester(self):
+        import inspect
+        defaults = {name: parameter.default for name, parameter in
+                    inspect.signature(recover_stale_service).parameters.items()}
+        self.assertIs(defaults['exclusive'], PeerLock)
 
     def test_without_a_requester_nothing_is_ever_signaled(self):
         world = FakeWorld()
@@ -720,7 +747,8 @@ class RecoveryTests(unittest.TestCase):
             os.environ.pop('LCU_MAC_SERVICE_LOCK')
             recover_response()
         first, second = (call.kwargs for call in recover.call_args_list)
-        self.assertEqual((first['lock_path'], first['exclusive'], first['waiting']), (LOCK, PeerLock, presence))
+        self.assertEqual((first['lock_path'], first['waiting']), (LOCK, presence))
+        self.assertNotIn('exclusive', first, 'the real peer lock, the default, is used')
         self.assertIsNone(second['lock_path'])
         self.assertFalse(second['waiting'](), 'no requester means nobody is waiting')
 
