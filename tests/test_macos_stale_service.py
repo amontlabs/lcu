@@ -227,6 +227,7 @@ class FakeWorld:
         self.exits_after = exits_after
         self.kills, self.polls, self.clock, self.logs, self.verified = [], 0, 0.0, [], []
         self.kernel = path
+        self.events = []
         self.table = [self.line(pid, uid, start, path)]
         self.after_check = None
         self.stat = stat_with(whole_bundle(path, REPLACED))
@@ -249,15 +250,20 @@ class FakeWorld:
 
     def holders(self, lock_path):
         self.lock_paths = getattr(self, 'lock_paths', []) + [lock_path]
-        return self.holder_set
+        hook = getattr(self, 'on_holders', None)
+        if hook:
+            hook(len(self.lock_paths))
+        return set(self.holder_set)
 
     def kernel_path(self, pid):
         return self.kernel
 
     def kill(self, pid, sig):
+        self.events.append('kill')
         self.kills.append((pid, sig))
 
     def exists(self, pid):
+        self.events.append('poll')
         self.polls += 1
         return self.polls <= self.exits_after
 
@@ -422,32 +428,78 @@ class RecoveryTests(unittest.TestCase):
         world.after_check = lambda: setattr(world, 'clock', world.clock + 10)
         self.assertNothingSignaled(world, world.run(), 'too long')
 
-    def test_only_one_lcu_host_recovers_at_a_time(self):
-        class Peer:
-            def __init__(self, acquired, waited):
-                self.acquired, self.waited = acquired, waited
+    class Peer:
+        def __init__(self, acquired=True, waited=False, previous=None, events=None):
+            self.acquired, self.waited, self.previous = acquired, waited, previous
+            self.events, self.recorded = events if events is not None else [], []
 
-            def __enter__(self):
-                return self
+        def __enter__(self):
+            self.events.append('enter')
+            return self
 
-            def __exit__(self, *exc):
-                return False
+        def __exit__(self, *exc):
+            self.events.append('exit')
+            return False
 
+        def record(self, outcome):
+            self.recorded.append(outcome)
+
+    def test_the_peer_lock_is_held_until_the_service_has_exited(self):
+        world = FakeWorld(exits_after=3)
+        peer = self.Peer(events=world.events)
+        self.assertTrue(world.run(exclusive=lambda: peer)['recovered'])
+        self.assertEqual(world.events, ['enter', 'kill', 'poll', 'poll', 'poll', 'poll', 'exit'])
+
+    def test_a_refused_peer_lock_does_nothing(self):
         world = FakeWorld()
-        self.assertNothingSignaled(world, world.run(exclusive=lambda: Peer(False, True)), 'another LCU')
-        # Waited for a peer that recovered: nothing stale is left, and the request may retry.
-        gone = FakeWorld()
-        gone.table = []
-        result = gone.run(exclusive=lambda: Peer(True, True))
-        self.assertEqual((result['recovered'], gone.kills), (True, []))
-        # Waited for a peer, but a stale service is still there: the full checks apply.
-        still = FakeWorld()
-        self.assertTrue(still.run(exclusive=lambda: Peer(True, True))['recovered'])
-        self.assertEqual(len(still.kills), 1)
-        # Never waited and nothing stale: no claim of recovery.
-        none = FakeWorld()
-        none.table = []
-        self.assertFalse(none.run(exclusive=lambda: Peer(True, False))['recovered'])
+        self.assertNothingSignaled(world, world.run(exclusive=lambda: self.Peer(False, True)), 'another LCU')
+
+    def test_the_outcome_is_recorded_for_the_next_host(self):
+        world = FakeWorld()
+        peer = self.Peer()
+        world.run(exclusive=lambda: peer, wallclock=lambda: 1000.0)
+        self.assertEqual(peer.recorded, [{'recovered': True, 'pid': 4242, 'at': 1000.0}])
+        stuck = FakeWorld(exits_after=10 ** 9)
+        peer = self.Peer()
+        stuck.run(exclusive=lambda: peer, wallclock=lambda: 1000.0)
+        self.assertEqual(peer.recorded, [{'recovered': False, 'at': 1000.0}])
+
+    def test_a_host_that_waited_retries_only_on_a_recent_recorded_recovery(self):
+        def attempt(previous, waited=True, now=1010.0):
+            world = FakeWorld()
+            world.table = []
+            result = world.run(exclusive=lambda: self.Peer(True, waited, previous), wallclock=lambda: now)
+            self.assertEqual(world.kills, [])
+            return result['recovered']
+
+        self.assertTrue(attempt({'recovered': True, 'pid': 4242, 'at': 1000.0}))
+        self.assertFalse(attempt({'recovered': True, 'pid': 4242, 'at': 1000.0}, now=1100.0), 'too old')
+        self.assertFalse(attempt({'recovered': True, 'at': 2000.0}), 'recorded in the future')
+        self.assertFalse(attempt({'recovered': False, 'at': 1000.0}))
+        self.assertFalse(attempt({'recovered': 'yes', 'at': 1000.0}))
+        self.assertFalse(attempt(None), 'waiting for a peer is not evidence of a recovery')
+        self.assertFalse(attempt({'recovered': True, 'at': 'soon'}))
+
+    def test_a_host_that_waited_still_runs_every_check_when_a_service_is_stale(self):
+        world = FakeWorld()
+        peer = self.Peer(True, True, {'recovered': True, 'pid': 4242, 'at': 1000.0})
+        world.verdict = 'valid'
+        self.assertNothingSignaled(world, world.run(exclusive=lambda: peer, wallclock=lambda: 1001.0))
+
+    def test_a_pid_reused_during_the_final_lock_read_is_not_signaled(self):
+        world = FakeWorld()
+        replacement = lambda: setattr(world, 'table', [world.line(4242, 501, 'Wed Oct  7 00:40:00 2026', '/usr/bin/other')])
+        world.on_holders = lambda call: replacement() if call == 2 else None
+        self.assertNothingSignaled(world, world.run(), 'changed while')
+        # The process is the last thing read before the signal, after the lock holders.
+        order = []
+        world = FakeWorld()
+        world.on_holders = lambda call: order.append(f'holders{call}')
+        original = world.diagnose
+        world.diagnose = lambda: (order.append('ps'), original())[1]
+        world.kernel_path = lambda pid: (order.append('kernel'), world.kernel)[1]
+        world.run()
+        self.assertEqual(order[-3:], ['holders2', 'ps', 'kernel'])
 
     def test_a_service_that_does_not_exit_is_waited_for_a_bounded_time_and_never_force_killed(self):
         import signal
@@ -572,6 +624,28 @@ class CodesignAndLockTests(unittest.TestCase):
         self.assertEqual(known_service_executables({'SKY_CUA_SERVICE_PATH': 'relative.app'}), set())
         self.assertEqual(known_service_executables({}), set())
 
+    def test_a_bundle_alias_is_allowed_but_an_executable_escaping_it_is_not(self):
+        environment = {'SKY_CUA_SERVICE_PATH': BUNDLE, 'CODEX_HOME': '/Users/x/.codex'}
+        other = '/Applications/Other.app/Contents/MacOS/' + SKY_SERVICE_NAME
+
+        def realpath(path):
+            if path == BUNDLE:
+                return '/real/ChatGPT/Codex Computer Use.app'
+            if path == EXECUTABLE:
+                return '/real/ChatGPT/Codex Computer Use.app/Contents/MacOS/' + SKY_SERVICE_NAME
+            if path == HOME_EXECUTABLE:
+                return other  # a symlink that leaves its bundle
+            return path
+
+        self.assertEqual(known_service_executables(environment, realpath=realpath),
+                         {'/real/ChatGPT/Codex Computer Use.app/Contents/MacOS/' + SKY_SERVICE_NAME})
+        # Another file name, or the bundle itself, is not a service executable either.
+        for resolved in ('/real/ChatGPT/Codex Computer Use.app/Contents/MacOS/other',
+                         '/real/ChatGPT/Codex Computer Use.app'):
+            self.assertEqual(known_service_executables(
+                {'SKY_CUA_SERVICE_PATH': BUNDLE},
+                realpath=lambda path: '/real/ChatGPT/Codex Computer Use.app' if path == BUNDLE else resolved), set())
+
 
 class PeerLockTests(unittest.TestCase):
     def test_a_second_holder_waits_a_bounded_time_and_then_is_refused(self):
@@ -589,6 +663,22 @@ class PeerLockTests(unittest.TestCase):
                 self.assertLessEqual(clock[0], 1.1)
             with PeerLock(path) as later:
                 self.assertTrue(later.acquired)
+
+    def test_the_last_outcome_is_handed_to_the_next_holder(self):
+        with tempfile.TemporaryDirectory() as base:
+            path = os.path.join(base, 'recovery.lock')
+            with PeerLock(path) as first:
+                self.assertIsNone(first.previous)
+                first.record({'recovered': True, 'pid': 7, 'at': 5.0})
+            with PeerLock(path) as second:
+                self.assertEqual(second.previous, {'recovered': True, 'pid': 7, 'at': 5.0})
+                second.record({'recovered': False, 'at': 9.0})
+            with PeerLock(path) as third:
+                self.assertEqual(third.previous, {'recovered': False, 'at': 9.0})
+            with open(path, 'w') as damaged:
+                damaged.write('not json')
+            with PeerLock(path) as fourth:
+                self.assertIsNone(fourth.previous)
 
     def test_an_unusable_lock_file_means_not_acquired(self):
         with tempfile.TemporaryDirectory() as base:

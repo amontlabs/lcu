@@ -222,14 +222,16 @@ def executable_path(pid):
 class PeerLock:
     """Exclusion between the LCU hosts of this account (one per MCP connection).
 
-    An advisory flock on a file in the account's private temporary directory. Another host
-    recovering at the same time makes this one wait (bounded); `waited` tells it so.
+    An advisory flock on a file in the account's private temporary directory, held for the
+    whole recovery including the wait for the service to exit. Another host recovering at the
+    same time makes this one wait (bounded). The outcome of the last recovery is kept in the
+    file, so a host that waited can tell whether the stale service was stopped for it.
     """
 
     def __init__(self, path=None, wait_seconds=PEER_LOCK_WAIT_SECONDS, sleep=time.sleep, monotonic=time.monotonic):
         self.path = path or os.path.join(tempfile.gettempdir(), f'lcu-stale-service-recovery-{os.getuid()}.lock')
         self.wait_seconds, self.sleep, self.monotonic = wait_seconds, sleep, monotonic
-        self.descriptor, self.acquired, self.waited = None, False, False
+        self.descriptor, self.acquired, self.waited, self.previous = None, False, False, None
 
     def __enter__(self):
         try:
@@ -243,6 +245,7 @@ class PeerLock:
                 try:
                     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     self.descriptor, self.acquired = descriptor, True
+                    self.previous = self._read()
                     return self
                 except BlockingIOError:
                     self.waited = True
@@ -254,6 +257,21 @@ class PeerLock:
         os.close(descriptor)
         return self
 
+    def _read(self):
+        try:
+            record = json.loads(os.pread(self.descriptor, 1024, 0).decode('utf-8'))
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+
+    def record(self, outcome):
+        """Keep the outcome of this recovery for the next holder of the lock."""
+        try:
+            os.ftruncate(self.descriptor, 0)
+            os.pwrite(self.descriptor, json.dumps(outcome).encode('utf-8'), 0)
+        except (OSError, TypeError, ValueError):
+            pass
+
     def __exit__(self, *exc):
         if self.descriptor is not None:
             try:
@@ -264,14 +282,26 @@ class PeerLock:
 
 
 def known_service_executables(environment=None, realpath=os.path.realpath):
-    """Executables of the two bundles LCU may stop a service from: the one it launches and the app's copy."""
+    """Executables of the two bundles LCU may stop a service from: the one it launches and the app's copy.
+
+    A bundle whose service executable resolves (through a symlink) to somewhere outside the
+    bundle contributes nothing.
+    """
     environment = os.environ if environment is None else environment
     bundles = [environment.get('SKY_CUA_SERVICE_PATH')]
     codex_home = environment.get('CODEX_HOME')
     if codex_home:
         bundles.append(os.path.join(codex_home, 'computer-use', 'Codex Computer Use.app'))
-    return {realpath(os.path.join(bundle, SERVICE_EXECUTABLE))
-            for bundle in bundles if bundle and os.path.isabs(bundle)}
+    executables = set()
+    for bundle in bundles:
+        if not bundle or not os.path.isabs(bundle):
+            continue
+        root = realpath(bundle)
+        executable = realpath(os.path.join(bundle, SERVICE_EXECUTABLE))
+        if (os.path.basename(executable) == SKY_SERVICE_NAME and
+                os.path.commonpath([root, executable]) == root and executable != root):
+            executables.add(executable)
+    return executables
 
 
 def _process_exists(pid):
@@ -288,7 +318,7 @@ def _process_exists(pid):
 
 
 class _NoPeerLock:
-    acquired, waited = True, False
+    acquired, waited, previous = True, False, None
 
     def __enter__(self):
         return self
@@ -296,12 +326,20 @@ class _NoPeerLock:
     def __exit__(self, *exc):
         return False
 
+    def record(self, outcome):
+        pass
+
+
+# A recovery recorded by another LCU host this recently, with no stale service left, means
+# the failing request may simply be retried.
+RECENT_RECOVERY_SECONDS = 20
+
 
 def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose_sky_services,
                           verify=verify_service_signature, holders=lock_holders,
                           kernel_path=executable_path, kill=os.kill, exists=_process_exists,
                           realpath=os.path.realpath, sleep=time.sleep, monotonic=time.monotonic,
-                          exclusive=_NoPeerLock, log=None):
+                          wallclock=time.time, exclusive=_NoPeerLock, log=None):
     """Quit the one Computer Use service that is provably stale and holds the connection.
 
     Every one of these must hold, otherwise nothing is signaled:
@@ -312,10 +350,11 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
       one in a known bundle;
     - it is the only process holding the socket lock file;
     - `codesign --verify` rejects the running code as different from the code on disk.
-    Then the process, lock and executable are read again, and the checks must still agree
-    exactly (pid, owner, start time, path), within the pre-signal time budget. The signal is
-    SIGTERM to that one pid, never a group, never SIGKILL: a service that ignores it is left
-    alone. Only one LCU host per account does this at a time. Returns the reason when it
+    Then lock holders, process (pid, owner, start time, path) and kernel executable are read
+    again, in that order so the process is read last, and must still agree exactly, within the
+    pre-signal time budget. The signal is SIGTERM to that one pid, never a group, never
+    SIGKILL: a service that ignores it is left alone. Only one LCU host per account does this
+    at a time, through the end of the wait for the service to exit. Returns the reason when it
     did nothing.
     """
     def nothing(reason):
@@ -326,6 +365,7 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
 
     def candidate():
         """The single stale service that passes every identity check, or the reason there is none."""
+        held = holders(lock_path)  # the slow part first; the process is read after it
         diagnosis = diagnose()
         if diagnosis.get('unparsed'):
             return None, 'the process listing was incomplete'
@@ -342,11 +382,12 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             return None, 'the stale service belongs to another user'
         if os.path.basename(service['path']) != SKY_SERVICE_NAME or realpath(service['path']) not in executables:
             return None, 'the stale service is not in a known Computer Use bundle'
-        actual = kernel_path(pid)
-        if not actual or realpath(actual) != realpath(service['path']) or realpath(actual) not in executables:
-            return None, 'the kernel does not report the known executable for the stale service'
-        if holders(lock_path) != {pid}:
+        if held != {pid}:
             return None, 'the stale service is not the only holder of the socket lock'
+        actual = kernel_path(pid)  # last: closest to the signal
+        if (not actual or os.path.basename(actual) != SKY_SERVICE_NAME or
+                realpath(actual) != realpath(service['path']) or realpath(actual) not in executables):
+            return None, 'the kernel does not report the known executable for the stale service'
         return service, None
 
     try:
@@ -355,8 +396,9 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
                 return nothing('another LCU process is recovering')
             service, reason = candidate()
             if service is None:
-                if peer.waited and reason == 'no stale service':
-                    # Another LCU process was recovering while this one waited for it.
+                previous = peer.previous or {}
+                if (reason == 'no stale service' and previous.get('recovered') is True and
+                        0 <= wallclock() - float(previous.get('at', 0)) <= RECENT_RECOVERY_SECONDS):
                     return {'ok': True, 'recovered': True, 'reason': 'recovered by another LCU process'}
                 return nothing(reason)
             pid = service['pid']
@@ -371,16 +413,15 @@ def recover_stale_service(*, lock_path, executables, uid=None, diagnose=diagnose
             if monotonic() - started > PRE_SIGNAL_BUDGET_SECONDS:
                 return nothing('the checks took too long to act on')
             kill(pid, signal.SIGTERM)
+            deadline = monotonic() + TERMINATE_WAIT_SECONDS
+            while exists(pid):
+                if monotonic() >= deadline:
+                    peer.record({'recovered': False, 'at': wallclock()})
+                    return nothing(f'pid {pid} did not exit within {TERMINATE_WAIT_SECONDS} seconds of SIGTERM')
+                sleep(TERMINATE_POLL_SECONDS)
+            peer.record({'recovered': True, 'pid': pid, 'at': wallclock()})
     except Exception as exc:
         return nothing(f'check failed: {str(exc)[:200]}')
-    try:
-        deadline = monotonic() + TERMINATE_WAIT_SECONDS
-        while exists(pid):
-            if monotonic() >= deadline:
-                return nothing(f'pid {pid} did not exit within {TERMINATE_WAIT_SECONDS} seconds of SIGTERM')
-            sleep(TERMINATE_POLL_SECONDS)
-    except Exception as exc:
-        return nothing(f'could not confirm that pid {pid} exited: {str(exc)[:200]}')
     elapsed_ms = int((monotonic() - started) * 1000)
     if log:
         log(f'LCU macOS stopped stale Computer Use service pid {pid} ({service["path"]}) '
