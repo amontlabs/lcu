@@ -43,7 +43,7 @@
 // Windows holder (it used to fall through to the Linux flock branch), Lock.lost.
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from './spawn.mjs';
 import { randomBytes } from 'node:crypto';
-import { closeSync, constants, openSync, readFileSync, unlinkSync } from 'node:fs';
+import { closeSync, constants, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -265,8 +265,9 @@ export function windowsPowerShell(env = process.env) {
  * tries, `pauseMs` apart), report LOCKED / DEADLOCK / OPENFAIL <hresult> on stdout (a private status
  * file), hold until stdin reaches EOF, then unlock, close and report RELEASED.
  */
-export function windowsHolderScript(path, { attempts = 10, pauseMs = 1000, timeoutMs = null, pollMs = 50 } = {}) {
+export function windowsHolderScript(path, { attempts = 10, pauseMs = 1000, timeoutMs = null, pollMs = 50, releasePath = null } = {}) {
   const encoded = Buffer.from(path, 'utf8').toString('base64');
+  const releaseEncoded = releasePath === null ? null : Buffer.from(releasePath, 'utf8').toString('base64');
   return [
     "$ErrorActionPreference = 'Stop'",
     `$path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))`,
@@ -296,7 +297,13 @@ export function windowsHolderScript(path, { attempts = 10, pauseMs = 1000, timeo
       'if (-not $locked) { $out.WriteLine("TIMEOUT"); $out.Flush(); $fs.Close(); exit 5 }',
     ]),
     '$out.WriteLine("LOCKED"); $out.Flush()',
-    '[void][Console]::In.ReadToEnd()',
+    // Held until stdin reaches EOF (this process died) or the release file appears: closing a child's stdin pipe needs
+    // the event loop, which a synchronous release() blocks, so release() creates the file instead (immediate).
+    '$eof = [Console]::In.ReadToEndAsync()',
+    ...(releaseEncoded === null ? ['[void]$eof.Wait()'] : [
+      `$release = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${releaseEncoded}'))`,
+      'while (-not $eof.IsCompleted -and -not [IO.File]::Exists($release)) { [Threading.Thread]::Sleep(20) }',
+    ]),
     '$fs.Unlock(0, 1); $fs.Close()',
     '$out.WriteLine("RELEASED"); $out.Flush()',
     'exit 0',
@@ -311,8 +318,10 @@ export function windowsDeadlockError() {
 function startHolder(path, timeout) {
   const statusPath = join(tmpdir(), `.lcu-lock-${process.pid}-${randomBytes(8).toString('hex')}`);
   const statusFd = openSync(statusPath, O_CREAT | constants.O_EXCL | O_RDWR, 0o600);
+  const releasePath = `${statusPath}.release`;
   const script = windowsHolderScript(path, {
     attempts: seams.windowsAttempts, pauseMs: seams.windowsPauseMs, timeoutMs: timeout === undefined ? null : timeout * 1000,
+    releasePath,
   });
   const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
@@ -345,6 +354,11 @@ function startHolder(path, timeout) {
   };
   const cleanup = () => {
     try { unlinkSync(statusPath); } catch { /* already gone */ }
+    try { unlinkSync(releasePath); } catch { /* never created */ }
+  };
+  // Tell the holder to let go, at once and without the event loop (see windowsHolderScript).
+  const signalRelease = () => {
+    try { writeFileSync(releasePath, ''); } catch { /* the stdin EOF still releases it */ }
   };
   // `exit` events need the event loop; synchronous waits probe the holder (our own child) with signal 0.
   const alive = () => {
@@ -356,7 +370,7 @@ function startHolder(path, timeout) {
       return false;
     }
   };
-  return { child, status, cleanup, exited: () => !alive() };
+  return { child, status, cleanup, signalRelease, exited: () => !alive() };
 }
 
 function holderResult(path, holder, timeout) {
@@ -377,7 +391,7 @@ function holderState(holder) {
   return {
     ended: () => holder.exited() || holder.status().includes('RELEASED'),
     release() {
-      // destroy() closes the pipe at once (end() would need the event loop, which a sync wait blocks).
+      holder.signalRelease();
       holder.child.stdin?.destroy?.();
       // Wait (bounded) for the unlock, so the lock is free when release() returns, as with os.close.
       const until = Date.now() + 10000;
@@ -388,6 +402,7 @@ function holderState(holder) {
 }
 
 function abandon(holder) {
+  holder.signalRelease();
   holder.child.stdin?.destroy?.();
   try { holder.child.kill(); } catch { /* gone */ }
   holder.cleanup();

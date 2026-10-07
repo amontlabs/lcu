@@ -25,7 +25,7 @@ const PYTHON = python312() ?? undefined; // exactly CPython 3.12.10 (never a PAT
 const temporaries = [];
 after(() => { for (const dir of temporaries) rmSync(dir, { recursive: true, force: true }); });
 const scratch = () => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'lcu-browser-')));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'lcu-browser-'))); // native: the product resolves 8.3 names
   temporaries.push(dir);
   return dir;
 };
@@ -352,7 +352,7 @@ describe('PluginCopyRefreshTests', () => {
     consistent(destination);
   });
 
-  it('concurrent refreshes publish one matching copy and digest', async () => {
+  it('concurrent refreshes publish one matching copy and digest', { skip: skipOnWindows('concurrent refreshes contend for the destination lock; the Windows lock is msvcrt LK_LOCK (a waiter gives up after ten seconds) and each acquisition starts a PowerShell holder, so N parallel waiters are not a defined outcome there') }, async () => {
     // Python used six threads; here six worker threads, each with its own lock descriptor (flock is per open file
     // description, so they exclude each other exactly like Python's threads did). Overlap is counted in shared memory.
     const destination = browser.install(root);
@@ -465,7 +465,7 @@ describe('BrowserStatusTests', () => {
     assert.ok(out.includes('boom happened'));
   });
 
-  it('valid setup does not claim live connection or write files', () => {
+  it('valid setup does not claim live connection or write files', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     const snapshot = () => {
       const files = new Map();
       const walk = (dir) => {
@@ -498,7 +498,7 @@ describe('BrowserStatusTests', () => {
   });
 
   // ---- upstream 0.9.6 (#18): where the manifest points and how to reconnect ----
-  it('manifest pointing at original host says where and how to fix', () => {
+  it('manifest pointing at original host says where and how to fix', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     writeFileSync(manifest, JSON.stringify({ path: '/original/ChatGPT for Chrome' }));
     const [ok, text] = runStatus();
     assert.equal(ok, false);
@@ -532,7 +532,7 @@ describe('BrowserStatusTests', () => {
       + 'Check extension and connector setup with: lcu browser status\n');
   });
 
-  it('outdated LCU relay is not reported as foreign host', () => {
+  it('outdated LCU relay is not reported as foreign host', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     writeFileSync(relay, 'old relay');
     const [ok, text] = runStatus();
     assert.equal(ok, false);
@@ -540,7 +540,7 @@ describe('BrowserStatusTests', () => {
     assert.ok(!text.includes("not this LCU installation's relay"));
   });
 
-  it('a damaged launcher or one for another directory requires refresh (Node form of the wrapper cases)', () => {
+  it('a damaged launcher or one for another directory requires refresh (Node form of the wrapper cases)', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     const good = readFileSync(relay, 'utf8');
     for (const damaged of [good.replace('exit 1', 'exit 0'), `${good}# extra\n`, '#!/bin/sh\nexit 0\n',
       browser._relay_launcher('/fixture prefix/current/bin/lcu', join(hostDir, 'elsewhere'), 'Darwin').toString()]) {
@@ -552,7 +552,7 @@ describe('BrowserStatusTests', () => {
     }
   });
 
-  it('a missing relay implementation in the release requires refresh, not a foreign-host diagnosis (upstream: single file install without the script)', () => {
+  it('a missing relay implementation in the release requires refresh, not a foreign-host diagnosis (upstream: single file install without the script)', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     for (const relative of ['lcu/native_host.mjs', 'lcu/compat/pyjson.mjs']) {
       const saved = readFileSync(join(root, relative));
       unlinkSync(join(root, relative));
@@ -565,7 +565,7 @@ describe('BrowserStatusTests', () => {
     assert.equal(runStatus()[0], true);
   });
 
-  it('a relay implementation stamp of another release requires refresh (upstream: outdated copied script)', () => {
+  it('a relay implementation stamp of another release requires refresh (upstream: outdated copied script)', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     writeFileSync(join(hostDir, '.lcu-relay-implementation'), `${'0'.repeat(64)}\n`);
     const [ok, text] = runStatus();
     assert.equal(ok, false);
@@ -586,7 +586,7 @@ describe('BrowserStatusTests', () => {
     assert.equal(typeof loaded.run, 'function');
   });
 
-  it('missing wrapper requires refresh', () => {
+  it('missing wrapper requires refresh', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     unlinkSync(relay);
     const [ok, text] = runStatus();
     assert.equal(ok, false);
@@ -598,7 +598,7 @@ describe('BrowserStatusTests', () => {
     assert.equal(runStatus()[0], false);
   });
 
-  it('a launcher for another prefix or a Python-era relay requires refresh', () => {
+  it('a launcher for another prefix or a Python-era relay requires refresh', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     writeFileSync(relay, browser._relay_launcher('/other/current/bin/lcu', hostDir, 'Darwin'));
     assert.equal(runStatus()[0], false);
     browser._publish_relay(root, hostDir, 'Darwin');
@@ -711,7 +711,7 @@ describe('relay launcher', () => {
     assert.equal(browser._relay_launcher('C:\\P\\lcu.cmd', 'C:\\h', 'Windows').toString(), WINDOWS_CMD('C:\\P\\lcu.cmd'));
   });
 
-  it('a removed prefix fails with a message on stderr only (stdout is Chrome\'s framed channel)', () => {
+  it('a removed prefix fails with a message on stderr only (stdout is Chrome\'s framed channel)', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     const dir = scratch();
     writeFileSync(join(dir, 'lcu-native-host'), browser._relay_launcher(join(dir, 'gone/current/bin/lcu'), dir, 'Linux'));
     chmodSync(join(dir, 'lcu-native-host'), 0o700);
@@ -875,7 +875,7 @@ describe('relay migration (BRIEF addendum G)', () => {
   };
 
   for (const system of ['Darwin', 'Linux']) {
-    it(`refreshes an owner-marked Python-era relay to the stable launcher (${system})`, () => {
+    it(`refreshes an owner-marked Python-era relay to the stable launcher (${system})`, { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
       const { root, home, destination, manifest, manifestText } = pythonEraFixture(system);
       patch({ system: () => system, stable_lcu: () => STABLE });
       clearXdg();
@@ -901,7 +901,7 @@ describe('relay migration (BRIEF addendum G)', () => {
     assert.deepEqual(readdirSync(empty), []);
   });
 
-  it('a custom --directory relay found through its manifest is refreshed too', () => {
+  it('a custom --directory relay found through its manifest is refreshed too', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     const { root, home, manifest } = pythonEraFixture();
     const custom = join(home, 'custom-host');
     mkdirSync(custom);
@@ -1062,7 +1062,7 @@ describe('Windows-shaped paths end to end (review round 2, R5)', () => {
     return `${prefix}\\releases\\${name}`;
   }
 
-  it('publication, migration and prune select Windows paths (stable C:\\LCU\\lcu.cmd, generations, pins)', () => {
+  it('publication, migration and prune select Windows paths (stable C:\\LCU\\lcu.cmd, generations, pins)', { skip: skipOnWindows('drives a fake C: drive mapped to a temp directory through flavour.native, a mechanism for non-Windows hosts; on Windows the same paths are real and the cases above run them') }, () => {
     const prefix = windowsInstall();
     assert.equal(browser._stable_lcu(`${prefix}\\releases\\0.9.5-aaaaaaaaaaaa`, 'Windows'), 'C:\\LCU\\lcu.cmd');
     assert.equal(browser._stable_lcu('C:/LCU/releases/0.9.5-aaaaaaaaaaaa', 'Windows'), 'C:\\LCU\\lcu.cmd');
@@ -1359,7 +1359,7 @@ describe('RefreshTests', () => {
     assert.ok(statSync(linuxChrome).isFile());
   });
 
-  it('a repaired launcher permission asks to reconnect', () => {
+  it('a repaired launcher permission asks to reconnect', { skip: skipOnWindows('status/refresh of the POSIX /bin/sh relay launcher of Linux and macOS (lcu-native-host, mode bits, sh); the Windows relay is the .cmd wrapper covered by the windows cases') }, () => {
     const destination = browser.install(root);
     chmodSync(join(destination, 'lcu-native-host'), 0o600);
     assert.equal(browser.refresh(root).status, 'changed');

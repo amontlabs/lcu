@@ -1,4 +1,4 @@
-# LCU (unreleased): Node runtime, no Python on Linux and macOS
+# LCU (unreleased): Node runtime, no Python 3.12+ on Linux and macOS
 
 Draft release notes. The version is not bumped here. Everything below is intentional; the black-box differential
 (`tests/blackbox`, oracle = the Python implementation at `tests/blackbox/BASE`) lists each difference as a reviewed entry in
@@ -110,6 +110,15 @@ Node by absolute path (never one found on `PATH`) after a check that runs before
   Its host directory holds a `.lcu-relay-implementation` stamp (a digest of the release's relay code) instead of a
   copied relay script, so `lcu browser status` and the post-update refresh still notice when the relay code changed
   and print the reconnect hint. `windows_launcher.py` is kept as a compatibility trampoline.
+- **Known cost, Windows: every LCU lock starts a PowerShell helper.** Node cannot take the byte-range lock that Python's
+  `msvcrt.locking` took, so each lock (setup, `lcu browser`, `lcu origins forget`, `lcu prune`, the install lock) starts
+  `powershell.exe` (`-NoProfile`), which holds `FileStream.Lock(0, 1)` until the command releases it. The lock is
+  therefore as slow as a PowerShell start-up per acquisition, and `lcu setup`, `lcu browser ...`, `lcu origins forget` and
+  `lcu prune` take that long more per lock than with 0.9.x. Measured on the hosted `windows-latest` runner with four test
+  files running at once: a single `lcu origins forget` (one lock) took 22 to 32 seconds there. CI's
+  `windows-node.yml` also prints the same measurement on an idle runner (`lock cost` step, five consecutive
+  acquisitions); the figure for an idle desktop is expected to be a few seconds at most, and is not yet measured on real
+  hardware. Correctness is unchanged (same file, same byte, interoperable with 0.9.x), and read-only commands take no lock.
 
 ## Output and diagnostics
 

@@ -549,7 +549,7 @@ out.leftovers = readdirSync(tmpdir()).filter((n) => n.startsWith(`.lcu-lock-${pr
         for needle in ('$fs.Lock(0, 1)', 'for ($i = 0; $i -lt 10; $i++)', '[Threading.Thread]::Sleep(1000)',
                        '[IO.FileMode]::Open', '[IO.FileAccess]::ReadWrite',
                        '[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete', 'catch [System.IO.IOException]',
-                       '[Console]::In.ReadToEnd()', '$fs.Unlock(0, 1)', 'DEADLOCK', 'RELEASED'):
+                       '[Console]::In.ReadToEndAsync()', '[IO.File]::Exists($release)', '$fs.Unlock(0, 1)', 'DEADLOCK', 'RELEASED'):
             self.assertIn(needle, script)
         encoded = script.split("FromBase64String('")[1].split("'")[0]
         self.assertEqual(base64.b64decode(encoded).decode(), str(path))

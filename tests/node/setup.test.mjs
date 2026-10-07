@@ -21,6 +21,7 @@ import { ALIASES, CLIENTS } from '../../lcu/setup_clients.mjs';
 import { ORACLE_ROOT } from './oracle_root.mjs';
 import { python312 } from './runtime_support.mjs';
 import { skipOnWindows } from './windows_skip.mjs';
+import { quote } from '../../lcu/compat/shlex.mjs';
 
 const REPO = path.resolve(import.meta.dirname, '../..');
 const PYTHON_SOURCE = path.join(ORACLE_ROOT, 'lcu/setup.py');
@@ -259,7 +260,7 @@ describe('StateSchemaTests', () => {
     assert.equal(fs.readFileSync(setup.setup_state_path(f.home), 'utf8'),
       '{\n  "chrome": false,\n  "audio": true,\n  "approval": "auto",\n  "pending": [\n    "pi"\n  ],\n'
       + '  "pending_context": {\n    "scope": "user",\n    "session": "direct",\n    "project": null\n  }\n}\n');
-    assert.equal(fs.statSync(setup.setup_state_path(f.home)).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(setup.setup_state_path(f.home)).mode & 0o777, 0o600); // no mode bits on Windows
   });
 });
 
@@ -306,7 +307,7 @@ describe('FailedRegistrationTests', () => {
     f.failing = new Set(['codex']);
     const [, , err] = await f.runMain(['--agent', 'codex', '--audio'], { agents: ['codex'] });
     const runtime = path.join(f.prefix, 'current/bin/lcu');
-    assert.equal(err, `Setup failed: 1 registration step(s) failed (codex: plugin). Choices were saved; completed steps remain installed. After resolving the errors, retry: ${runtime} setup --prefix ${f.prefix} --user fixture --scope user --session direct --yes --no-chrome --audio --agent codex\n`);
+    assert.equal(err, `Setup failed: 1 registration step(s) failed (codex: plugin). Choices were saved; completed steps remain installed. After resolving the errors, retry: ${quote(runtime)} setup --prefix ${quote(f.prefix)} --user fixture --scope user --session direct --yes --no-chrome --audio --agent codex\n`);
   });
 });
 
@@ -643,7 +644,7 @@ describe('InstalledInstructionTests', () => {
     assert.equal(command.command, '/bin/sh');
     assert.ok(command.args[1].includes('LCU_PREFIX'));
     assert.ok(command.args[1].includes('LCU_SESSION_MODE'));
-    for (const name of fs.readdirSync(destination)) assert.equal(fs.statSync(path.join(destination, name)).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') for (const name of fs.readdirSync(destination)) assert.equal(fs.statSync(path.join(destination, name)).mode & 0o777, 0o600);
   });
 
   test('exported command resolves destination prefix and session', { skip: skipOnWindows('spawns /bin/sh, #! scripts or shell-script fakes (and ENOEXEC/POSIX descendants); Windows runs .exe programs') }, async () => {

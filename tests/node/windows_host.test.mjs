@@ -611,6 +611,13 @@ describe('windows_host (structural extraction)', () => {
       const trampoline = spawnSync(PYTHON, ['-B', join(ROOT, 'scripts/check_windows_host_layout.py'), ...argv], { encoding: 'utf8' });
       // CPython's text-mode stdio writes CRLF on Windows; the Node tool writes LF.
       const lf = (text) => text.replace(/\r\n/g, '\n');
+      if (process.platform === 'win32' && py.stderr.includes('[WinError ')) {
+        // CPython on Windows words OS errors "[WinError 2] The system cannot find the file specified: ...", the Node port
+        // keeps the POSIX wording "[Errno 2] No such file or directory: ..." (compat/pyerr); everything else must match.
+        assert.deepEqual([js.status, js.stdout], [py.status, lf(py.stdout)], argv.join(' '));
+        assert.match(js.stderr, /^check_windows_host_layout: \[Errno 2\] No such file or directory: /);
+        return;
+      }
       assert.deepEqual([js.status, js.stdout, js.stderr], [py.status, lf(py.stdout), lf(py.stderr)], argv.join(' '));
       assert.deepEqual([trampoline.status, lf(trampoline.stdout)], [py.status, lf(py.stdout)]);
     };

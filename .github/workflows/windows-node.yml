@@ -45,6 +45,9 @@ jobs:
         working-directory: tests
         shell: bash
         run: python -m unittest -b $(ls test_*.py | sed 's/\.py$//')
+      - name: lock cost (five consecutive PowerShell-holder acquisitions, idle runner)
+        shell: bash
+        run: node tests/node/lock_cost.mjs
       - name: tests/node (PATH Node only)
         shell: bash
         # The Python oracles print UTF-8 like they do on the Linux runners (not the console code page).

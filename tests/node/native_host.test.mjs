@@ -199,6 +199,7 @@ process.stdin.on('end', () => {
         // nothing in any other process, the relay included).
         copyFileSync(process.execPath, join(hostDir, hostName));
         writeFileSync(join(dir, 'fake-host.cjs'), `if (!/extension-host\\.exe$/i.test(process.execPath)) return;\n`
+          + 'process.on("uncaughtException", () => {}); // the first argument is taken for a script that does not exist\n'
           + fakeScript.replace("import { readFileSync, writeFileSync, writeSync } from 'node:fs';",
             "const { readFileSync, writeFileSync, writeSync } = require('node:fs');"));
       } else {
