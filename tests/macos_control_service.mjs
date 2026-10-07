@@ -610,6 +610,8 @@ try {
   rpcBefore = countOriginal();
   assert.equal((await failure({failUntilRecovered: true})).message, startupFailure);
   assert.equal(countOriginal(), rpcBefore + 1, 'a request of an ended turn is not sent again');
+  // That request was registered as before (no recovery yet when it was sent); its turn ends again.
+  await turnEnded.run({session_id: gateMetadata.session_id, turn_id: gateMetadata.turn_id});
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true}, 'the pending cleanup completes and later requests proceed');
 
@@ -737,6 +739,22 @@ try {
   globalThis.failTurnEndedCount = 0;
   globalThis.nodeRepl.requestMeta = {};
   assert.deepEqual(await rpc(), {ok: true});
+
+  // A turn ID can be used again after its turn-ended (a harness that continues the same
+  // prompt): without a recovery its later requests are registered as before, so the next
+  // turn-ended still reaches the native service.
+  reset();
+  const reusedTurn = {session_id: 'reused-session', turn_id: 'reused-turn', call_id: 'reused-call'};
+  const reusedEnded = () => calls.filter(call => call.requestType === 'ComputerUseIPCCodexTurnEndedRequest' &&
+    call.payload?.turnID === reusedTurn.turn_id).length;
+  globalThis.nodeRepl.requestMeta = {'x-codex-turn-metadata': reusedTurn};
+  assert.deepEqual(await rpc(), {ok: true});
+  await turnEnded.run({session_id: reusedTurn.session_id, turn_id: reusedTurn.turn_id});
+  assert.equal(reusedEnded(), 1);
+  assert.deepEqual(await rpc(), {ok: true});
+  await turnEnded.run({session_id: reusedTurn.session_id, turn_id: reusedTurn.turn_id});
+  assert.equal(reusedEnded(), 2, 'the second turn-ended of a reused turn reaches the native service');
+  globalThis.nodeRepl.requestMeta = {};
 
   // A turn that is still active is retried, after the pending turn cleanup.
   reset();

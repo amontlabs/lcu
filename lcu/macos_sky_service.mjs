@@ -549,15 +549,19 @@ async function dispatch(runtime, request, metadata, context, turnKey, state) {
   // Retried turn cleanup talks to the same native pipe and fails the same way.
   await withStaleServiceRecovery(runtime, gateOnCleanup, retryIfActive);
   original ??= import(pathToFileURL(runtime.env.LCU_MAC_SKY_SERVICE_PATH).href);
-  // An ended turn is not registered again: its turn-ended hook will not run a second time.
-  if (metadata && turnActive()) {
+  // A turn that ended after a recovery is not registered again. Without a recovery a request
+  // is registered as before, even for a turn ID used again after its turn-ended (a harness
+  // that continues the same prompt), which also reopens that turn for later requests.
+  const registrable = () => !(state.recoveryError && state.ended);
+  if (metadata && registrable()) {
     if (!turnMetadata.has(turnKey) && turnMetadata.size >= TURN_METADATA_LIMIT) {
       throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
     }
     turnMetadata.set(turnKey, metadata);
+    endedTurns.delete(turnKey);
   }
   const controlReady = await startControlChannel(runtime);
-  if (context && controlReady && turnActive()) {
+  if (context && controlReady && registrable()) {
     const token = JSON.stringify([context.session_id, context.turn_id, context.app]);
     if (context.app && (activeContexts.has(token) || activeContexts.size < 128)) {
       activeContexts.set(token, context);
