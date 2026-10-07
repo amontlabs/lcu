@@ -2,7 +2,6 @@
 import io
 import json
 import os
-import pwd
 from pathlib import Path
 import socket
 import subprocess
@@ -68,6 +67,7 @@ class MacRuntimeTests(unittest.TestCase):
         self.assertNotIn('NODE_REPL_HOST_SERVICES_PIPE_PATH', env)
 
     def test_macos_main_supervises_lifecycle_host_around_original_repl(self):
+        import pwd  # POSIX only; this module is imported on Windows too
         from lcu import macos_host
         client = self.runtime / 'lib/node_modules/@oai/sky/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient'
         client.parent.mkdir(parents=True)
