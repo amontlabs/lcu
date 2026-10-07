@@ -216,6 +216,92 @@ class MacRuntimeTests(unittest.TestCase):
         finally:
             stop_original_host(process, temporary)
 
+    def fake_client(self, name, body):
+        client = self.root / name
+        client.write_text('#!/usr/bin/env python3\nimport sys, time\n' + body)
+        client.chmod(0o755)
+        return client
+
+    def test_lifecycle_host_waits_for_the_original_helper_runtime(self):
+        # The signed helper stably takes about 5.2 s (its XPC connect deadline is 5 s).
+        from lcu.macos_host import (TURN_ENDED_CLI_TIMEOUT_SECONDS, start_original_host,
+                                    stop_original_host)
+        self.assertGreater(TURN_ENDED_CLI_TIMEOUT_SECONDS, 6)
+        client = self.fake_client('slow-client', 'time.sleep(5.2)\n')
+        process, temporary, address = start_original_host(
+            python=Path(sys.executable), client=client,
+            entry=Path(__file__).resolve().parents[1] / 'lcu/macos_host.py', env=os.environ.copy())
+        try:
+            started = time.monotonic()
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(TURN_ENDED_CLI_TIMEOUT_SECONDS + 3)
+                connection.connect(address)
+                connection.sendall(b'{"session_id":"session","turn_id":"turn"}\n')
+                response = bytearray()
+                while b'\n' not in response:
+                    response.extend(connection.recv(1024))
+            self.assertEqual(json.loads(response), {'notified': True})
+            self.assertGreaterEqual(time.monotonic() - started, 5.2)
+        finally:
+            stop_original_host(process, temporary)
+
+    def run_turn_ended(self, client, **options):
+        from lcu import macos_host
+        stderr = io.StringIO()
+        started = time.monotonic()
+        error = None
+        with patch('sys.stderr', stderr):
+            try:
+                macos_host.run_turn_ended(str(client), '{}', **options)
+            except RuntimeError as exc:
+                error = exc
+        return error, stderr.getvalue(), time.monotonic() - started
+
+    def test_turn_ended_command_past_its_timeout_fails_within_bounds(self):
+        client = self.root / 'hung-client'
+        client.write_text('#!/bin/sh\nexec sleep 30\n')
+        client.chmod(0o755)
+        error, log, elapsed = self.run_turn_ended(client, timeout=1)
+        self.assertIsNotNone(error)
+        self.assertIn('timed out after 1 seconds', str(error))
+        self.assertLess(elapsed, 5)
+        self.assertIn('exit=timeout', log)
+        self.assertRegex(log, r'elapsed=\d{4} ms')
+
+    def test_turn_ended_timeout_logs_the_stderr_captured_so_far(self):
+        expired = subprocess.TimeoutExpired(['client'], 10, stderr=b'connect pending')
+        with patch('lcu.macos_host.subprocess.run', side_effect=expired):
+            error, log, _ = self.run_turn_ended('client')
+        self.assertIn('timed out after 10 seconds', str(error))
+        self.assertIn('exit=timeout', log)
+        self.assertIn('connect pending', log)
+
+    def test_turn_ended_command_failure_logs_exit_code_and_bounded_stderr(self):
+        client = self.fake_client('noisy-client',
+                                  'sys.stderr.write("e" * 2000)\nraise SystemExit(7)\n')
+        error, log, _ = self.run_turn_ended(client)
+        self.assertIn('status 7', str(error))
+        self.assertIn('exit=7', log)
+        self.assertIn('e' * 512, log)
+        self.assertNotIn('e' * 513, log)
+
+    def test_turn_ended_command_that_cannot_start_is_logged(self):
+        error, log, _ = self.run_turn_ended(self.root / 'missing-client')
+        self.assertIn('could not start', str(error))
+        self.assertIn('exit=launch-failed', log)
+
+    def test_turn_ended_command_logs_a_slow_success_but_not_a_fast_one(self):
+        from lcu import macos_host
+        slow = self.fake_client('slow-ok-client', 'time.sleep(0.4)\n')
+        with patch.object(macos_host, 'TURN_ENDED_CLI_SLOW_SECONDS', 0.2):
+            error, log, _ = self.run_turn_ended(slow)
+        self.assertIsNone(error)
+        self.assertRegex(log, r'exit=0 elapsed=\d+ ms')
+        fast = self.fake_client('fast-ok-client', '')
+        error, log, _ = self.run_turn_ended(fast)
+        self.assertIsNone(error)
+        self.assertEqual(log, '')
+
     def test_control_socket_routes_only_to_an_active_trusted_session_and_turn(self):
         from lcu.macos_host import start_original_host, stop_original_host
         client = self.root / 'unused-original-client'
