@@ -465,7 +465,7 @@ test('an unavailable X-Resource extension or a disagreeing process id fails clos
   const a = desk.add(1);
   const b = desk.add(2, {xresPid: 4242});
   desk.focus(1);
-  wrapper.deps.xresPid = async () => { throw Error('python3 missing'); };
+  wrapper.deps.xresPid = async () => { throw Error('X server unreachable'); };
   await execute('press_key', {window: target(a), key: 'a'});
   wrapper.deps.xresPid = async id => (id === 2 ? 4242 : null);
   await execute('press_key', {window: target(a), key: 'b'});
@@ -533,7 +533,7 @@ test('an unanswerable pointer check refuses the action instead of guessing', asy
   desk.focus(1);
   desk.pointerUnknown = true;
   await assert.rejects(execute('click', {window: target(a), x: 10, y: 10}), /could not confirm/i);
-  wrapper.deps.guard = async () => { throw Error('python3 missing'); };
+  wrapper.deps.guard = async () => { throw Error('X server unreachable'); };
   await assert.rejects(execute('click', {window: target(a), x: 10, y: 10}), /could not confirm/i);
   assert.equal(desk.desktopCalls('click').length, 0);
 });
@@ -603,17 +603,17 @@ test('an unreadable own PID namespace fails closed for every process', async () 
   assert.equal(desk.xresCalls, 0);
 });
 
-test('a server in another PID namespace (no X-Resource id proven for the helper) is never translated', async () => {
+test('a server in another PID namespace (no X-Resource id proven for the own client) is never translated', async () => {
   const a = desk.add(1);
   desk.focus(1);
-  // The helper's own-client proof fails, so it prints nothing even though the window's id would match.
+  // The own-client proof fails, so no id comes back even though the window's id would match.
   wrapper.deps.xresPid = async () => null;
   await execute('press_key', {window: target(a), key: 'a'});
   assert.equal(desk.typed.length, 0);
   assert.equal(desk.targetedCalls().length, 1);
 });
 
-test('untranslated requests do not start the X helper', async () => {
+test('untranslated requests do not ask the X server', async () => {
   const qt = desk.add(1);
   desk.procs.get(1).maps = QT_MAPS;
   const chromium = desk.add(2);

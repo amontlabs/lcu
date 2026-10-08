@@ -7,10 +7,10 @@
 // A window is translated only when the X server itself says which local process owns it (the
 // X-Resource extension, SO_PEERCRED on the server side) and that process is the one _NET_WM_PID
 // names, in this PID namespace; anything else is left to the original service. That identity is
-// trusted only after the helper proved that the X server runs in this PID namespace: the listening
+// trusted only after LCU proved that the X server runs in this PID namespace: the listening
 // process of the display's local socket is found through /proc and must share this process's PID
 // namespace link (a TCP display, an unidentifiable server or another namespace fails closed), and the
-// server's record of the helper's own client must equal getpid(). Every call that can change focus or
+// server's record of LCU's own X client must equal getpid(). Every call that can change focus or
 // input state (translated or not: activate_window, desktop-level and window-targeted input of any kind,
 // pass-through fallbacks) runs through one queue, so nothing interleaves between a translated request's
 // final focus check and its input. Read-only calls bypass the queue. Each original call made from the
@@ -26,239 +26,21 @@ import {pathToFileURL} from 'node:url';
 import {execFile} from 'node:child_process';
 import {readFile, readlink, readdir} from 'node:fs/promises';
 import {hostname} from 'node:os';
+import {clientPid, inputState, releaseInput} from './x11.mjs';
 
 const TOOLKIT_TTL_MS = 10_000;
 const ACTIVATE_DEADLINE_MS = 1500;
 const ACTIVATE_POLL_MS = 40;
 const XPROP_TIMEOUT_MS = 3000;
-const XRES_TIMEOUT_MS = 3000;
 const CALL_TIMEOUT_MS = 30_000;
 const DEFAULT_TOOLKITS = 'gtk4,qt-scroll';
 // Windows of these runtimes handle XSendEvent themselves even if they map a GTK 4 library
 // (Chromium and Electron mmap icudtl.dat; Firefox is libxul).
 const NOT_GTK4 = [/\/icudtl\.dat/, /\/libxul\.so/, /\/libffmpeg\.so/];
 
-// Questions only the X server (and the kernel) can answer, asked through minimal ctypes use of libX11,
-// libXRes and libXtst (Debian/Ubuntu packages libxres1 and libxtst6). Every failure prints nothing, which
-// means "unknown".
-//   socket: prints 1 when the X server behind $DISPLAY provably runs in this PID namespace, else 0. Only a
-//     local display qualifies (:N, unix:N). The listening socket is found in /proc/net/unix (the abstract
-//     name @/tmp/.X11-unix/XN and the file /tmp/.X11-unix/XN), every process holding it is found through
-//     /proc/*/fd (only processes this one can read), and each must have the same /proc/<pid>/ns/pid link as
-//     this process. A TCP or remote display, an unreadable holder or no holder at all is 0. A process listed
-//     in this /proc is in this PID namespace or one below it, so a server in another namespace is never found.
-//   xres WINDOW: only the second half of pid, for tests: the process id without the socket proof, which
-//     is what LCU trusted before 0.8.7 (see the regression test in tests/linux_xres_namespace.py).
-//   pid WINDOW: the local process the X server attributes to the window's client: XResQueryClientIds
-//     with XRES_CLIENT_ID_PID_MASK (X-Resource 1.2) returns the SO_PEERCRED process id of the connection
-//     and nothing for a client on another machine. Asked only when the socket proof above holds, and then
-//     also only when the server's record of the helper's own client (a 1x1 window it creates and never
-//     maps) equals os.getpid(): an additional condition, no longer the only proof, because equal numbers
-//     in distinct PID namespaces prove nothing.
-//   guard WINDOW [X Y]: one JSON line. buttons and keys are the pointer buttons (1-5) and key codes the X
-//     server reports pressed now (XQueryPointer, XQueryKeymap); modifiers lists the modifier key codes. With a
-//     root point it also reports grab and owner. grab is the result of a brief XGrabPointer on the root with no
-//     event mask, undone at once (0 free; 1 another client holds an active pointer grab, such as a popup menu
-//     or a drag in progress; 4 frozen; anything else is not usable): the grab changes nothing on the
-//     desktop, but pointer events arriving during that round trip (well under a millisecond) are not
-//     delivered to anyone. owner is true when the deepest mapped window the X server finds at root point
-//     (X, Y) is WINDOW or one of its descendants (the chain from the root down passes through WINDOW, so a
-//     window-manager frame above it is fine), false when it is any other window, such as an overlay.
-//     XTranslateCoordinates only reads; it moves nothing and honors input shapes.
-//   release BUTTONS KEYS: comma-separated lists; releases each with XTEST (XTestFakeButtonEvent,
-//     XTestFakeKeyEvent), prints 1 on success. LCU calls it only for what a timed-out call itself pressed.
-export const XRES_HELPER_SCRIPT = `
-import ctypes, json, os, sys
-
-def x_server_in_this_namespace():
-    name = os.environ.get('DISPLAY', '')
-    if name.startswith('unix:'):
-        name = name[4:]
-    if not name.startswith(':'):
-        return False  # TCP, a remote host or no display
-    number = name[1:].split('.')[0]
-    if not (number.isascii() and number.isdigit()):
-        return False
-    names = {'/tmp/.X11-unix/X' + number, '@/tmp/.X11-unix/X' + number}
-    inodes = set()
-    with open('/proc/net/unix') as table:
-        next(table)
-        for line in table:
-            fields = line.split()
-            if len(fields) >= 8 and fields[7] in names and int(fields[3], 16) & 0x10000:  # __SO_ACCEPTCON
-                inodes.add(fields[6])
-    if not inodes:
-        return False
-    mine = os.readlink('/proc/self/ns/pid')
-    holders = {}
-    for entry in os.listdir('/proc'):
-        if not entry.isdigit():
-            continue
-        try:
-            descriptors = os.listdir('/proc/%s/fd' % entry)
-        except OSError:
-            continue
-        for descriptor in descriptors:
-            try:
-                target = os.readlink('/proc/%s/fd/%s' % (entry, descriptor))
-            except OSError:
-                continue
-            if target.startswith('socket:[') and target[8:-1] in inodes:
-                holders.setdefault(target[8:-1], set()).add(entry)
-    if set(holders) != inodes:
-        return False  # a listener whose process cannot be identified
-    for pids in holders.values():
-        for pid in pids:
-            try:
-                if os.readlink('/proc/%s/ns/pid' % pid) != mine:
-                    return False
-            except OSError:
-                return False
-    return True
-
-mode = sys.argv[1]
-if mode == 'socket':
-    try:
-        print(1 if x_server_in_this_namespace() else 0)
-    except Exception:
-        print(0)
-    sys.exit(0)
-
-class Spec(ctypes.Structure):
-    _fields_ = [('client', ctypes.c_ulong), ('mask', ctypes.c_uint)]
-class Value(ctypes.Structure):
-    _fields_ = [('spec', Spec), ('length', ctypes.c_long), ('value', ctypes.c_void_p)]
-class ModifierMap(ctypes.Structure):
-    _fields_ = [('per_modifier', ctypes.c_int), ('codes', ctypes.POINTER(ctypes.c_ubyte))]
-x11 = ctypes.CDLL('libX11.so.6')
-x11.XOpenDisplay.restype = ctypes.c_void_p
-x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
-x11.XDefaultRootWindow.restype = ctypes.c_ulong
-x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
-x11.XCreateSimpleWindow.restype = ctypes.c_ulong
-x11.XCreateSimpleWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
-                                    ctypes.c_uint, ctypes.c_ulong, ctypes.c_ulong]
-x11.XFlush.argtypes = [ctypes.c_void_p]
-x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
-x11.XTranslateCoordinates.restype = ctypes.c_int
-x11.XTranslateCoordinates.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
-                                      ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_ulong)]
-x11.XQueryPointer.restype = ctypes.c_int
-x11.XQueryPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
-                              ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
-                              ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint)]
-x11.XQueryKeymap.argtypes = [ctypes.c_void_p, ctypes.c_char * 32]
-x11.XGetModifierMapping.restype = ctypes.POINTER(ModifierMap)
-x11.XGetModifierMapping.argtypes = [ctypes.c_void_p]
-x11.XFreeModifiermap.argtypes = [ctypes.POINTER(ModifierMap)]
-x11.XGrabPointer.restype = ctypes.c_int
-x11.XGrabPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_int,
-                             ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
-x11.XUngrabPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-
-if mode == 'pid':
-    try:
-        if not x_server_in_this_namespace():
-            sys.exit(1)
-    except Exception:
-        sys.exit(1)
-display = x11.XOpenDisplay(None)
-if not display:
-    sys.exit(1)
-root = x11.XDefaultRootWindow(display)
-
-def pressed():
-    mask = ctypes.c_uint()
-    a, b, c, d = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_int(), ctypes.c_int()
-    e, f = ctypes.c_int(), ctypes.c_int()
-    if not x11.XQueryPointer(display, root, ctypes.byref(a), ctypes.byref(b), ctypes.byref(c), ctypes.byref(d),
-                             ctypes.byref(e), ctypes.byref(f), ctypes.byref(mask)):
-        sys.exit(1)
-    buttons = [number for number in range(1, 6) if mask.value & (1 << (7 + number))]
-    keymap = (ctypes.c_char * 32)()
-    x11.XQueryKeymap(display, keymap)
-    keys = [byte * 8 + bit for byte in range(32) for bit in range(8) if keymap[byte][0] & (1 << bit)]
-    table = x11.XGetModifierMapping(display)
-    if not table:
-        sys.exit(1)
-    count = 8 * table.contents.per_modifier
-    modifiers = sorted({table.contents.codes[i] for i in range(count)} - {0})
-    x11.XFreeModifiermap(table)
-    return buttons, keys, modifiers
-
-if mode == 'guard':
-    buttons, keys, modifiers = pressed()
-    answer = {'buttons': buttons, 'keys': keys, 'modifiers': modifiers, 'grab': None, 'owner': None}
-    if len(sys.argv) > 4:
-        target, px, py = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
-        grab = x11.XGrabPointer(display, root, 0, 0, 1, 1, 0, 0, 0)  # GrabModeAsync twice, CurrentTime
-        if grab == 0:
-            x11.XUngrabPointer(display, 0)
-        x11.XSync(display, 0)
-        answer['grab'] = grab
-        chain, current = [], root
-        while len(chain) < 64:
-            dx, dy, child = ctypes.c_int(), ctypes.c_int(), ctypes.c_ulong()
-            if not x11.XTranslateCoordinates(display, root, current, px, py, ctypes.byref(dx), ctypes.byref(dy), ctypes.byref(child)):
-                sys.exit(1)
-            if child.value == 0:
-                break
-            current = child.value
-            chain.append(current)
-        else:
-            sys.exit(1)
-        answer['owner'] = target in chain
-    print(json.dumps(answer))
-    sys.exit(0)
-
-if mode == 'release':
-    xtst = ctypes.CDLL('libXtst.so.6')
-    xtst.XTestFakeButtonEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
-    xtst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
-    for number in [int(item) for item in sys.argv[2].split(',') if item]:
-        xtst.XTestFakeButtonEvent(display, number, 0, 0)
-    for code in [int(item) for item in sys.argv[3].split(',') if item]:
-        xtst.XTestFakeKeyEvent(display, code, 0, 0)
-    x11.XFlush(display)
-    x11.XSync(display, 0)
-    print(1)
-    sys.exit(0)
-
-xres = ctypes.CDLL('libXRes.so.1')
-xres.XResQueryExtension.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
-xres.XResQueryVersion.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
-xres.XResQueryClientIds.argtypes = [ctypes.c_void_p, ctypes.c_long, ctypes.POINTER(Spec),
-                                    ctypes.POINTER(ctypes.c_long), ctypes.POINTER(ctypes.POINTER(Value))]
-xres.XResGetClientPid.argtypes = [ctypes.POINTER(Value)]
-xres.XResGetClientPid.restype = ctypes.c_int
-xres.XResClientIdsDestroy.argtypes = [ctypes.c_long, ctypes.POINTER(Value)]
-a, b = ctypes.c_int(), ctypes.c_int()
-if not xres.XResQueryExtension(display, ctypes.byref(a), ctypes.byref(b)):
-    sys.exit(1)
-if not xres.XResQueryVersion(display, ctypes.byref(a), ctypes.byref(b)) or (a.value, b.value) < (1, 2):
-    sys.exit(1)
-
-def client_pid(xid):
-    spec = Spec(xid, 1 << 1)
-    count = ctypes.c_long()
-    values = ctypes.POINTER(Value)()
-    if xres.XResQueryClientIds(display, 1, ctypes.byref(spec), ctypes.byref(count), ctypes.byref(values)) != 0:  # Success is 0
-        return None
-    pids = {xres.XResGetClientPid(ctypes.byref(values[i])) for i in range(count.value)}
-    xres.XResClientIdsDestroy(count, values)
-    pids.discard(-1)
-    return pids.pop() if len(pids) == 1 else None
-
-if mode in ('pid', 'xres'):
-    own = x11.XCreateSimpleWindow(display, root, 0, 0, 1, 1, 0, 0, 0)
-    x11.XFlush(display)
-    if client_pid(own) != os.getpid():  # the server numbers processes differently (or lies)
-        sys.exit(1)
-    pid = client_pid(int(sys.argv[2]))
-    if pid:
-        print(pid)
-`;
-
+// Questions only the X server (and the kernel) can answer: see x11.mjs (the PID namespace proof of the X server,
+// the X-Resource client id, the input state, the pointer grab and window-at-point check, and the XTEST release).
+// Each opens its own short connection to $DISPLAY and fails as a whole, which means "unknown".
 // Replaceable by tests only.
 export const deps = {
   readFile: path => readFile(path, 'utf8'),
@@ -271,24 +53,18 @@ export const deps = {
   }),
   // The X server's process id for the window's client, only when the server shares this PID namespace; else null.
   xresPid: async windowId => {
-    const pid = Number(await xHelper(['pid', String(windowId)]));
+    const pid = await clientPid(windowId).catch(() => null);
     return Number.isInteger(pid) && pid > 0 ? pid : null;
   },
-  // The X input state and, with a root point, the pointer grab and the window at the point (see the helper's
-  // "guard" question); null when unknown.
+  // The X input state and, with a root point, the pointer grab and the window at the point (see inputState in
+  // x11.mjs); null when unknown.
   guard: async (windowId, point) => {
-    const args = ['guard', String(windowId)];
-    if (point) args.push(String(point.x), String(point.y));
-    try {
-      const answer = JSON.parse(await xHelper(args));
-      const numbers = value => Array.isArray(value) && value.every(Number.isInteger);
-      return numbers(answer.buttons) && numbers(answer.keys) && numbers(answer.modifiers) ? answer : null;
-    } catch {
-      return null;
-    }
+    const answer = await inputState(windowId, point).catch(() => null);
+    const numbers = value => Array.isArray(value) && value.every(Number.isInteger);
+    return answer && numbers(answer.buttons) && numbers(answer.keys) && numbers(answer.modifiers) ? answer : null;
   },
-  // Releases buttons and key codes with XTEST; true when the helper reports success.
-  releaseHeld: async (buttons, keys) => await xHelper(['release', buttons.join(','), keys.join(',')]) === '1',
+  // Releases buttons and key codes with XTEST; true when the X server processed every release.
+  releaseHeld: async (buttons, keys) => await releaseInput(buttons, keys).catch(() => false) === true,
   // Ends the original engine processes (sky_linux_*, children of this worker) so that a call that did not answer
   // cannot act when it resumes: SIGTERM, then SIGCONT because a stopped process acts on a pending signal only once
   // continued. Waits briefly for them to be gone. Not every original transport kills its child when the worker exits.
@@ -330,13 +106,6 @@ export const deps = {
   // node_repl reports the exit and starts a fresh worker for the next request.
   restartWorker: () => { setImmediate(() => process.exit(70)); },
 };
-
-function xHelper(args) {
-  return new Promise(resolve => {
-    execFile('python3', ['-c', XRES_HELPER_SCRIPT, ...args], {timeout: XRES_TIMEOUT_MS, maxBuffer: 1 << 12},
-      (error, stdout) => resolve(error ? '' : String(stdout).trim()));
-  });
-}
 
 let original;
 let queue = Promise.resolve();
@@ -453,8 +222,8 @@ async function detectToolkit(pid) {
 // from SO_PEERCRED, absent for remote clients, and only asked of a server proven to share this PID
 // namespace) equals _NET_WM_PID. Otherwise the window may belong to a process in another PID namespace
 // (Flatpak, containers) whose advertised id collides with an unrelated local process, or to a remote
-// client, and the request is left to the original service. `wanted` is checked before the X helper is
-// started, so an untranslated request (a Qt key, a Chromium window, a hidden window) never pays for it.
+// client, and the request is left to the original service. `wanted` is checked before the X server is
+// asked, so an untranslated request (a Qt key, a Chromium window, a hidden window) never pays for it.
 async function classify(id, wanted) {
   const properties = await windowProperties(id);
   if (!properties.pid || !sameHost(properties.machine)) return {...properties, toolkit: null};
@@ -708,7 +477,7 @@ async function translate(service, request, env) {
 
 // XTEST follows normal pointer routing, so the desktop-level action lands on whatever window the X server
 // finds at the point, or goes to a client holding an active pointer grab. Immediately before sending, ask the
-// X server (one helper call, nothing is moved or sent): which buttons and keys are down now (the starting
+// X server (one connection, nothing is moved or sent): which buttons and keys are down now (the starting
 // state of this call, see heldBy), and for a pointer action whether another client holds an active pointer
 // grab (a popup menu, a drag in progress: the click would go to it whatever the window chain says) and
 // whether the target or one of its descendants is the window at the point (a notification, a tooltip or an
