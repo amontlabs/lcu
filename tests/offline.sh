@@ -59,7 +59,7 @@ test "$(cat /tmp/lcu-apt-invoked)" = update
 test "$(readlink -f /opt/lcu/current)" = "$selected"
 test -f "$selected/bin/lcu"
 
-# Exercise separate Python/installer processes racing on the same prefix. Both
+# Exercise separate installer processes racing on the same prefix. Both
 # link the same installed app in place.
 "$bundle/scripts/install.sh" --prefix /opt/lcu --user lcutester \
   --runtime-only --skip-system --existing-app "$app" --offline --yes \
@@ -128,6 +128,40 @@ test ! -e /opt/lcu/.next
 test -z "$(find /opt/lcu/releases -maxdepth 1 -name '.build-*' -print -quit)"
 test ! -e /opt/lcu/apps
 test ! -e /opt/lcu/cache
+
+# LCU needs no Python. Hide every python3 in this disposable container behind a shim that records the call
+# and fails, then reinstall and run the installed commands. Python returns afterwards for the test drivers.
+python_bins=$(find /usr/bin /usr/local/bin -maxdepth 1 -name 'python3*' \( -type f -o -type l \) -print)
+restore_python() {
+  for path in $python_bins; do
+    if [[ -e "$path.lcu-hidden" || -L "$path.lcu-hidden" ]]; then mv -f "$path.lcu-hidden" "$path"; fi
+  done
+}
+trap restore_python EXIT
+for path in $python_bins; do
+  mv "$path" "$path.lcu-hidden"
+  printf '#!/bin/sh\necho "python called: $0 $*" >>/tmp/lcu-python-called\nexit 127\n' >"$path"
+  chmod 755 "$path"
+done
+if python3 -c pass 2>/dev/null; then echo 'python3 is still usable' >&2; exit 1; fi
+rm -f /tmp/lcu-python-called
+"$bundle/scripts/install.sh" --prefix /opt/lcu --user lcutester \
+  --runtime-only --skip-system --existing-app "$app" --offline --yes
+runuser -u lcutester -- /opt/lcu/current/bin/lcu --version
+runuser -u lcutester -- /opt/lcu/current/bin/lcu status --json >/dev/null
+runuser -u lcutester -- /opt/lcu/current/bin/lcu-session --help >/dev/null
+runuser -u lcutester -- /opt/lcu/current/bin/lcu-codex-sandbox --help >/dev/null 2>&1 || true
+runuser -u lcutester -- /opt/lcu/current/bin/lcu doctor --non-interactive >/dev/null 2>&1 || true
+/opt/lcu/current/bin/lcu setup --user lcutester --export /home/lcutester/no-python-export --session direct --yes
+rm -rf /home/lcutester/no-python-export
+if [[ -e /tmp/lcu-python-called ]]; then
+  echo 'LCU called Python:' >&2
+  cat /tmp/lcu-python-called >&2
+  exit 1
+fi
+restore_python
+trap - EXIT
+
 python3 -m unittest discover -b -s /src/tests -p 'test_*.py' -q
 python3 /src/tests/registration.py
 python3 /src/tests/pending_registration.py
