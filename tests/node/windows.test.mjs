@@ -100,8 +100,16 @@ test('the query projects typed PowerShell properties to strings', (t) => {
 
 test('an MSIX-encoded scoped module segment is accepted; a redirected file is refused; only Windows x64 validates', (t) => {
   const { app, registered } = storeApp(t);
-  assert.throws(() => resolveInstalledWindowsApp(), /only be validated on Windows x64/);
-  onWindows(t, registered);
+  // Any host but Windows x64 is refused before the package query (simulated, so this holds on every test host).
+  const query = onWindows(t, registered);
+  for (const [platform, arch] of [['linux', 'x64'], ['darwin', 'arm64'], ['win32', 'arm64']]) {
+    override(t, process, 'platform', platform);
+    override(t, process, 'arch', arch);
+    assert.throws(() => resolveInstalledWindowsApp(), /only be validated on Windows x64/);
+  }
+  assert.equal(query.mock.callCount(), 0);
+  override(t, process, 'platform', 'win32');
+  override(t, process, 'arch', 'x64');
   const original = join(app, WINDOWS_REQUIRED_FILES[5]);
   const encoded = join(app, WINDOWS_REQUIRED_FILES[5].replace('@oai/', '%40oai/'));
   mkdirSync(join(encoded, '..'), { recursive: true });

@@ -10,6 +10,9 @@ import { acquire, installLockPath, withLock } from '../../lcu/lock.mjs';
 import { REPO, override, temporary } from './fixtures.mjs';
 
 const LOCK = pathToFileURL(join(REPO, 'lcu/lock.mjs')).href;
+const WINDOWS = process.platform === 'win32';
+/** POSIX flock files stay in place; the Windows lock is an exclusively created file that its release removes. */
+const WINDOWS_LOCK = 'the lock file stays on POSIX and is removed on release on Windows';
 const python = spawnSync('python3', ['-c', 'import fcntl'], { stdio: 'ignore' }).status === 0;
 
 /** A Node process holding the lock at `path` until its stdin closes (or it is killed). */
@@ -36,7 +39,7 @@ test('processes take the lock one at a time and the lock file stays in place', a
   const lines = readFileSync(log, 'utf8').trim().split('\n');
   assert.equal(lines.length, 64);
   for (let index = 0; index < lines.length; index += 2) assert.deepEqual(lines.slice(index, index + 2), ['in', 'out'], `overlap at ${index}`);
-  assert.ok(existsSync(path));
+  assert.equal(existsSync(path), !WINDOWS, WINDOWS_LOCK);
 });
 
 test('a holder that is killed releases the lock', async (t) => {
@@ -47,7 +50,7 @@ test('a holder that is killed releases the lock', async (t) => {
   await new Promise((done) => child.once('close', done));
   const release = await acquire(path, { wait: 2000 });
   release();
-  assert.ok(existsSync(path));
+  assert.equal(existsSync(path), !WINDOWS, WINDOWS_LOCK);
 });
 
 test('a bounded wait says once that it is waiting, then gives up with the caller\'s error', async (t) => {

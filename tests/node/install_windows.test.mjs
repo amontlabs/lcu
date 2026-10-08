@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { test } from 'node:test';
 
 import { acquire, installLockPath } from '../../lcu/lock.mjs';
@@ -69,7 +69,7 @@ test('an install copies the app once, records its inventory, Node and launcher, 
   assert.equal(command, launcherCommand(node));
   assert.ok(command.includes(`:run\r\n"${node}" "%~dp0windows_launcher.mjs" %*\r\nexit /b %ERRORLEVEL%\r\n`));
   assert.equal(readFileSync(join(f.prefix, 'windows_launcher.mjs'), 'utf8'), 'launcher');
-  assert.equal(current(f.prefix).release, release.split('/').at(-1));
+  assert.equal(current(f.prefix).release, basename(release));
   // A second install reuses the generation.
   const second = await install(f.prefix);
   assert.equal(JSON.parse(readFileSync(join(second, 'installation.json'), 'utf8')).app, join(generation, 'app'));
@@ -91,7 +91,7 @@ test('a failure after the copy removes the copy and release this run created', a
 test('a redirected release directory still removes the new copy', async (t) => {
   const f = fixture(t);
   const real = deps.isRedirected;
-  override(t, deps, 'isRedirected', (path) => path.endsWith('/releases') || real(path));
+  override(t, deps, 'isRedirected', (path) => basename(path) === 'releases' || real(path));
   await assert.rejects(install(f.prefix), /redirected Windows release directory/);
   assert.deepEqual(generations(f.prefix), []);
 });
@@ -102,7 +102,7 @@ test('failed launcher writes are rolled back and the new copy removed', async (t
   write(join(f.prefix, '.lcu-install'), '');
   const writes = [];
   override(t, deps, 'write', (path) => {
-    writes.push(path.split('/').at(-1));
+    writes.push(basename(path));
     if (writes.length === 2) throw new Error('command locked');
     if (writes.length === 3) throw new Error('restore locked');
   });

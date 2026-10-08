@@ -18,7 +18,8 @@ function fixture(t) {
   f.session = (name, text = SAMPLE) => write(join(sessions, `${name}.toml`), text);
   f.run = async (...argv) => {
     const seen = await output(t);
-    const code = await origins.main(argv, { env: f.env, windows: false });
+    // CODEX_HOME is a native temporary directory, so it is checked with this platform's path rules.
+    const code = await origins.main(argv, { env: f.env });
     return { code, out: seen.out, err: seen.err };
   };
   f.state = (name) => origins.parse(readFileSync(join(sessions, `${name}.toml`)), name).origins;
@@ -249,7 +250,8 @@ test('concurrent forgets are serialized; a lock that stays held is reported', as
   await second;
   await origins.forgetIn(path, 'https://a.example', ['allowed']);
   assert.deepEqual(f.state('abc').allowed, []);
-  assert.equal(existsSync(join(f.sessions, origins.LOCK_NAME)), true, 'the lock file stays, as earlier releases left it');
+  // POSIX keeps the flock file, as earlier releases left it; the Windows lock file is removed on release (lock.mjs).
+  assert.equal(existsSync(join(f.sessions, origins.LOCK_NAME)), process.platform !== 'win32', 'the lock file stays on POSIX only');
 });
 
 test('session ids, missing sessions and invalid origins are refused before any change', async (t) => {

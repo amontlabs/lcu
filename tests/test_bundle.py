@@ -1,5 +1,6 @@
 """The build's Python seal and the installer's Node verify agree on the release inventory."""
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -43,13 +44,22 @@ class SealVerifyTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / 'bundle.json').read_text())['version'], VERSION)
         self.assertEqual(self.verify(), 0)
         self.assertEqual(self.verify(arch='x64'), 3)
-        self.binary.chmod(0o644)
+        if os.name != 'nt':
+            # POSIX execute bits are part of a POSIX seal. A Windows host has none to change (both Python and Node
+            # report 0o666 whatever chmod set), and installers only verify a Linux or macOS seal on that platform.
+            self.binary.chmod(0o644)
+            self.assertEqual(self.verify(), 3)
+            self.binary.chmod(0o755)
+            self.assertEqual(self.verify(), 0)
+        self.binary.write_bytes(b'tampered binary')
         self.assertEqual(self.verify(), 3)
 
-    def test_windows_seal_ignores_modes(self):
+    def test_windows_seal_ignores_modes_but_catches_tampering(self):
         seal(self.root, 'x64', 'windows')
         self.binary.chmod(0o600)
         self.assertEqual(self.verify('windows', 'x64'), 0)
+        self.binary.write_bytes(b'tampered binary')
+        self.assertEqual(self.verify('windows', 'x64'), 3)
 
 
 if __name__ == '__main__':

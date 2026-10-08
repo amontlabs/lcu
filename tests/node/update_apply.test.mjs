@@ -171,9 +171,9 @@ test('Linux runs the new Node installer for the same app, then the new release r
 
 test('macOS and Windows installer commands', () => {
   assert.deepEqual(apply.installerCommand('darwin', '/p', { app: '/' }, '/s', 'node'),
-    ['node', '/s/scripts/install.mjs', '--prefix', '/p', '--runtime-only', '--existing-app', '/']);
+    ['node', join('/s', 'scripts/install.mjs'), '--prefix', '/p', '--runtime-only', '--existing-app', '/']);
   assert.deepEqual(apply.installerCommand('windows', '/p', {}, '/s', 'node'),
-    ['node', '/s/scripts/install_windows.mjs', '--prefix', '/p', '--runtime-only']);
+    ['node', join('/s', 'scripts/install_windows.mjs'), '--prefix', '/p', '--runtime-only']);
 });
 
 test('an installer failure is returned and nothing else runs', { skip: !linux }, async (t) => {

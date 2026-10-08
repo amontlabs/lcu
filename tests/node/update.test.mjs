@@ -14,8 +14,10 @@ function setup(t, version = '0.9.1') {
   const home = join(base, 'home');
   mkdirSync(home);
   const proxies = ['HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy'];
-  const saved = Object.fromEntries(['HOME', 'XDG_CACHE_HOME', 'LCU_NO_UPDATE_CHECK', ...proxies].map((key) => [key, process.env[key]]));
-  Object.assign(process.env, { HOME: home, XDG_CACHE_HOME: join(home, 'xdg') });
+  // homedir() reads USERPROFILE on Windows, and the Windows cache lives under LOCALAPPDATA.
+  const saved = Object.fromEntries(['HOME', 'USERPROFILE', 'LOCALAPPDATA', 'XDG_CACHE_HOME', 'LCU_NO_UPDATE_CHECK', ...proxies]
+    .map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, 'AppData/Local'), XDG_CACHE_HOME: join(home, 'xdg') });
   for (const key of ['LCU_NO_UPDATE_CHECK', ...proxies]) delete process.env[key];
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) {
@@ -183,7 +185,8 @@ test('the notice names the stable command, the severity and the release', (t) =>
   cache();
   const found = update.notice(root);
   assert.deepEqual(spawned, []); // fresh cache
-  const command = join(root, '../../current/bin/lcu');
+  // The stable command: `current/bin/lcu` on POSIX, the prefix's lcu.cmd on Windows (see stableCommand below).
+  const command = join(root, process.platform === 'win32' ? '../../lcu.cmd' : '../../current/bin/lcu');
   assert.deepEqual(Object.keys(found).sort(), ['command', 'current', 'latest', 'message', 'release_url', 'severity']);
   assert.deepEqual([found.current, found.latest, found.severity, found.command], ['0.9.1', '0.9.2', 'normal', command]);
   assert.ok(found.message.startsWith('LCU 0.9.2 is available'));

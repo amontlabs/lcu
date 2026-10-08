@@ -1,7 +1,7 @@
 // The Claude Code approval mod (claude_mod.mjs) and host-only tool visibility (claude_visibility.mjs).
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join, sep } from 'node:path';
 import { test } from 'node:test';
 
 import * as mod from '../../lcu/claude_mod.mjs';
@@ -11,7 +11,7 @@ import { REPO, temporary, write } from './fixtures.mjs';
 const MOD = join(REPO, 'adapters/claude-mod/lcu-approve');
 const snapshot = (root) => Object.fromEntries(readdirSync(root, { recursive: true }).sort()
   .filter((name) => { try { readFileSync(join(root, name)); return true; } catch { return false; } })
-  .map((name) => [name, readFileSync(join(root, name), 'utf8')]));
+  .map((name) => [name.split(sep).join('/'), readFileSync(join(root, name), 'utf8')]));
 
 test('the shipped mod is a function-hook plugin for the lcu server', () => {
   assert.equal(JSON.parse(readFileSync(join(MOD, '.claude-plugin/plugin.json'), 'utf8')).name, mod.NAME);
@@ -32,7 +32,7 @@ test('user-scope install is idempotent, omits the mod tests and records the lcu 
   assert.deepEqual(snapshot(target), before);
   assert.deepEqual(JSON.parse(before['lcu.json']), { lcu: join(REPO, 'bin/lcu') });
   const release = join(home, 'prefix/releases/1.0-abc');
-  cpSync(MOD, join(release, 'adapters/claude-mod/lcu-approve'), { recursive: true, filter: (path) => !path.endsWith('/tests') });
+  cpSync(MOD, join(release, 'adapters/claude-mod/lcu-approve'), { recursive: true, filter: (path) => basename(path) !== 'tests' });
   assert.deepEqual(JSON.parse(readFileSync(join(mod.install(home, release), 'lcu.json'), 'utf8')), { lcu: join(home, 'prefix/current/bin/lcu') });
 });
 

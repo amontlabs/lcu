@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { join } from 'node:path';
@@ -271,7 +272,8 @@ test('a host that exits early, or reports other pipes, is an error', async (t) =
 });
 
 test('the private lifetime transport forwards IDs and survives a disconnect', async (t) => {
-  const address = join(temporary(t), 'lifetime.sock');
+  // Windows serves the lifetime signal on a named pipe (the host's default); POSIX test hosts use a socket file.
+  const address = process.platform === 'win32' ? `\\\\.\\pipe\\lcu-lifetime-test-${randomUUID()}` : join(temporary(t), 'lifetime.sock');
   const script = "const {startLifetimeSignal}=require(process.argv[1]); let active='new'; " +
     "startLifetimeSignal(async ({sessionId,turnId})=>{ if(turnId==='disconnect'){await new Promise(r=>setTimeout(r,50)); return false;} " +
     "const matched=sessionId==='session'&&turnId===active; if(matched)active=null; return matched; }, process.argv[2]) " +
@@ -279,7 +281,12 @@ test('the private lifetime transport forwards IDs and survives a disconnect', as
   const { spawn } = await import('node:child_process');
   const child = spawn(NODE, ['-e', script, join(REPO, 'lcu/windows_lifetime_host.cjs'), address], { env: minimalEnv() });
   t.after(() => child.kill());
-  await new Promise((resolve) => child.stdout.once('data', resolve));
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  await new Promise((resolve, reject) => {
+    child.stdout.once('data', resolve);
+    child.once('exit', (code) => reject(new Error(`the lifetime host exited (${code}) before it was ready: ${stderr}`)));
+  });
   const send = (turn, drop = false) => new Promise((resolve, reject) => {
     const socket = net.createConnection(address, () => {
       socket.write(`${JSON.stringify({ session_id: 'session', turn_id: turn })}\n`);
