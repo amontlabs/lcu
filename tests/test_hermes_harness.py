@@ -345,6 +345,59 @@ class HermesHarnessTests(unittest.TestCase):
             finally:
                 context.unload()
 
+    def test_bridge_and_cleanup_output_stay_off_the_hermes_terminal(self):
+        """The Hermes CLI draws its TUI on the plugin process's stderr: nothing from LCU may land there."""
+        with tempfile.TemporaryDirectory(prefix="lcu-hermes-stderr-") as temporary:
+            home = Path(temporary)
+            plugin_dir = home / "plugins" / "lcu-cua"
+            plugin_dir.mkdir(parents=True)
+            shutil.copy2(PLUGIN / "__init__.py", plugin_dir / "__init__.py")
+            adapter_root, node = self.make_adapter_tree(home)
+            (plugin_dir / "lcu-config.json").write_text(json.dumps({
+                "command": [str(node), str(adapter_root / "test/hermes-mcp-fixture.mjs")], "node": str(node),
+                "bridge": str(adapter_root / "hermes/bridge.mjs"),
+            }), encoding="utf-8")
+            # Every Node process (the bridge and the original fixture) first writes 2 MB to stderr
+            # with blocking writes, so a pipe nobody drains would hang registration.
+            flood = home / "flood.mjs"
+            flood.write_text(
+                "import { writeSync } from 'node:fs';\n"
+                "const line = 'LCU-FLOOD-TEXT ' + 'x'.repeat(200) + '\\n';\n"
+                "for (let i = 0; i < 10000; i++) writeSync(2, line);\n", encoding="utf-8")
+            script = (
+                "import importlib.util, json, logging, sys\n"
+                f"sys.path.insert(0, {str(ROOT / 'tests')!r})\n"
+                "from test_hermes_harness import FakeContext\n"
+                "if len(sys.argv) > 1:\n"
+                "    logging.basicConfig(filename=sys.argv[1], level=logging.INFO)\n"
+                "spec = importlib.util.spec_from_file_location("
+                f"'lcu_hermes_stderr', {str(plugin_dir / '__init__.py')!r})\n"
+                "plugin = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(plugin)\n"
+                "context = FakeContext()\n"
+                "plugin.register(context)\n"
+                "context.hooks['pre_llm_call'](session_id='cleanup-once', turn_id='turn-1')\n"
+                "context.hooks['on_session_end'](session_id='cleanup-once', turn_id='turn-1')\n"
+                "retried = context.hooks['pre_llm_call'](session_id='cleanup-once', turn_id='turn-2')\n"
+                "context.unload()\n"
+                "print(json.dumps({'retried': 'Original CUA initialization guide.' in retried}))\n"
+            )
+            env = {**os.environ, "LCU_DIAGNOSTIC_LOG": "0",
+                   "NODE_OPTIONS": f"--import={flood.as_uri()}"}
+            hermes_log = home / "hermes.log"
+            for arguments in ([], [str(hermes_log)]):
+                with self.subTest(logging_configured=bool(arguments)):
+                    run = subprocess.run([sys.executable, "-c", script, *arguments], env=env, cwd=home,
+                                         capture_output=True, text=True, timeout=60)
+                    self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+                    self.assertEqual(run.stderr, "")
+                    self.assertEqual(json.loads(run.stdout), {"retried": True})
+            logged = hermes_log.read_text(encoding="utf-8")
+            self.assertIn("LCU original turn cleanup failed for a Hermes session", logged)
+            # The bridge's own stderr reaches Hermes' log, bounded per bridge.
+            self.assertIn("LCU bridge: LCU-FLOOD-TEXT", logged)
+            self.assertEqual(logged.count("LCU bridge:"), 200)  # BRIDGE_STDERR_LINES
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import contextvars
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +16,41 @@ from urllib.parse import urlsplit, urlunsplit
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PLUGIN_DIR / "lcu-config.json"
+# Hermes writes logging records to its own log files. Nothing here prints: the Hermes CLI draws its
+# TUI on this process's terminal.
+LOGGER = logging.getLogger(__name__)
+BRIDGE_STDERR_CHARS = 512
+# Lines of bridge stderr passed to Hermes' log per bridge; the rest is read and dropped.
+BRIDGE_STDERR_LINES = 200
+
+
+def _warn(message: str, *args: Any) -> None:
+    """Log a warning only where a handler will take it, never through logging's stderr fallback."""
+    if LOGGER.hasHandlers():
+        LOGGER.warning(message, *args)
+
+
+def _drain_bridge_stderr(stream) -> None:
+    """Read the bridge's stderr to the end so it never blocks; keep it off the Hermes terminal.
+
+    The original runtime's own stderr is already recorded (classified, without text) in LCU's
+    diagnostic log by the bridge; what is left here is the bridge's own rare messages.
+    """
+    logged = 0
+    try:
+        for line in iter(lambda: stream.readline(8192), ""):
+            line = line.rstrip()
+            # INFO is below logging's last-resort stderr handler, so without Hermes' handlers it is dropped.
+            if line and logged < BRIDGE_STDERR_LINES:
+                logged += 1
+                LOGGER.info("LCU bridge: %s", line[:BRIDGE_STDERR_CHARS])
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
 
 
 class Bridge:
@@ -33,8 +69,12 @@ class Bridge:
         self.command = command
         self.process = subprocess.Popen(
             [node, bridge], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=None, text=True, encoding="utf-8", bufsize=1,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
+        # The bridge records the original runtime's stderr in LCU's diagnostic log; the bridge's own
+        # stderr is drained here and never inherited by the Hermes TUI.
+        threading.Thread(target=_drain_bridge_stderr, args=(self.process.stderr,),
+                         name="lcu-hermes-bridge-stderr", daemon=True).start()
         self.lock = threading.Lock()
         self.sequence = 0
         self.closed = False
@@ -352,7 +392,9 @@ def register(ctx) -> None:
                 pending_cleanups[(session_id, exact_turn)] = pending_event or event
                 if active_turns.get(session_id) == exact_turn:
                     active_turns.pop(session_id, None)
-            print(f"LCU original turn cleanup failed for Hermes session {session_id}: {exc}", file=os.sys.stderr)
+            # Kept pending: the next turn retries it and tells the model if it still fails.
+            _warn("LCU original turn cleanup failed for a Hermes session; it is retried before the next turn: %s",
+                  str(exc)[:BRIDGE_STDERR_CHARS])
 
     def carry_tool_identity(tool_name="", args=None, next_call=None, session_id="", turn_id="",
                             tool_call_id="", **kwargs):

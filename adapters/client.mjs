@@ -373,6 +373,116 @@ function originApproval(params, allowedOrigins) {
   return allowedOrigins.has(origin);
 }
 
+/** At most this many `upstream_stderr` events per process; later lines are counted, not logged. */
+export const UPSTREAM_STDERR_EVENT_LIMIT = 500;
+const STDERR_LINE_CHARS = 8192;
+const STDERR_TAIL_LINES = 5;
+const STDERR_TAIL_CHARS = 1000;
+
+const wholeNumber = text => (/^\d+$/.test(text) ? Number(text) : undefined);
+
+/**
+ * Classify one stderr line of the original MCP process (and LCU's macOS host and service under it)
+ * by its known prefix. Returns the event fields: a fixed `kind` and numbers parsed from the line,
+ * never the line's text.
+ */
+export function classifyUpstreamStderr(line) {
+  let match = /^LCU macOS turn-ended command: exit=(\S+) elapsed=(\d+) ms/.exec(line);
+  if (match) {
+    const code = wholeNumber(match[1]);
+    return {
+      kind: code === 0 ? 'turn_ended_slow' : 'turn_ended_failed',
+      exit_code: code,
+      ...(match[1] === 'timeout' ? { timed_out: true } : {}),
+      ...(match[1] === 'launch-failed' ? { launch_failed: true } : {}),
+      elapsed_ms: Number(match[2]),
+      has_stderr: line.includes(' stderr='),
+    };
+  }
+  match = /^LCU macOS turn cleanup: original turn-ended command failed for .* after (\d+) ms/.exec(line);
+  if (match) {
+    return { kind: 'turn_ended_failed', elapsed_ms: Number(match[1]), retry: line.endsWith('at the next Sky request') };
+  }
+  match = /^LCU macOS turn cleanup step .* (?:is still running after|took) (\d+) ms$/.exec(line);
+  if (match) {
+    return { kind: 'cleanup_step_slow', elapsed_ms: Number(match[1]), still_running: line.includes(' is still running ') };
+  }
+  if (line.startsWith('LCU macOS turn cleanup failed:')) return { kind: 'turn_cleanup_failed' };
+  if (line.startsWith('LCU macOS user control unavailable:') ||
+      line.startsWith('LCU macOS control channel unavailable:')) return { kind: 'user_control_unavailable' };
+  if (line.startsWith('LCU macOS control request failed:')) return { kind: 'control_request_failed' };
+  match = /^LCU macOS sent SIGTERM to stale Computer Use service pid \d+ .*; it (?:exited after (\d+) ms|did not exit)/
+    .exec(line);
+  if (match) {
+    return { kind: 'stale_service_recovery', exited: match[1] !== undefined, elapsed_ms: wholeNumber(match[1] ?? '') };
+  }
+  if (line.startsWith('LCU: the original node_repl started its sandbox')) return { kind: 'sandbox_refused' };
+  if (line.startsWith('LCU: ')) return { kind: 'sandbox_note' };
+  return { kind: 'other' };
+}
+
+/**
+ * Keep reading the original process's piped stderr so it never blocks on a full pipe, and record
+ * each line as an `upstream_stderr` diagnostic event (classification only, never text). The
+ * text is not forwarded: in-process harnesses (Pi, OMP, Hermes) draw a TUI on this process's
+ * stderr. The last few lines are kept in memory so a failed start can still say why.
+ */
+export function drainUpstreamStderr(stream, log, { limit = UPSTREAM_STDERR_EVENT_LIMIT } = {}) {
+  const tail = [];
+  let pending = '';
+  let skipping = false;
+  let recorded = 0;
+  let dropped = 0;
+  const line = text => {
+    const trimmed = text.replace(/\r$/, '');
+    if (!trimmed.trim()) return;
+    tail.push(trimmed.slice(0, STDERR_TAIL_CHARS));
+    if (tail.length > STDERR_TAIL_LINES) tail.shift();
+    if (recorded < limit) {
+      recorded += 1;
+      log.event('upstream_stderr', classifyUpstreamStderr(trimmed));
+      if (recorded === limit) log.event('upstream_stderr_limit', { limit });
+    } else {
+      dropped += 1;
+    }
+  };
+  if (stream) {
+    stream.setEncoding?.('utf8');
+    stream.on('data', chunk => {
+      let text = String(chunk);
+      for (;;) {
+        const newline = text.indexOf('\n');
+        if (newline < 0) break;
+        if (!skipping) line(pending + text.slice(0, newline));
+        pending = '';
+        skipping = false;
+        text = text.slice(newline + 1);
+      }
+      if (skipping) return;
+      pending += text;
+      if (pending.length > STDERR_LINE_CHARS) {
+        // An endless line: classify its start and discard the rest until its newline.
+        line(pending.slice(0, STDERR_LINE_CHARS));
+        pending = '';
+        skipping = true;
+      }
+    });
+    stream.on('end', () => {
+      if (pending && !skipping) line(pending);
+      pending = '';
+      if (dropped) log.event('upstream_stderr_dropped', { lines: dropped });
+    });
+    stream.on('error', () => {});
+  }
+  return {
+    /** The last few lines, bounded, for a start failure's error message only. */
+    tail() {
+      const text = tail.join('\n');
+      return text.length > STDERR_TAIL_CHARS ? text.slice(-STDERR_TAIL_CHARS) : text;
+    },
+  };
+}
+
 /** Code of the error `turnEnded` throws when the original host gave up waiting for cleanup. */
 export const TURN_CLEANUP_TIMEOUT_CODE = 'LCU_TURN_CLEANUP_TIMEOUT';
 
@@ -409,8 +519,10 @@ export function createCuaClient({
   if (!controlSocketPath) delete childEnv.LCU_MAC_CONTROL_SOCKET;
   const transport = new StdioClientTransport({
     command: command[0], args: command.slice(1), cwd,
-    env: childEnv, stderr: 'inherit',
+    // Piped, not inherited: Pi, OMP and Hermes draw their TUI on this process's stderr.
+    env: childEnv, stderr: 'pipe',
   });
+  const upstreamStderr = drainUpstreamStderr(transport.stderr, log);
   const client = new Client({ name: 'lcu-harness-adapter', version: '0.1.0' }, {
     capabilities: { elicitation: {} },
   });
@@ -422,7 +534,8 @@ export function createCuaClient({
   const approvalLog = createApprovalLogger(log, calls);
   client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
     const params = request.params;
-    const refused = declineAgentHostApp(params);
+    // The approval log records the refusal (`agent_host_refused`); nothing is written to the TUI.
+    const refused = declineAgentHostApp(params, { report() {} });
     const origin = !refused && originApproval(params, approved);
     const entry = approvalLog.open(refused ? 'agent_host_refused' : origin ? 'browser_origin'
       : nativeAppApprovalOptions(params) ? 'native_app' : 'other', params);
@@ -463,6 +576,10 @@ export function createCuaClient({
         if (controlDirectory) rmSync(controlDirectory, { recursive: true, force: true });
         controlDirectory = undefined;
         controlSocketPath = undefined;
+        const output = upstreamStderr.tail();
+        if (output && error instanceof Error && !error.message.includes(output)) {
+          error.message += `\nOriginal CUA MCP process stderr (last lines):\n${output}`;
+        }
         throw error;
       }
     },
