@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,7 +9,7 @@ import {
   CODESIGN, LSOF, PS, PeerLock, SIGNAL_BUDGET_SECONDS, SIGNATURE_MISMATCH_MARKERS, SKY_SERVICE_NAME, TURN_ENDED_CLI_TIMEOUT_SECONDS,
   boundedRun, bundleChangeTimes, diagnoseSkyServices, executablePath, knownServiceExecutables, listSkyServices, lockHolders,
   parseProcessStart, parseProcessTable, processExists, recoverResponse, recoverStaleService, runTurnEnded, singleFlight,
-  startOriginalHost, timing, verifyServiceSignature,
+  startOriginalHost, verifyServiceSignature,
 } from '../../lcu/macos_host.mjs';
 import { override, temporary, write } from './fixtures.mjs';
 
@@ -29,6 +29,7 @@ function request(address, value, { timeout = 8000, raw } = {}) {
       }
     });
     socket.on('error', reject);
+    socket.on('close', () => reject(new Error('closed without an answer')));
   });
 }
 
@@ -70,13 +71,37 @@ test('an incomplete client is refused before anything listens', async (t) => {
   await assert.rejects(startOriginalHost({ client: join(temporary(t), 'missing') }), /client is incomplete/);
 });
 
-async function turnEnded(t, path, timeout) {
+test('stopping the host ends its turn-ended commands and waiting control requests at once', async (t) => {
+  const base = temporary(t);
+  const control = join(base, 'control.sock');
+  const started = join(base, 'started');
+  t.mock.method(process.stderr, 'write', () => true);
+  const host = await startOriginalHost({ client: client(t, `echo $$ > "${started}"\nexec sleep 30`), controlAddress: control });
+  const turn = request(host.address, { session_id: 's', turn_id: 't' }, { timeout: 20_000 }).catch((error) => error);
+  // No trusted service is connected: this request would wait 40 s for one.
+  const waiting = request(control, { type: 'status', session_id: 's', turn_id: 't' }, { timeout: 20_000 }).catch((error) => error);
+  for (let i = 0; i < 100 && !existsSync(started); i += 1) await delay(20);
+  assert.ok(existsSync(started), 'the turn-ended command is running');
+  const stopping = performance.now();
+  await host.stop();
+  const [turnResult, waitingResult] = await Promise.all([turn, waiting]);
+  assert.ok(performance.now() - stopping < 1000, 'stop() does not wait for the command or the request');
+  assert.ok(turnResult instanceof Error || turnResult.notified === false);
+  assert.ok(waitingResult instanceof Error || waitingResult.ok === false);
+  assert.equal(existsSync(host.address), false);
+  assert.equal(existsSync(control), false);
+  const pid = Number(readFileSync(started, 'utf8'));
+  await delay(100);
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the turn-ended command was killed');
+});
+
+async function turnEnded(t, path, options) {
   let log = '';
   const stderr = t.mock.method(process.stderr, 'write', (text) => { log += text; return true; });
   const started = performance.now();
   let error = null;
   try {
-    await runTurnEnded(path, '{}', timeout);
+    await runTurnEnded(path, '{}', options);
   } catch (caught) {
     error = caught;
   }
@@ -85,7 +110,7 @@ async function turnEnded(t, path, timeout) {
 }
 
 test('a turn-ended command past its timeout fails within bounds and logs what it wrote', async (t) => {
-  const { error, log, elapsed } = await turnEnded(t, client(t, 'printf "connect pending" >&2\nexec sleep 30'), 1);
+  const { error, log, elapsed } = await turnEnded(t, client(t, 'printf "connect pending" >&2\nexec sleep 30'), { timeout: 1 });
   assert.match(error.message, /timed out after 1 seconds/);
   assert.ok(elapsed < 5000);
   assert.match(log, /exit=timeout elapsed=\d{4} ms/);
@@ -103,8 +128,7 @@ test('a failing turn-ended command logs its status and bounded stderr; one that 
 });
 
 test('a slow success is logged, a fast one is not', async (t) => {
-  override(t, timing, 'slowSeconds', 0.2);
-  const slow = await turnEnded(t, client(t, 'sleep 0.4'));
+  const slow = await turnEnded(t, client(t, 'sleep 0.4'), { slowSeconds: 0.2 });
   assert.equal(slow.error, null);
   assert.match(slow.log, /exit=0 elapsed=\d+ ms/);
   const fast = await turnEnded(t, client(t, 'exit 0'));
@@ -564,6 +588,19 @@ test('off macOS nothing is looked for; on macOS the response passes the lock pat
   assert.deepEqual([PS, LSOF, CODESIGN], ['/bin/ps', '/usr/sbin/lsof', '/usr/bin/codesign']);
 });
 
+test('the kernel-reported executable is the Sky service among the process’s text mappings, not a library', async (t) => {
+  override(t, process, 'platform', 'darwin');
+  const lsof = (stdout) => async (argv) => {
+    assert.deepEqual(argv, ['/usr/sbin/lsof', '-a', '-p', '4242', '-d', 'txt', '-Fn']);
+    return { status: 0, stdout, stderr: '' };
+  };
+  const listing = `p4242\nftxt\nn/usr/lib/dyld\nftxt\nn${EXECUTABLE}\nftxt\nn/usr/lib/libSystem.B.dylib\n`;
+  assert.equal(await executablePath(4242, { run: lsof(listing) }), EXECUTABLE);
+  assert.equal(await executablePath(4242, { run: lsof('p4242\nftxt\nn/usr/lib/dyld\nftxt\nn/bin/sleep\n') }), null);
+  assert.equal(await executablePath(4242, { run: lsof(`p4242\nn${EXECUTABLE}\nn${HOME_EXECUTABLE}\n`) }), null, 'two candidates is no answer');
+  assert.equal(await executablePath(4242, { run: lsof(`p999\nn${EXECUTABLE}\n`) }), null);
+});
+
 const runWith = (status = 0, stdout = '', stderr = '') => {
   const calls = [];
   const run = async (argv, options) => { calls.push({ argv, options }); return { status, stdout, stderr }; };
@@ -623,16 +660,41 @@ test('known executables: the configured service and the app’s copy, never one 
   }
 });
 
-test('the peer lock excludes a second holder for a bounded time and hands the last outcome on', async (t) => {
-  const base = temporary(t);
-  const path = join(base, 'recovery.lock');
+/**
+ * flock as macOS takes it through open(O_EXLOCK | O_NONBLOCK). Off macOS the kernel has no O_EXLOCK, so the
+ * lock is simulated: a second open of a held path fails with EAGAIN until the holder's descriptor closes.
+ */
+function macLocks(t) {
+  const flags = [];
+  if (process.platform === 'darwin') return flags;
+  override(t, process, 'platform', 'darwin');
+  const held = new Map();
+  const { openSync, closeSync } = fs;
+  t.mock.method(fs, 'openSync', (path, flag, mode) => {
+    if (typeof flag !== 'number' || !(flag & 0x20)) return openSync(path, flag, mode);
+    flags.push(flag);
+    if ([...held.values()].includes(path)) throw Object.assign(new Error('EAGAIN: resource temporarily unavailable'), { code: 'EAGAIN' });
+    const descriptor = openSync(path, flag & ~0x20, mode);
+    held.set(descriptor, path);
+    return descriptor;
+  });
+  t.mock.method(fs, 'closeSync', (descriptor) => { held.delete(descriptor); return closeSync(descriptor); });
+  return flags;
+}
+
+test('the peer lock is an flock taken with the open: a second holder waits a bounded time, the last outcome is handed on', async (t) => {
+  const flags = macLocks(t);
+  const path = join(temporary(t), 'recovery.lock');
   const first = await new PeerLock(path).acquire();
-  assert.equal(first.acquired, true);
-  assert.equal(first.previous, null);
+  assert.deepEqual([first.acquired, first.previous], [true, null]);
+  if (flags.length) {
+    const { O_RDWR, O_CREAT, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    assert.equal(flags[0], O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | 0x20, 'O_EXLOCK | O_NONBLOCK, the lock Python hosts take');
+  }
   let clock = 0;
   const second = await new PeerLock(path, { waitSeconds: 1, sleep: async (seconds) => { clock += seconds; }, monotonic: () => clock }).acquire();
   assert.equal(second.acquired, false);
-  assert.ok(clock <= 1.1);
+  assert.ok(clock >= 1 && clock <= 1.1);
   assert.equal(first.record({ recovered: true, pid: 7, at: 5 }), true);
   first.release();
   const third = await new PeerLock(path).acquire();
@@ -643,27 +705,26 @@ test('the peer lock excludes a second holder for a bounded time and hands the la
   const fourth = await new PeerLock(path).acquire();
   assert.equal(fourth.previous, null);
   fourth.release();
-  // A holder that died is replaced.
-  writeFileSync(`${path}.held`, '999999999');
-  const fifth = await new PeerLock(path, { waitSeconds: 0.5 }).acquire();
-  assert.equal(fifth.acquired, true);
-  fifth.release();
+  assert.deepEqual(readdirSync(join(path, '..')), ['recovery.lock'], 'no side files');
 });
 
-test('the peer lock never follows a link and needs its directory; off macOS it has no default', async (t) => {
+test('the peer lock never follows a link, needs its directory, and is never taken off macOS', async (t) => {
   const base = temporary(t);
   write(join(base, 'real'));
   symlinkSync(join(base, 'real'), join(base, 'link'));
-  const linked = await new PeerLock(join(base, 'link'), { waitSeconds: 0 }).acquire();
-  assert.equal(linked.acquired, false, 'a symlink is never followed');
-  assert.equal((await new PeerLock(join(base, 'missing-dir/x.lock'), { waitSeconds: 0 }).acquire()).acquired, false);
-  assert.equal(existsSync(join(base, 'link.held')), false);
   if (process.platform !== 'darwin') {
     assert.equal(PeerLock.defaultPath(), null);
-    assert.equal((await new PeerLock().acquire()).acquired, false);
+    assert.equal((await new PeerLock(join(base, 'linux.lock')).acquire()).acquired, false);
   }
+  macLocks(t);
+  assert.equal((await new PeerLock(join(base, 'link'), { waitSeconds: 0 }).acquire()).acquired, false, 'a symlink is never followed');
+  assert.equal((await new PeerLock(join(base, 'missing-dir/x.lock'), { waitSeconds: 0 }).acquire()).acquired, false);
   mkdirSync(join(base, 'short'));
   const lock = await new PeerLock(join(base, 'short/recovery.lock')).acquire();
+  const real = fs.writeSync;
+  const short = t.mock.method(fs, 'writeSync', (fd, data, offset, length, position) => real(fd, data, offset, Math.min(length, 5), position));
+  assert.equal(lock.record({ signaled: true, recovered: false, pid: 4242 }), false, 'a short write is not a record');
+  short.mock.restore();
   assert.equal(lock.record({ signaled: true }), true);
   lock.release();
 });

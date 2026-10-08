@@ -111,16 +111,17 @@ export function environment(root, resolved, { chrome = false, audio = false, pla
   const node = join(runtime, windows ? 'bin/node.exe' : 'bin/node');
   const nodeRepl = join(runtime, windows ? 'bin/node_repl.exe' : 'bin/node_repl');
   const codex = locateCodexTools(resources, { windows }).cli;
-  // Windows variable names are case-insensitive; keep one spelling of each, as the original host sees them.
-  const env = windows ? Object.fromEntries(Object.entries(source).map(([key, value]) => [key.toUpperCase(), value]))
-    : { ...source };
+  const env = { ...source };
+  // Windows variable names are case-insensitive: PATH may arrive as `Path`; keep one spelling of it.
+  const existingPath = windows ? Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? ''
+    : env.PATH ?? '/usr/bin:/bin';
+  if (windows) for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];
   // The original selects and trusts CODEX_HOME verbatim, including an explicitly empty value.
   if (!('CODEX_HOME' in env)) env.CODEX_HOME = defaultCodexHome(env, windows);
   // Select our verified executables, while retaining upstream caller options, metadata, services, policy
   // flags, and additional module/trust roots.
   const prepend = (key, ...first) => unique([...first.filter(Boolean),
     ...(env[key] ?? '').split(separator).filter(Boolean)]).join(separator);
-  const existingPath = windows ? env.PATH ?? '' : env.PATH ?? '/usr/bin:/bin';
   Object.assign(env, {
     PATH: join(runtime, 'bin') + separator + existingPath,
     CUA_REPL_NODE_REPL_PATH: nodeRepl,
@@ -354,12 +355,12 @@ export function configureMacosLifecycle(root, runtime, env) {
   return join(env.SKY_CUA_SERVICE_PATH, 'Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient');
 }
 
-/** Run the original server as a child with inherited stdio and resolve with its exit status. */
+/** Run the original server as a child with inherited stdio; its status, or 128 + N when signal N ended it. */
 function runChild(command, env) {
   return new Promise((resolveStatus, reject) => {
     const child = process.getBuiltinModule('node:child_process').spawn(command[0], command.slice(1), { env, stdio: 'inherit' });
     child.once('error', reject);
-    child.once('close', (status, signal) => resolveStatus(status ?? (signal ? 128 : 1)));
+    child.once('close', (status, signal) => resolveStatus(status ?? 128 + (process.getBuiltinModule('node:os').constants.signals[signal] ?? 0)));
   });
 }
 

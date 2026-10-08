@@ -130,19 +130,21 @@ order inside it:
 - **Recorded Node.** The installer writes `<release root>/node-path`: one line, the absolute path of the app's
   Node (`…/Resources/cua_node/bin/node` on macOS, `…/resources/cua_node/bin/node` on Linux, the managed private
   copy's `…\cua_node\bin\node.exe` on Windows), with or without a trailing newline. The launcher reads it with
-  the shell's `read` builtin and checks that it is executable.
+  the shell's `read` builtin and requires an executable regular file.
 - **No `node-path`** (a source checkout, tests): the launcher uses `LCU_NODE` from the environment. A release
-  with `node-path` ignores `LCU_NODE`.
+  with `node-path` ignores `LCU_NODE`, also when the file is empty or unreadable.
 - **Neither usable:** the launcher prints `LCU: …` (`LCU session: …` for `lcu-session`) naming the problem —
   the recorded Node is missing or not executable (repair the app, reinstall LCU), or no Node is recorded and
-  `LCU_NODE` is unset — and exits 1. `lcu --help` and `lcu -h` (also after `--chrome`/`--audio`) still print
-  the usage, which lives in `lcu/usage.txt`: the single source both the launcher and `runtime.mjs` print.
+  `LCU_NODE` is unset — and exits 1. Plain `lcu --help` and `lcu -h` (no other argument) still print the usage,
+  which lives in `lcu/usage.txt`: the single source both the launcher and `runtime.mjs` print.
 - Inside Node, an entry module runs only when it is the script Node was started on (`lcu/entry.mjs`); a thrown
   `Error` prints `LCU: <message>` and exits 1, and a returned number is the exit status.
 - The launch path takes builtins from `process.getBuiltinModule` and loads `child_process`, `crypto` and `tty`
   only where they are used: an ESM `import` of a builtin costs milliseconds on every launch.
 - Identity checks on the app (signature, ownership) run inside Node, as the Python runtime ran them, and each runs
   once per launch.
+- Where `lcu` waits for the original server (macOS, Windows), it exits with the server's status, or with
+  128 + N when signal N ended it (the shell convention; Python LCU happened to give 256 − N).
 - On Windows, `bin\lcu.cmd` reads the same `node-path` (or `LCU_NODE`) and runs `lcu\runtime.mjs`. The
   account-local `<prefix>\lcu.cmd` the installer writes runs the recorded Node on
   `<prefix>\windows_launcher.mjs` (copied from `scripts/windows_launcher.mjs`), which selects the release from

@@ -65,122 +65,85 @@ const within = (path, root) => path === root || path.startsWith(`${root.replace(
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 /**
- * The value of a TOML inline value (tables, arrays, strings, booleans, numbers), as `tomllib` reads
- * `profile = <text>`. Anything else throws.
+ * The value of the TOML inline profile node_repl passes: inline tables with bare or quoted keys, strings,
+ * booleans, decimal integers and arrays. Anything else (dotted keys, floats, dates, comments) throws, and the
+ * shim then refuses the invocation.
  */
 export function parseTomlValue(text) {
   let at = 0;
-  const fail = () => { throw new Error(`invalid TOML at ${at}`); };
-  const space = (newlines = false) => {
-    for (;;) {
-      while (at < text.length && (text[at] === ' ' || text[at] === '\t' || (newlines && (text[at] === '\n' || text[at] === '\r')))) at += 1;
-      if (newlines && text[at] === '#') while (at < text.length && text[at] !== '\n') at += 1;
-      else return;
-    }
-  };
+  const fail = () => { throw new Error(`unsupported TOML at ${at}`); };
+  const space = () => { while (text[at] === ' ' || text[at] === '\t') at += 1; };
+  const ESCAPES = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', '"': '"', '\\': '\\' };
   const string = () => {
     const quote = text[at];
-    at += 1;
     let result = '';
-    while (text[at] !== quote) {
+    for (at += 1; text[at] !== quote; at += 1) {
       if (at >= text.length || text[at] === '\n') fail();
-      if (quote === '"' && text[at] === '\\') {
-        const escape = text[at + 1];
-        const simple = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', '"': '"', '\\': '\\' }[escape];
-        if (simple !== undefined) {
-          result += simple;
-          at += 2;
-        } else if (escape === 'u' || escape === 'U') {
-          const size = escape === 'u' ? 4 : 8;
-          const hex = text.slice(at + 2, at + 2 + size);
-          if (!new RegExp(`^[0-9A-Fa-f]{${size}}$`).test(hex)) fail();
-          result += String.fromCodePoint(parseInt(hex, 16));
-          at += 2 + size;
-        } else fail();
-      } else {
+      if (quote === "'" || text[at] !== '\\') {
         result += text[at];
-        at += 1;
+        continue;
       }
+      const escape = text[at + 1];
+      const hex = { u: 4, U: 8 }[escape];
+      if (hex) {
+        const digits = text.slice(at + 2, at + 2 + hex);
+        if (!/^[0-9A-Fa-f]+$/.test(digits) || digits.length !== hex) fail();
+        result += String.fromCodePoint(parseInt(digits, 16));
+        at += 1 + hex;
+      } else if (Object.hasOwn(ESCAPES, escape)) {
+        result += ESCAPES[escape];
+        at += 1;
+      } else fail();
     }
     at += 1;
     return result;
   };
-  const key = () => {
-    const parts = [];
-    for (;;) {
-      space();
-      if (text[at] === '"' || text[at] === "'") parts.push(string());
-      else {
-        const bare = /^[A-Za-z0-9_-]+/.exec(text.slice(at));
-        if (!bare) fail();
-        parts.push(bare[0]);
-        at += bare[0].length;
-      }
-      space();
-      if (text[at] !== '.') return parts;
-      at += 1;
-    }
-  };
   const value = () => {
     space();
-    const char = text[at];
-    if (char === '"' || char === "'") return string();
-    if (char === '{') {
+    if (text[at] === '"' || text[at] === "'") return string();
+    if (text[at] === '{' || text[at] === '[') {
+      const table = text[at] === '{';
+      const close = table ? '}' : ']';
+      const result = table ? {} : [];
       at += 1;
-      const table = {};
       space();
-      if (text[at] === '}') {
+      if (text[at] === close) {
         at += 1;
-        return table;
+        return result;
       }
       for (;;) {
-        const path = key();
-        if (text[at] !== '=') fail();
-        at += 1;
-        let target = table;
-        for (const part of path.slice(0, -1)) {
-          if (!Object.hasOwn(target, part)) target[part] = {};
-          else if (!isPlainObject(target[part])) fail();
-          target = target[part];
-        }
-        if (Object.hasOwn(target, path.at(-1))) fail();
-        target[path.at(-1)] = value();
-        space();
-        if (text[at] === '}') {
+        if (table) {
+          space();
+          const bare = /^[A-Za-z0-9_-]+/.exec(text.slice(at));
+          const key = text[at] === '"' || text[at] === "'" ? string() : bare ? (at += bare[0].length, bare[0]) : fail();
+          space();
+          if (text[at] !== '=' || Object.hasOwn(result, key)) fail();
           at += 1;
-          return table;
+          result[key] = value();
+        } else result.push(value());
+        space();
+        if (text[at] === close) {
+          at += 1;
+          return result;
         }
         if (text[at] !== ',') fail();
         at += 1;
-      }
-    }
-    if (char === '[') {
-      at += 1;
-      const array = [];
-      for (;;) {
-        space(true);
-        if (text[at] === ']') {
+        space();
+        if (table && text[at] === close) fail(); // TOML inline tables take no trailing comma
+        if (!table && text[at] === close) {
           at += 1;
-          return array;
+          return result;
         }
-        array.push(value());
-        space(true);
-        if (text[at] === ',') at += 1;
-        else if (text[at] !== ']') fail();
       }
     }
-    const word = /^(?:true|false|[+-]?(?:inf|nan)|0x[0-9A-Fa-f_]+|0o[0-7_]+|0b[01_]+|[+-]?\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?)/.exec(text.slice(at));
+    const word = /^(?:true|false|[+-]?(?:0|[1-9]\d*))(?![\w.])/.exec(text.slice(at));
     if (!word) fail();
     at += word[0].length;
-    if (word[0] === 'true' || word[0] === 'false') return word[0] === 'true';
-    if (/^[+-]?(inf|nan)$/.test(word[0])) return word[0].endsWith('nan') ? NaN : (word[0][0] === '-' ? -Infinity : Infinity);
-    if (/__|_$|^[+-]?_|_\.|\._|^[+-]?0\d/.test(word[0]) || /^[+-]?0[xob]_/.test(word[0])) fail();
-    return Number(word[0].replaceAll('_', ''));
+    return word[0] === 'true' || (word[0] === 'false' ? false : Number(word[0]));
   };
   const result = value();
   space();
-  if (text[at] === '#') at = text.indexOf('\n', at) === -1 ? text.length : text.indexOf('\n', at);
-  if (text.slice(at).trim()) fail();
+  if (at !== text.length) fail();
   return result;
 }
 

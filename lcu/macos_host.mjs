@@ -4,12 +4,21 @@
 // socket takes turn-ended IDs from LCU's Sky wrapper and runs the original client's `turn-ended` command, can
 // recover from a provably stale Computer Use service, and optionally routes human control through the
 // trusted Sky service.
-import { spawn, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import fs from 'node:fs';
-import net from 'node:net';
-import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, sep } from 'node:path';
+// Builtins come from process.getBuiltinModule, like the rest of the launch path.
+const { spawn, spawnSync } = process.getBuiltinModule('node:child_process');
+const { randomUUID } = process.getBuiltinModule('node:crypto');
+const fs = process.getBuiltinModule('node:fs');
+const net = process.getBuiltinModule('node:net');
+const { tmpdir } = process.getBuiltinModule('node:os');
+const { basename, dirname, isAbsolute, join, sep } = process.getBuiltinModule('node:path');
+
+// Every system tool and turn-ended command this host starts, so stopping the host ends them too.
+const running = new Set();
+function track(child) {
+  running.add(child);
+  child.once('close', () => running.delete(child));
+  return child;
+}
 
 export const SKY_SERVICE_NAME = 'SkyComputerUseService';
 // The system tools by absolute path, so a caller's PATH cannot stand in for them.
@@ -94,7 +103,7 @@ export function toolEnvironment(env = process.env) {
  */
 export function boundedRun(argv, { timeout, env } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], env });
+    const child = track(spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'pipe', 'pipe'], env }));
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
@@ -217,9 +226,10 @@ export async function lockHolders(lockPath, { run = boundedRun } = {}) {
 const isPid = (pid) => Number.isInteger(pid) && pid > 1;
 
 /**
- * The executable the kernel reports for a pid, or null. `ps` shows argv[0], which a process can choose; this
- * is the file actually running. Node cannot call proc_pidpath, so this asks `lsof` for the process's text
- * (executable) mapping, which comes from the same kernel vnode information. Anything unexpected is null.
+ * The Sky service executable the kernel reports for a pid, or null. `ps` shows argv[0], which a process can
+ * choose; this is the file actually running. Node cannot call proc_pidpath, so this asks `lsof` for the
+ * process's text mappings (from the same kernel vnode information) and takes the one entry that is a
+ * SkyComputerUseService executable, not a library the process also maps. Anything else is null.
  */
 export async function executablePath(pid, { run = boundedRun } = {}) {
   if (process.platform !== 'darwin' || !isPid(pid)) return null;
@@ -228,21 +238,28 @@ export async function executablePath(pid, { run = boundedRun } = {}) {
     if (result.status !== 0 || (result.stderr ?? '').trim()) return null;
     const lines = result.stdout.split('\n');
     if (lines[0] !== `p${pid}`) return null;
-    const name = lines.slice(1).find((line) => line.startsWith('n'))?.slice(1);
-    return name && isAbsolute(name) ? name : null;
+    const names = lines.slice(1).filter((line) => line.startsWith('n')).map((line) => line.slice(1))
+      .filter((name) => isAbsolute(name) && basename(name) === SKY_SERVICE_NAME);
+    return names.length === 1 ? names[0] : null;
   } catch {
     return null;
   }
 }
 
-const sleepSeconds = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+// Unreferenced: a recovery that is still waiting never keeps a finished `lcu` alive.
+const sleepSeconds = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000).unref());
 const monotonicSeconds = () => performance.now() / 1000;
+
+// open(2) flag that takes flock(LOCK_EX) atomically with the open (macOS); with O_NONBLOCK it fails with EAGAIN
+// while another descriptor holds the lock.
+const O_EXLOCK = 0x20;
 
 /**
  * Exclusion between the LCU hosts of this account (one per MCP connection), held for the whole recovery
- * including the wait for the service to exit. `<path>.held` is created exclusively and names its holder's pid;
- * a holder that died is replaced. `<path>` names the last service instance that was asked to quit, so no host
- * asks the same instance twice. Another host recovering at the same time makes this one wait (bounded).
+ * including the wait for the service to exit: an flock on a file in the account's private temporary directory,
+ * the same lock Python LCU hosts take, released by the kernel when its holder exits. The file names the last
+ * service instance that was asked to quit, so no host asks the same instance twice. Another host recovering
+ * at the same time makes this one wait (bounded). macOS only: elsewhere the lock is never acquired.
  */
 export class PeerLock {
   constructor(path = PeerLock.defaultPath(), { waitSeconds = PEER_LOCK_WAIT_SECONDS, sleep = sleepSeconds, monotonic = monotonicSeconds } = {}) {
@@ -257,51 +274,17 @@ export class PeerLock {
     return isAbsolute(directory) ? join(directory, `lcu-stale-service-recovery-${process.getuid()}.lock`) : null;
   }
 
-  takeOver(held) {
-    // Only a holder that no longer exists is replaced; the file is moved aside atomically first, so of two
-    // hosts replacing it only one succeeds, and one that moved a fresh holder away puts it back.
-    let owner;
-    try {
-      owner = fs.readFileSync(held, 'utf8');
-      if (!/^\d+$/.test(owner)) return Date.now() - fs.lstatSync(held).mtimeMs > 5000 ? this.discard(held, owner) : undefined;
-      process.kill(Number(owner), 0);
-    } catch (error) {
-      if (error.code === 'ESRCH') this.discard(held, owner);
-    }
-  }
-
-  discard(held, owner) {
-    const aside = `${held}.${randomUUID()}`;
-    try {
-      fs.renameSync(held, aside);
-      if (fs.readFileSync(aside, 'utf8') !== owner) fs.linkSync(aside, held);
-    } catch {
-      // another host moved it first, or took the lock meanwhile
-    }
-    fs.rmSync(aside, { force: true });
-  }
-
   async acquire() {
-    if (!this.path) return this;
-    const held = `${this.path}.held`;
+    if (!this.path || process.platform !== 'darwin') return this;
+    const { O_RDWR, O_CREAT, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
     const deadline = this.monotonic() + this.waitSeconds;
     for (;;) {
       try {
-        const descriptor = fs.openSync(held, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-        fs.writeSync(descriptor, String(process.pid));
-        fs.closeSync(descriptor);
+        this.descriptor = fs.openSync(this.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_EXLOCK | O_NONBLOCK, 0o600);
       } catch (error) {
-        if (error.code !== 'EEXIST') return this;
-        this.takeOver(held);
-        if (this.monotonic() >= deadline) return this;
+        if (error.code !== 'EAGAIN' || this.monotonic() >= deadline) return this;
         await this.sleep(0.05);
         continue;
-      }
-      try {
-        this.descriptor = fs.openSync(this.path, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
-      } catch {
-        fs.rmSync(held, { force: true });
-        return this;
       }
       this.acquired = true;
       this.previous = this.read();
@@ -333,11 +316,11 @@ export class PeerLock {
     }
   }
 
+  /** Closing the descriptor releases the lock. */
   release() {
     if (this.descriptor === null) return;
     fs.closeSync(this.descriptor);
     this.descriptor = null;
-    fs.rmSync(`${this.path}.held`, { force: true });
   }
 }
 
@@ -492,7 +475,7 @@ export function recoverResponse(waiting = () => false, env = process.env) {
 // run takes about 5.2 s. Allow for a slower launch. lcu/macos_sky_service.mjs derives its own wait from this value.
 export const TURN_ENDED_CLI_TIMEOUT_SECONDS = 10;
 // Log successful runs only when they are close to the helper's own 5 s deadline.
-export const timing = { slowSeconds: 4.5 };
+const TURN_ENDED_CLI_SLOW_SECONDS = 4.5;
 const STDERR_LOG_BYTES = 512;
 
 export const turnEndedPayload = (sessionId, turnId) =>
@@ -502,13 +485,13 @@ export const turnEndedPayload = (sessionId, turnId) =>
  * Run the original turn-ended command; report slow or failed runs on stderr. The helper exits 0 even when it
  * cannot reach the service (it only writes to os_log), so a zero status does not prove delivery.
  */
-export async function runTurnEnded(client, payload, timeout = TURN_ENDED_CLI_TIMEOUT_SECONDS) {
+export async function runTurnEnded(client, payload, { timeout = TURN_ENDED_CLI_TIMEOUT_SECONDS, slowSeconds = TURN_ENDED_CLI_SLOW_SECONDS } = {}) {
   const started = performance.now();
   const { status, stderr, failure } = await new Promise((resolve) => {
     const output = [];
     let child;
     try {
-      child = spawn(client, ['turn-ended', payload], { stdio: ['ignore', 'ignore', 'pipe'] });
+      child = track(spawn(client, ['turn-ended', payload], { stdio: ['ignore', 'ignore', 'pipe'] }));
     } catch (error) {
       resolve({ status: 'launch-failed', stderr: Buffer.from(error.message), failure: `could not start: ${error.code ?? error.message}` });
       return;
@@ -529,7 +512,7 @@ export async function runTurnEnded(client, payload, timeout = TURN_ENDED_CLI_TIM
     });
   });
   const elapsed = (performance.now() - started) / 1000;
-  if (failure || elapsed >= timing.slowSeconds) {
+  if (failure || elapsed >= slowSeconds) {
     const text = new TextDecoder().decode(stderr.subarray(0, STDERR_LOG_BYTES)).trim();
     process.stderr.write(`LCU macOS turn-ended command: exit=${status} elapsed=${Math.round(elapsed * 1000)} ms` +
       `${text ? ` stderr=${JSON.stringify(text)}` : ''}\n`);
@@ -605,6 +588,8 @@ function listen(address) {
         reject(error);
         return;
       }
+      // An accept error (EMFILE, for one) is reported; it must never end the `lcu` process.
+      server.on('error', (error) => process.stderr.write(`LCU macOS host socket error: ${error.message}\n`));
       resolve(server);
     });
   });
@@ -628,7 +613,11 @@ export class TrustedControlBridge {
     this.server.on('connection', (socket) => this.handle(socket));
   }
 
+  /** Answer every waiting request at once, so nothing outlives the host. */
   async close() {
+    this.closed = true;
+    for (const wake of [...this.serviceWaiters]) wake();
+    for (const answer of [...this.pending.values()]) answer({ ok: false, error: 'The LCU macOS host stopped.' });
     if (this.server) await closeServer(this.server, this.address);
   }
 
@@ -721,6 +710,7 @@ export class TrustedControlBridge {
         this.serviceWaiters.add(wake);
       });
     }
+    if (this.closed) throw new Error('The LCU macOS host stopped.');
     if (!this.service) throw new Error('Trusted macOS control service is not connected.');
     if (![...this.active.values()].some((context) => context.sessionId === sessionId && context.turnId === turnId)) {
       throw new Error('The requested session and turn are not active in the trusted runtime.');
@@ -823,7 +813,12 @@ export async function startOriginalHost({ client, env = process.env, controlAddr
   });
   return {
     address,
+    /**
+     * End everything this host started: turn-ended commands and system tools are killed, waiting control
+     * requests are answered, and recovery waits hold no timer, so `lcu` exits promptly after its server.
+     */
     async stop() {
+      for (const child of running) child.kill('SIGKILL');
       await Promise.all([closeServer(server, address), bridge?.close()]);
       fs.rmSync(folder, { recursive: true, force: true });
     },

@@ -1,6 +1,6 @@
 // Attach to one existing XFCE session owned by the calling account (`lcu-session`).
 // Builtins come from process.getBuiltinModule, which skips the per-launch cost of an ESM builtin facade.
-const { readdirSync, readFileSync, statSync } = process.getBuiltinModule('node:fs');
+const { accessSync, constants, readdirSync, readFileSync, statSync } = process.getBuiltinModule('node:fs');
 const { userInfo } = process.getBuiltinModule('node:os');
 const { delimiter, join } = process.getBuiltinModule('node:path');
 
@@ -51,17 +51,28 @@ function parse(argv) {
   return { user, command: [] };
 }
 
-function which(command, path) {
+/** The first executable file named `command` on `path` (execvp's default path when unset), as execvp finds it. */
+export function which(command, path = '/bin:/usr/bin') {
   if (command.includes('/')) return command;
-  for (const directory of (path ?? '').split(delimiter)) {
+  for (const directory of path.split(delimiter)) {
     const candidate = join(directory || '.', command);
     try {
-      if (statSync(candidate).isFile()) return candidate;
+      if (statSync(candidate).isFile()) {
+        accessSync(candidate, constants.X_OK);
+        return candidate;
+      }
     } catch {
-      // not here
+      // not here, or not executable: keep looking
     }
   }
   throw new Error(`Command not found: ${command}`);
+}
+
+/** The uid of account `name`, or null when there is no such account. */
+function accountUid(name) {
+  if (userInfo().username === name) return process.getuid();
+  const result = process.getBuiltinModule('node:child_process').spawnSync('/usr/bin/id', ['-u', '--', name], { encoding: 'utf8' });
+  return result.status === 0 && /^\d+\n?$/.test(result.stdout) ? Number(result.stdout) : null;
 }
 
 export function main(argv = process.argv.slice(2)) {
@@ -74,7 +85,9 @@ export function main(argv = process.argv.slice(2)) {
     process.stderr.write(`${USAGE}\nlcu-session: ${user ? 'provide a command after --' : '--user is required'}\n`);
     return 2;
   }
-  if (userInfo().username !== user) throw new Error(`Run the launcher as the selected desktop account (${user}).`);
+  const uid = accountUid(user);
+  if (uid === null) throw new Error(`Unknown account: ${user}`);
+  if (uid !== process.getuid()) throw new Error(`Run the launcher as the selected desktop account (${user}).`);
   const env = { ...process.env };
   for (const key of GUI_KEYS) delete env[key];
   Object.assign(env, discover());

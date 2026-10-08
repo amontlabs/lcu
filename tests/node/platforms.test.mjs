@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import {
-  MAC_HELPER, MAC_REQUIRED_FILES, MAC_SOCKET_ENV, MAC_SOCKET_SUFFIX, accounts, aclWritersUntrusted, macSocketPath,
+  MAC_HELPER, MAC_REQUIRED_FILES, MAC_SOCKET_ENV, MAC_SOCKET_SUFFIX, aclWritersUntrusted, macSocketPath, readAcls,
   macSocketPathProblem, plistStrings, resolveInstalledLinuxApp, resolveInstalledMacApp, untrustedEntry,
 } from '../../lcu/platforms.mjs';
 import { linuxApp, override, temporary, write } from './fixtures.mjs';
@@ -233,18 +233,21 @@ test('group write needs every group member trusted, and then the ACL decides', (
   const node = join(app, 'resources/cua_node/bin/node');
   chmodSync(node, 0o775);
   const stranger = process.getuid() + 1000;
-  const members = t.mock.method(accounts, 'groupMembers', () => new Set([stranger]));
-  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /writable by group or other/);
-  members.mock.mockImplementation(() => null);
-  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /writable by group or other/);
-  members.mock.mockImplementation(() => new Set([0, process.getuid()]));
-  const acls = t.mock.method(accounts, 'readAcls', (paths) => new Map(paths.map((path) => [path, []])));
-  resolveInstalledLinuxApp(app, { arch: 'arm64' });
-  assert.deepEqual(acls.mock.calls.map((call) => call.arguments[0]), [[node]], 'one getfacl run, only for the group-writable entry');
-  acls.mock.mockImplementation(() => new Map([[node, [{ tag: 'user', id: stranger, perm: 'rw-' }, { tag: 'mask', id: null, perm: 'rwx' }]]]));
-  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), new RegExp(`node is writable by uid ${stranger} through a POSIX ACL`));
-  acls.mock.mockImplementation(() => null);
-  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /POSIX ACL cannot be read/);
+  const calls = [];
+  let members = () => new Set([stranger]);
+  let acls = (paths) => new Map(paths.map((path) => [path, []]));
+  const resolve = () => resolveInstalledLinuxApp(app, { arch: 'arm64',
+    accounts: { groupMembers: (gid) => members(gid), readAcls: (paths) => { calls.push(paths); return acls(paths); } } });
+  assert.throws(resolve, /writable by group or other/);
+  members = () => null;
+  assert.throws(resolve, /writable by group or other/);
+  members = () => new Set([0, process.getuid()]);
+  resolve();
+  assert.deepEqual(calls, [[node]], 'one ACL read, only for the group-writable entry');
+  acls = () => new Map([[node, [{ tag: 'user', id: stranger, perm: 'rw-' }, { tag: 'mask', id: null, perm: 'rwx' }]]]);
+  assert.throws(resolve, new RegExp(`node is writable by uid ${stranger} through a POSIX ACL`));
+  acls = () => new Map([[node, null]]);
+  assert.throws(resolve, /POSIX ACL cannot be read/);
 });
 
 test('group zero is not trusted by its number alone, and named ACL entries count only through the mask', () => {
@@ -267,6 +270,21 @@ test('getfacl output is read per file, with escaped names', (t) => {
     assert.ok(args.includes('--skip-base'));
     return { status: 0, stdout: '# file: /a\\040b\n# owner: 0\n# group: 0\nuser::rwx\nuser:4242:rw-\ngroup::r-x\nmask::rwx\nother::r-x\n\n' };
   });
-  assert.deepEqual(accounts.readAcls(['/a b']).get('/a b'),
-    [{ tag: 'user', id: null, perm: 'rwx' }, { tag: 'user', id: 4242, perm: 'rw-' }, { tag: 'group', id: null, perm: 'r-x' }, { tag: 'mask', id: null, perm: 'rwx' }]);
+  assert.deepEqual(readAcls(['/a b', '/plain']), new Map([['/a b',
+    [{ tag: 'user', id: null, perm: 'rwx' }, { tag: 'user', id: 4242, perm: 'rw-' }, { tag: 'group', id: null, perm: 'r-x' }, { tag: 'mask', id: null, perm: 'rwx' }]],
+  ['/plain', []]]));
+});
+
+test('without getfacl, ls -ld tells an entry with an ACL (refused) from one without (safe)', (t) => {
+  const listed = [];
+  t.mock.method(childProcess, 'spawnSync', (command, args) => {
+    if (command === 'getfacl') return { status: null, error: Object.assign(new Error('spawn getfacl ENOENT'), { code: 'ENOENT' }) };
+    listed.push(args.at(-1));
+    const mode = { '/acl': 'drwxrwxr-x+', '/plain': 'drwxrwxr-x', '/selinux': 'drwxrwxr-x.' }[args.at(-1)];
+    return mode ? { status: 0, stdout: `${mode} 2 root root 4096 Oct  8 12:00 ${args.at(-1)}\n` } : { status: 2, stdout: '' };
+  });
+  assert.deepEqual(readAcls(['/acl', '/plain', '/selinux', '/gone']), new Map([['/acl', null], ['/plain', []], ['/selinux', []], ['/gone', null]]));
+  assert.deepEqual(listed, ['/acl', '/plain', '/selinux', '/gone']);
+  t.mock.method(childProcess, 'spawnSync', () => ({ status: 1, stdout: '' }));
+  assert.deepEqual(readAcls(['/x']), new Map([['/x', null]]), 'a getfacl that fails is no answer');
 });
