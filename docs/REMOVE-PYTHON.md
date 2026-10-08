@@ -1,6 +1,6 @@
 # Remove Python from LCU
 
-Status: in progress, delivered as one PR. This brief replaces the first attempt (PR #25, branch `node-runtime`), which was
+Status: port complete, verification in progress (see [Status](#status)); delivered as one PR. This brief replaces the first attempt (PR #25, branch `node-runtime`), which was
 closed unmerged. Every agent working on this port works from this page; if something here is wrong or unclear, raise
 it before working around it.
 
@@ -172,3 +172,14 @@ handover is faithful to the original runtime. Its platform knowledge is worth re
 
 Do not copy its `lcu/compat/` layer, its byte-for-byte black-box harness, or its deviations list. They exist to
 imitate Python and are what this brief rules out.
+
+## Status
+
+What is verified where, for the port as merged on this branch (LCU 0.10.0):
+
+| Platform | Verified | Not yet verified |
+|---|---|---|
+| Linux x64 | `node --test tests/node/*.test.mjs` (Node 22.22); the build-tooling and adapter tests; `tests/e2e` against the 0.9.7 archive: `setup`, `exit`, `launch`, `upgrade` (runtime-only and agent mode, with rollback), `nopython` and `startup` all pass, the only accepted difference being the relay rename `lcu-native-host.py` → `lcu-native-host.mjs`; startup medians 64 ms against 114 ms (`lcu --version`) and 32 ms against 64 ms (`lcu-session --help`, `lcu-codex-sandbox --help`); the real-desktop gate (`tests/run.sh linux/amd64` steps: offline and read-only installs, the no-Python install and run, registrations, GTK/X11/Qt/GTK 4 input through every adapter path, the required original sandbox) on a native amd64 Docker host. That local gate ran `tests/run.sh`'s steps unchanged except that the image added the host's TLS proxy CA and the archive was the one `tests/e2e` built on the host from the same tree. | |
+| Linux arm64 | CI jobs configured (Node tests, e2e and `tests/run.sh` on `ubuntu-24.04-arm`); results pending the first CI run of this branch. | Any local run. |
+| macOS arm64 | Node unit tests and the build-tooling tests configured on CI runners (`macos-latest`); results pending the first CI run. | The task-owned macOS guest (`docs/verification/macos-test-guest-access.md`): install, setup, a live computer-use action, the browser relay, the upgrade from 0.9.7, and the `O_EXLOCK` lock files against a running 0.9.7 host. |
+| Windows x64 | Node unit tests configured on CI runners (`windows-latest`), results pending the first CI run; tests that need POSIX skip themselves with a reason (their loading was checked with a simulated `win32`, not on Windows). | Any live Windows run: `install.ps1` with the Store app, a computer-use action, the upgrade from 0.9.7, and the lock files against a running 0.9.7 host. Structural checks are not live evidence. |
