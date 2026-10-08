@@ -4,14 +4,14 @@ LCU releases are thin platform/architecture-specific Linux and macOS tarballs. A
 
 ## Building from source
 
-Use the [release installation guide](INSTALLATION.md) unless you are changing LCU. Build on the target OS and architecture with Python 3.12+. macOS also requires a compatible official app, `npm` and `swiftc` (Xcode Command Line Tools), which compiles and ad-hoc signs LCU's own `bin/lcu-owner-auth` helper for [`lcu apps`](INSTALLATION.md#manage-approved-apps); Linux builds provision their own pinned Node dependency. Dependency downloads need network access during the build. The official app is never downloaded by the builder.
+Use the [release installation guide](INSTALLATION.md) unless you are changing LCU. Build on the target OS and architecture with Python 3.12+ and Node 22.15 or later; the build tooling stays Python and is never shipped, and the release itself runs only on the app's Node. macOS also requires a compatible official app, `npm` and `swiftc` (Xcode Command Line Tools), which compiles and ad-hoc signs LCU's own `bin/lcu-owner-auth` helper for [`lcu apps`](INSTALLATION.md#manage-approved-apps); Linux builds provision their own pinned Node dependency. Dependency downloads need network access during the build. The official app is never downloaded by the builder.
 
 Clone the repository and read its version:
 
 ~~~sh
 git clone https://github.com/amontlabs/lcu.git
 cd lcu
-LCU_VERSION=$(python3 -c 'from scripts.bundle import VERSION; print(VERSION)')
+LCU_VERSION=$(node --input-type=module -e "console.log((await import('./scripts/bundle.mjs')).VERSION)")
 ~~~
 
 On Apple Silicon macOS:
@@ -25,17 +25,17 @@ cd "dist/lcu-$LCU_VERSION-darwin-arm64"
 On Linux ARM64 or x86-64:
 
 ~~~sh
-LCU_ARCH=$(python3 -c 'from scripts.bundle import architecture; print(architecture())')
+LCU_ARCH=$(node --input-type=module -e "console.log((await import('./scripts/bundle.mjs')).architecture())")
 python3 scripts/build_bundle.py --platform linux --output dist
 tar -xzf "dist/lcu-$LCU_VERSION-linux-$LCU_ARCH.tar.gz" -C dist
 cd "dist/lcu-$LCU_VERSION-linux-$LCU_ARCH"
 ~~~
 
-From the extracted directory, follow the [macOS](INSTALLATION.md#macos) or [Linux](INSTALLATION.md#linux) installation steps. The source checkout has no sealed bundle manifest and cannot be installed directly. Rebuilding the same version requires a fresh output directory, such as `dist/rebuild-1`; generated archives stay under `dist/` and out of Git.
+`scripts/bundle.mjs` holds the release version (`VERSION`); `scripts/build_bundle.py` reads it from there. From the extracted directory, follow the [macOS](INSTALLATION.md#macos) or [Linux](INSTALLATION.md#linux) installation steps. The source checkout has no sealed bundle manifest and cannot be installed directly. Rebuilding the same version requires a fresh output directory, such as `dist/rebuild-1`; generated archives stay under `dist/` and out of Git.
 
 The builder creates a tarball and SHA-256 sidecar. It provisions the fixed third-party agent registration tools and links their Node executable to the application that setup selects later. It does not download or extract the OpenAI app. Build-time `--package` is retired. Install the official app separately, then pass its installed Linux directory with `--existing-app PATH` only when it is outside `/usr/lib/chatgpt`.
 
-The deferred Windows x64 candidate ZIP is built with `python3 scripts/build_bundle.py --platform windows --output dist`. It contains no OpenAI payload. Direct execution from the protected WindowsApps tree returned Access denied, and the original sandboxed Node REPL could not spawn the native helper directly. The installer stages an intact copy of the registered Store-signed application, records and checks its source-derived inventory, and first checks, read-only and before the copy, that the app's native-pipe host factory can be located by structure (reporting the failed check and the observed app version), then extracts that factory and its exact dependencies outside that sandbox ([layout and vendored parser](PROVENANCE.md)). One install runs at a time per prefix (a lock), and a copy this run created is removed if a later step fails unless a release already records it. It does not use the inspected package version or component hashes as compatibility gates. Installed candidates in a disposable Windows 11 guest initialized the original MCP, listed a live Notepad window, and saved exact Unicode text to an existing file with an independent byte oracle. A matching Stop and Interrupt each removed the native helper; a stale Stop left a newer turn's helper running, and MCP shutdown removed the final helper. These observations establish installed native action and lifetime behavior, not a Windows Chrome or model-driven task. The [live Windows record](verification/windows-source.md) gives the guest boundaries.
+The deferred Windows x64 candidate ZIP is built with `python3 scripts/build_bundle.py --platform windows --output dist`. It contains no OpenAI payload. Its entry point is `scripts/install.ps1`, which runs the Store app's own `node.exe` (or a temporary copy of it) on `scripts/install_windows.mjs`. Direct execution from the protected WindowsApps tree returned Access denied, and the original sandboxed Node REPL could not spawn the native helper directly. The installer stages an intact copy of the registered Store-signed application, records and checks its source-derived inventory, and first checks, read-only and before the copy, that the app's native-pipe host factory can be located by structure (reporting the failed check and the observed app version), then extracts that factory and its exact dependencies outside that sandbox ([layout and vendored parser](PROVENANCE.md)). One install runs at a time per prefix (a lock), and a copy this run created is removed if a later step fails unless a release already records it. It does not use the inspected package version or component hashes as compatibility gates. Installed candidates in a disposable Windows 11 guest initialized the original MCP, listed a live Notepad window, and saved exact Unicode text to an existing file with an independent byte oracle. A matching Stop and Interrupt each removed the native helper; a stale Stop left a newer turn's helper running, and MCP shutdown removed the final helper. These observations establish installed native action and lifetime behavior, not a Windows Chrome or model-driven task. The [live Windows record](verification/windows-source.md) gives the guest boundaries.
 
 Claude Code registration on Windows does not supply original per-turn cleanup. Its documented [`Stop` hook](https://code.claude.com/docs/en/hooks) excludes user interruption, while `StopFailure` covers API errors and `SessionEnd` fires only when the session ends. Until a supported ordinary-CLI interruption event and matching turn metadata are validated, use Pi or a compatible Codex CLI for Windows native work that needs automatic per-turn helper cleanup; the same recommendation applies to optional Chrome temporary-tab cleanup.
 
@@ -76,9 +76,14 @@ Root is required only for apt and another account's setup; the target app/REPL m
 Run `tests/run.sh` and focused checks inside disposable containers. Besides the writable-extraction gate (`tests/offline.sh`), it runs `tests/offline-readonly.sh`: the package's app is copied into a Docker volume that is mounted read-only at two `/opt/silo/chatgpt/<version>` folders, LCU is installed with `--existing-app` at the first, the GTK desktop suite runs as the target account, and a reinstall at the second path must follow it. The volume is removed afterward. For focused checks during implementation, run these in the container:
 
 ~~~sh
+node --test tests/node/*.test.mjs
 python3 -m unittest discover -b -s tests -p 'test_*.py'
 npm test --prefix adapters
 ~~~
+
+`lcu update` can be exercised offline. **Test only:** `LCU_UPDATE_SOURCE` set to a local directory (or `file://` URL) replaces GitHub: `latest` holds the latest tag, `<tag>/<archive>` and `<tag>/<archive>.sha256` the release files, and an optional `<tag>/notes.md` the release notes. Releases never set it.
+
+LCU 0.9.7's `lcu update` runs the new archive's `scripts/install.py` (`install_macos.py`, `install_windows.py` on Windows) with its own Python. Those three files stay in the archive as stubs without logic that hand over to `install.sh` (or `install.ps1`) with the same arguments.
 
 `-b` buffers setup output from passing tests and shows it only for failures. Narrow `-p` to one file, such as `test_runtime.py`, while iterating.
 
