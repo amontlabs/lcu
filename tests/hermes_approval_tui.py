@@ -25,8 +25,7 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu.harness_setup import configure_hermes
+from lcu_node import call  # noqa: E402
 
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 TEMP_PARENT = "/private/tmp" if sys.platform == "darwin" else "/tmp"
@@ -109,9 +108,9 @@ def exercise(hermes: Path, node: Path, release: Path, name: str,
             "OPENAI_API_KEY": "lcu-hermes-scripted-provider", "TERM": "xterm-256color",
             "NO_COLOR": "1", "LCU_FIXTURE_LOG": str(log),
         }
-        configure_hermes(home,
-                         [str(node), str(ROOT / "adapters/test/hermes-mcp-fixture.mjs")],
-                         node, release, scope="user", project=None, env=env)
+        call("harness_setup", "configureHermes", home,
+             [str(node), str(ROOT / "adapters/test/hermes-mcp-fixture.mjs")],
+             node, release, {"scope": "user", "env": env})
         settings = [
             ("model.provider", "custom"), ("model.default", "fixture"),
             ("model.base_url", f"http://127.0.0.1:{server.server_port}/v1"),

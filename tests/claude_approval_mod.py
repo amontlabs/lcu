@@ -23,8 +23,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu import claude_mod, claude_visibility  # noqa: E402
+from lcu_node import call  # noqa: E402
 
 PROMPT = 'Run the approval check.'
 KEY = 'sk-ant-api03-' + 'x' * 40
@@ -68,13 +67,13 @@ def prepare(base, claude, name, use_mod):
     project = base / 'project'
     home.mkdir()
     project.mkdir()
-    claude_visibility.install(home)
+    call('claude_visibility', 'install', home)
     settings = home / '.claude/settings.json'
     data = json.loads(settings.read_text())
     data['permissions'].setdefault('allow', []).append('mcp__lcu')
     settings.write_text(json.dumps(data, indent=2))
     if use_mod:
-        claude_mod.install(home, ROOT)
+        call('claude_mod', 'install', home, ROOT)
     (home / '.claude.json').write_text(json.dumps({
         'hasCompletedOnboarding': True, 'theme': 'dark', 'numStartups': 5,
         'customApiKeyResponses': {'approved': [KEY[-20:]], 'rejected': []},

@@ -25,8 +25,7 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu.harness_setup import configure_omp
+from lcu_node import call  # noqa: E402
 
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 CASES = [
@@ -106,8 +105,8 @@ def exercise(omp: Path, case, evidence: Path):
             'PI_CODING_AGENT_DIR': str(profile), 'LCU_FIXTURE_LOG': str(log),
             'OPENAI_API_KEY': 'fixture-invalid', 'TERM': 'xterm-256color', 'NO_COLOR': '1',
         }
-        configure_omp(home, [str(node), str(ROOT / 'adapters/test/mcp-fixture.mjs')],
-                      ROOT, scope='user', project=None, env=env)
+        call('harness_setup', 'configureOmp', home, [str(node), str(ROOT / 'adapters/test/mcp-fixture.mjs')],
+             ROOT, {'scope': 'user', 'env': env})
         # Official OMP v18.4.1 setup-version.ts declares CURRENT_SETUP_VERSION=2.
         # This generated profile already has its model/provider configured.
         with (profile / 'config.yml').open('a') as config:

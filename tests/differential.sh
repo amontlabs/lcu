@@ -24,7 +24,7 @@ trap 'rm -rf "$scratch"' EXIT
 # Both sides must execute one immutable test revision even in an actively edited
 # checkout. The release and source package were already checksum-verified above.
 mkdir "$scratch/tests"
-cp "$tests"/differential* "$tests"/host_delivery.* "$tests/codex_lifecycle.py" "$tests/browser_runtime.py" "$tests/native_pipe.py" "$tests/codex_home.py" "$tests/mcp_client.py" "$tests/x11_fixture.py" "$scratch/tests/"
+cp "$tests"/differential* "$tests"/host_delivery.* "$tests/codex_lifecycle.py" "$tests/lcu_node.py" "$tests/browser_runtime.py" "$tests/native_pipe.py" "$tests/codex_home.py" "$tests/mcp_client.py" "$tests/x11_fixture.py" "$scratch/tests/"
 tests="$scratch/tests"
 dpkg-deb --extract "$package" "$scratch/upstream"
 tar -xzf "$archive" -C "$scratch"
@@ -73,6 +73,6 @@ dbus-run-session -- bash "$tests/host_delivery.sh" \
 for side in upstream lcu; do
   lifecycle_args=()
   if [[ $side == lcu ]]; then lifecycle_args=(--release "$scratch/installed/current"); fi
-  PYTHONPATH="$scratch/installed/current" python3 "$tests/codex_lifecycle.py" \
+  LCU_MODULE_ROOT="$scratch/installed/current" python3 "$tests/codex_lifecycle.py" \
     "$scratch/upstream/usr/lib/chatgpt/resources" "$output/lifecycle-$side" "${lifecycle_args[@]}"
 done

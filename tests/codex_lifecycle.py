@@ -5,19 +5,86 @@ The trusted fixture service only records registration and cleanup; it implements
 no computer/browser automation and changes no production runtime code.
 """
 import argparse
+from contextlib import contextmanager
 import http.server
 import json
 import os
 from pathlib import Path
+import selectors
 import subprocess
-import sys
 import threading
 import tomllib
 import time
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.codex_hooks import install_hooks, original_hooks
-from lcu.app_server import app_server
+from lcu_node import call as lcu_call
+
+
+def install_hooks(cli, config, cwd, env, host):
+    """What `lcu setup --agent codex` does to the config: LCU's own installHooks, run on Node."""
+    lcu_call('codex_hooks', 'installHooks', cli, config, cwd, env, host)
+
+
+def original_hooks(host):
+    return lcu_call('codex_hooks', 'originalHooks', host)
+
+
+@contextmanager
+def app_server(cli, cwd, env):
+    """A bare JSON-RPC client of the original `codex app-server` (test tooling: one reader, no threads)."""
+    process = subprocess.Popen([str(cli), '--strict-config', 'app-server', '--listen', 'stdio://'], cwd=cwd, env=env,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    state = {'buffer': b'', 'sequence': 0}
+
+    def send(message):
+        process.stdin.write(json.dumps(message).encode() + b'\n')
+        process.stdin.flush()
+
+    def receive(timeout):
+        deadline = time.monotonic() + timeout
+        while b'\n' not in state['buffer']:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                return None
+            part = process.stdout.read1(65536)
+            if not part:
+                raise AssertionError('codex app-server exited')
+            state['buffer'] += part
+        line, state['buffer'] = state['buffer'].split(b'\n', 1)
+        message = json.loads(line)
+        if 'id' in message and 'method' in message:
+            send({'id': message['id'], 'error': {'code': -32601, 'message': 'unsupported'}})
+        return message
+
+    def api(method, params, timeout=45):
+        state['sequence'] += 1
+        request = state['sequence']
+        send({'id': request, 'method': method, 'params': params})
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            message = receive(deadline - time.monotonic())
+            if message and message.get('id') == request and 'method' not in message:
+                assert 'error' not in message, message
+                return message['result']
+        raise AssertionError(f'codex app-server timed out: {method}')
+
+    api.receive = receive
+    try:
+        api.initialization = api('initialize', {'clientInfo': {'name': 'lcu-test', 'version': '0'},
+                                                'capabilities': {'experimentalApi': True}})
+        send({'method': 'initialized'})
+        yield api
+    finally:
+        process.stdin.close()
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+        selector.close()
+        process.stdout.close()
 
 
 def check(resources, output, scope, enabled, release=None, mode="stop"):

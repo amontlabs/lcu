@@ -45,7 +45,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMP_PARENT = "/private/tmp" if sys.platform == "darwin" else "/tmp"
-sys.path.insert(0, str(ROOT))
+from lcu_node import call  # noqa: E402
 
 
 def required(name: str) -> str:
@@ -109,10 +109,7 @@ def main() -> None:
             "OPENAI_API_KEY": synthetic_key,
         }
 
-        from lcu.harness_setup import configure_hermes
-
-        configure_hermes(home, command, node, release, scope="user",
-                         project=None, env=env)
+        call("harness_setup", "configureHermes", home, command, node, release, {"scope": "user", "env": env})
 
         # Use Hermes' own config command so plugin enablement and unrelated
         # native settings are preserved. The endpoint contains no credential.

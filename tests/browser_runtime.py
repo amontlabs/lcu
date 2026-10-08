@@ -1,20 +1,12 @@
 """Exercise the original Chrome extension through LCU's installed native host."""
-import contextlib
-import hashlib
-import io
 import json
 import os
 import re
-import shlex
-import shutil
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from mcp_client import Client, text
@@ -202,101 +194,12 @@ def user_tab_claim(client, browsers):
     client.js(f'let userTab = await cua.getTab({{mention: {json.dumps(mention(tab["title"]))}}});')
 
 
-def cli_setup_contract(release):
-    """Exercise the external Chrome installer boundary without touching a browser."""
-    sys.path.insert(0, str(release))
-    from lcu.browser import install, main as browser_main
-
-    with tempfile.TemporaryDirectory(prefix='lcu-browser-cli-') as temporary:
-        work = Path(temporary)
-        root = work / 'release'
-        app = work / 'installed-app'
-        plugin = app / 'resources/plugins/openai-bundled/plugins/chrome'
-        installer = plugin / 'scripts/installManifest.mjs'
-        installer.parent.mkdir(parents=True)
-        installer.write_text('original installer fixture')
-        original_host = plugin / 'extension-host/linux/arm64/extension-host'
-        original_host.parent.mkdir(parents=True)
-        original_host.write_text('original host fixture')
-        root.mkdir()
-        (root / 'app').symlink_to(app, target_is_directory=True)
-        (root / 'lcu').mkdir()
-        shutil.copy2(Path(__file__).resolve().parents[1] / 'lcu/native_host.py',
-                     root / 'lcu/native_host.py')
-        data = work / 'user-data'
-        runtime_env = {'HOME': str(work), 'XDG_CONFIG_HOME': str(work / 'config'),
-                       'NODE_REPL_NODE_PATH': '/pinned/node',
-                       'CUA_REPL_NODE_REPL_PATH': '/pinned/node_repl',
-                       'CODEX_CLI_PATH': '/pinned/codex'}
-        expected = data / 'lcu/browser' / hashlib.sha256(str(app.resolve()).encode()).hexdigest()[:16]
-        manifest = work / 'config/google-chrome/NativeMessagingHosts/com.openai.codexextension.json'
-        manifest.parent.mkdir(parents=True)
-
-        def original_install(command, **_kwargs):
-            manifest.write_text(json.dumps({'name': 'com.openai.codexextension',
-                'path': str(expected / 'chrome/extension-host/linux/arm64/extension-host'),
-                'allowed_origins': ['chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg/']}))
-            return subprocess.CompletedProcess(command, 0)
-
-        with patch.dict(os.environ, {'HOME': str(work), 'XDG_DATA_HOME': str(data),
-                                      'XDG_CONFIG_HOME': str(work / 'config')}, clear=False), \
-                patch('lcu.runtime.paths', return_value=(app, app / 'resources', None, {})), \
-                patch('lcu.runtime.environment', return_value=runtime_env), \
-                patch('lcu.browser.subprocess.run', side_effect=original_install) as run:
-            destination = install(root)
-            assert destination == expected
-            copied = destination / 'chrome/scripts/installManifest.mjs'
-            assert copied.read_text() == installer.read_text()
-            assert copied.stat().st_uid == os.getuid(), 'native-host copy must belong to this Linux account'
-            assert copied.is_file() and os.access(destination, os.W_OK)
-            assert not copied.samefile(installer), 'installer must run from a private copy, never the immutable app'
-            relay = destination / 'lcu-native-host'
-            assert (destination / 'lcu-native-host.py').read_bytes() == (root / 'lcu/native_host.py').read_bytes()
-            assert relay.read_text().startswith('#!/bin/sh\n') and shlex.quote(sys.executable) in relay.read_text()
-            assert os.access(relay, os.X_OK)
-            configured = json.loads(manifest.read_text())
-            assert configured['path'] == str(relay)
-            assert configured['allowed_origins'] == ['chrome-extension://hehggadaopoacecdllhhajmbjkdcmajg/']
-            run.assert_called_once()
-
-            copied.unlink()
-            try:
-                install(root)
-            except ValueError as error:
-                assert 'incomplete or corrupt' in str(error)
-            else:
-                raise AssertionError('corrupt private browser-host copy was accepted')
-
-            foreign = work / 'foreign'
-            foreign.mkdir()
-            (foreign / '.lcu-browser-host').write_text('/another/release\n')
-            try:
-                install(root, foreign)
-            except ValueError as error:
-                assert 'another installation' in str(error)
-            else:
-                raise AssertionError('foreign browser-host directory was accepted')
-
-        for removed_command in ('serve', 'protocol'):
-            stderr = io.StringIO()
-            try:
-                with contextlib.redirect_stderr(stderr):
-                    browser_main(root, [removed_command])
-            except SystemExit as error:
-                assert error.code == 2
-            else:
-                raise AssertionError(f'removed `{removed_command}` command was accepted')
-            message = stderr.getvalue()
-            assert 'were removed' in message and 'lcu browser install' in message, message
-
-    print('PASS: app-symlink Chrome plugin resolution, same-user private host copy, LCU relay manifest, corruption/foreign guards, and IAB migration errors')
-
-
 from differential_baseline import environment as upstream_environment
 
 
 def chrome(release, original):
-    cli_setup_contract(release)
+    # The setup side (private plugin copy, relay manifest, guards, removed subcommands) is covered by
+    # tests/node/browser.test.mjs; this drives the real browser through the installed release.
     base = dict(os.environ)
     base.pop('NODE_REPL_REQUEST_META', None)
     base.pop('CUA_REPL_ENABLED_SURFACES', None)
@@ -389,7 +292,4 @@ def chrome(release, original):
 
 
 if __name__ == '__main__':
-    if sys.argv[1:2] == ['--cli-setup-contract']:
-        cli_setup_contract(Path(__file__).resolve().parents[1])
-    else:
-        chrome(*map(Path, sys.argv[1:]))
+    chrome(*map(Path, sys.argv[1:]))

@@ -24,7 +24,8 @@ import uuid
 
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
-from mcp_client import Client, text
+from lcu_node import codex_cli  # noqa: E402
+from mcp_client import Client, text  # noqa: E402
 
 
 APP_ID = 'com.apple.TextEdit'
@@ -163,10 +164,8 @@ def wait_for_target(address: Path, session_id: str, turn_id: str,
 
 
 def environment(test_tmp: Path, app: Path, control_path: Path) -> dict[str, str]:
-    from lcu.app_layout import locate_codex_tools
-
     resources = app / 'Contents/Resources'
-    tools = locate_codex_tools(resources)
+    codex = codex_cli(resources)
     runtime = resources / 'cua_node'
     modules = runtime / 'lib/node_modules'
     plugins = resources / 'plugins'
@@ -189,7 +188,7 @@ def environment(test_tmp: Path, app: Path, control_path: Path) -> dict[str, str]
         'NODE_REPL_TRUSTED_CODE_PATHS': os.pathsep.join((str(codex_home), str(modules), str(plugins))),
         'NODE_REPL_DISABLE_ANALYTICS': '1',
         'BROWSER_USE_DISABLE_AMBIENT_NETWORK': '1',
-        'CODEX_CLI_PATH': str(tools.cli),
+        'CODEX_CLI_PATH': str(codex),
         'SKY_CUA_SERVICE_PATH': str(runtime / 'lib/node_modules/@oai/sky/Codex Computer Use.app'),
         'LCU_MAC_CONTROL_SOCKET': str(control_path),
     }
@@ -224,8 +223,7 @@ def main() -> None:
     guest_model = require_guest(args.expected_user)
     app = args.app.resolve(strict=True)
     release = args.release.resolve(strict=True)
-    sys.path.insert(0, str(release))
-    from lcu.app_layout import locate_codex_tools
+    os.environ['LCU_MODULE_ROOT'] = str(release)
 
     resources = app / 'Contents/Resources'
     runtime = resources / 'cua_node'

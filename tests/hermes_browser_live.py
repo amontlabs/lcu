@@ -29,8 +29,7 @@ from urllib.parse import urlsplit
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu.harness_setup import configure_hermes
+from lcu_node import call  # noqa: E402
 
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 ORIGIN = "http://127.0.0.1:8080"
@@ -135,7 +134,7 @@ def main():
                "HOME": str(home), "HERMES_HOME": str(hermes_home), "OPENAI_API_KEY": args.api_key,
                "TERM": "xterm-256color", "NO_COLOR": "1", "NO_PROXY": "localhost,127.0.0.1",
                "no_proxy": "localhost,127.0.0.1", "LCU_HERMES_LIFECYCLE_LOG": str(lifecycle_log)}
-        configure_hermes(home, command, node, release, scope="user", project=None, env=env)
+        call("harness_setup", "configureHermes", home, command, node, release, {"scope": "user", "env": env})
         instrument_cleanup(hermes_home / "plugins/lcu-cua/__init__.py", lifecycle_log)
         for key, value in (("model.provider", "custom"), ("model.default", args.model),
                            ("model.base_url", args.base_url.rstrip("/")),

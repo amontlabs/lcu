@@ -22,8 +22,7 @@ import tempfile
 import threading
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu import approval  # noqa: E402
+from lcu_node import call  # noqa: E402
 
 MCP_FIXTURE = ROOT / 'adapters/test/mcp-fixture.mjs'
 
@@ -42,8 +41,8 @@ def write_config(config, node, port, log, mode):
     # The keys setup registers for this mode.
     with tempfile.TemporaryDirectory() as scratch_dir:
         scratch = str(Path(scratch_dir).resolve())
-        policy = approval.codex_plan(mode, scratch, scope='user', project=scratch,
-                                     env={'HOME': scratch})['policy']
+        policy = call('approval', 'codexPlan', mode, scratch,
+                      {'scope': 'user', 'project': scratch, 'env': {'HOME': scratch}})['policy']
     lines += [f'{key} = {quote(value)}' for key, value in policy.items() if key != 'tools']
     for tool, entry in policy.get('tools', {}).items():
         lines += ['', f'[mcp_servers.lcu.tools.{tool}]']

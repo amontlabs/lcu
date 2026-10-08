@@ -29,8 +29,7 @@ from urllib.parse import urlsplit
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu.harness_setup import configure_omp
+from lcu_node import call  # noqa: E402
 
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 ORIGIN = "http://127.0.0.1:8080"
@@ -103,7 +102,7 @@ def main():
             "OPENAI_API_KEY": "local-fixture-proxy", "TERM": "xterm-256color", "NO_COLOR": "1",
             "NO_PROXY": "localhost,127.0.0.1", "no_proxy": "localhost,127.0.0.1",
         }
-        configure_omp(home, lcu_command, release, scope="user", project=None, env=env)
+        call("harness_setup", "configureOmp", home, lcu_command, release, {"scope": "user", "env": env})
         (profile / "config.yml").write_text("setupVersion: 2\nstartup:\n  quiet: true\n", encoding="utf-8")
         ended = root / "agent-ended.json"
         observer = root / "observer.ts"
