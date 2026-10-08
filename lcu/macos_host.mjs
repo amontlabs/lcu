@@ -12,6 +12,8 @@ const net = process.getBuiltinModule('node:net');
 const { tmpdir } = process.getBuiltinModule('node:os');
 const { basename, dirname, isAbsolute, join, sep } = process.getBuiltinModule('node:path');
 
+import { tryExclusiveOpen } from './lock.mjs';
+
 // Every system tool and turn-ended command this host starts, so stopping the host ends them too.
 const running = new Set();
 function track(child) {
@@ -250,10 +252,6 @@ export async function executablePath(pid, { run = boundedRun } = {}) {
 const sleepSeconds = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000).unref());
 const monotonicSeconds = () => performance.now() / 1000;
 
-// open(2) flag that takes flock(LOCK_EX) atomically with the open (macOS); with O_NONBLOCK it fails with EAGAIN
-// while another descriptor holds the lock.
-const O_EXLOCK = 0x20;
-
 /**
  * Exclusion between the LCU hosts of this account (one per MCP connection), held for the whole recovery
  * including the wait for the service to exit: an flock on a file in the account's private temporary directory,
@@ -276,16 +274,20 @@ export class PeerLock {
 
   async acquire() {
     if (!this.path || process.platform !== 'darwin') return this;
-    const { O_RDWR, O_CREAT, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
     const deadline = this.monotonic() + this.waitSeconds;
     for (;;) {
+      let descriptor;
       try {
-        this.descriptor = fs.openSync(this.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_EXLOCK | O_NONBLOCK, 0o600);
-      } catch (error) {
-        if (error.code !== 'EAGAIN' || this.monotonic() >= deadline) return this;
+        descriptor = tryExclusiveOpen(this.path);
+      } catch {
+        return this;
+      }
+      if (descriptor === null) {
+        if (this.monotonic() >= deadline) return this;
         await this.sleep(0.05);
         continue;
       }
+      this.descriptor = descriptor;
       this.acquired = true;
       this.previous = this.read();
       return this;

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
-import { acquire } from '../../lcu/lock.mjs';
+import { acquire, installLockPath } from '../../lcu/lock.mjs';
 import { SYSTEM_PACKAGES, checkedPrefix, deps, main, selectLinuxApp, selectRelease } from '../../scripts/install.mjs';
 import { REPO, linuxApp, override, seal, temporary, write } from './fixtures.mjs';
 
@@ -181,7 +181,7 @@ test('installs into one prefix wait for each other', { skip: !linux }, async (t)
   const base = temporary(t);
   const prefix = existing(base);
   const bundle = source(base);
-  const release = await acquire(join(prefix, '.lcu-install.lock'));
+  const release = await acquire(installLockPath(prefix));
   const script = `import { deps, selectRelease } from ${JSON.stringify(pathToFileURL(join(REPO, 'scripts/install.mjs')).href)};
 deps.validateRelease = () => {};
 await selectRelease(${JSON.stringify(prefix)}, ${JSON.stringify(ARCH)}, ${JSON.stringify(base)}, {}, '/node', { source: ${JSON.stringify(bundle)} });`;

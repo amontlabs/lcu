@@ -204,6 +204,18 @@ const same = (left, right) => (left === null || right === null ? left === right 
 export const change = (path, before, after) => ({ path, before, after: typeof after === 'string' ? Buffer.from(after) : after });
 export const json = (value) => `${JSON.stringify(value, null, 2)}\n`;
 
+/** JSON settings bytes as earlier releases read them: an empty file is `{}` and a UTF-8 byte order mark is ignored. */
+export const parseJson = (data) => (data?.length ? JSON.parse(data.toString('utf8').replace(/^\uFEFF/, '')) : {});
+
+/** `object[key]`, set to `fallback` when absent; a present value that is not an object (or array) is refused. */
+export function member(object, key, fallback, message) {
+  if (!Object.hasOwn(object, key)) object[key] = fallback;
+  const value = object[key];
+  const valid = Array.isArray(fallback) ? Array.isArray(value) : value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!valid) throw new Error(message);
+  return value;
+}
+
 /**
  * Compact JSON with `, ` and `: ` separators and non-ASCII escaped: the form of the record keys, package
  * identities and hook trust keys earlier releases stored, so existing records keep matching.
@@ -261,7 +273,7 @@ export function loadSetupState(home) {
   }
   // `approval` and `pending` were added after `chrome` and `audio`; an older file means "ask" and none pending.
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw malformed();
-  const pending = parsed.pending ?? [];
+  const pending = Object.hasOwn(parsed, 'pending') ? parsed.pending : [];
   const context = parsed.pending_context ?? null;
   const validContext = context === null || (typeof context === 'object' && !Array.isArray(context) &&
     ['user', 'project'].includes(context.scope) && ['discover', 'direct'].includes(context.session) &&
@@ -635,7 +647,7 @@ function registerPi(home, command, releaseRoot, { scope, project, env, cwd, setu
     `const config = JSON.parse(readFileSync(${JSON.stringify(selectedCommand)}, "utf8"));\n` +
     'export default pi => lcu(pi, {command: config.projects?.[realpathSync(process.cwd())] ?? config.user});\n';
   const previous = readFile(selectedCommand);
-  const config = previous ? JSON.parse(previous) : { projects: {} };
+  const config = previous?.length ? parseJson(previous) : { projects: {} };
   if (!config || typeof config !== 'object' || Array.isArray(config) || !config.projects || typeof config.projects !== 'object' || Array.isArray(config.projects)) {
     throw new Error(`Invalid LCU Pi command configuration: ${selectedCommand}`);
   }

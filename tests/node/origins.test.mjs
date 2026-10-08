@@ -256,7 +256,7 @@ test('concurrent forgets are serialized; a lock that stays held is reported', as
   await second;
   await origins.forgetIn(path, 'https://a.example', ['allowed']);
   assert.deepEqual(f.state('abc').allowed, []);
-  assert.equal(existsSync(join(f.sessions, origins.LOCK_NAME)), false);
+  assert.equal(existsSync(join(f.sessions, origins.LOCK_NAME)), true, 'the lock file stays, as earlier releases left it');
 });
 
 test('session ids, missing sessions and invalid origins are refused before any change', async (t) => {
