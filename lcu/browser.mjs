@@ -2,13 +2,14 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, chmodSync, constants, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
-  readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+  readlinkSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import * as capture from './capture.mjs';
+import { isDirectory, isFile, isLink, lstat, quoteAlways, real, within } from './fsutil.mjs';
 import { environment, paths } from './runtime.mjs';
 import { unshimmedEnv } from './sandbox_shim.mjs';
 import { say, warn } from './terminal.mjs';
@@ -41,12 +42,6 @@ export const host = {
   },
 };
 
-const lstat = (path) => { try { return lstatSync(path); } catch { return null; } };
-const isFile = (path) => { try { return statSync(path).isFile(); } catch { return false; } };
-const isDirectory = (path) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-const isLink = (path) => Boolean(lstat(path)?.isSymbolicLink());
-const real = (path) => { try { return realpathSync(path); } catch { return resolve(path); } };
-const within = (path, root) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 const readOrNull = (path) => { try { return readFileSync(path); } catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) return null; throw error; } };
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 
@@ -176,18 +171,16 @@ function recordedNode(root) {
   return process.execPath;
 }
 
-const shellQuote = (text) => `'${text.replaceAll("'", "'\"'\"'")}'`;
-
 /** The launcher Chrome runs: the recorded Node on the copied relay. It prints nothing to stdout (Chrome's frames). */
 export function posixWrapper(node, script) {
   return `#!/bin/sh
 # Written by \`lcu browser install\`. Chrome starts native hosts with a minimal PATH.
-node=${shellQuote(node)}
+node=${quoteAlways(node)}
 if [ ! -x "$node" ]; then
   echo 'LCU Chrome native-host relay failed: the ChatGPT app'"'"'s Node is missing; repair the app, then run lcu browser install.' >&2
   exit 127
 fi
-exec "$node" ${shellQuote(script)} "$@"
+exec "$node" ${quoteAlways(script)} "$@"
 `;
 }
 

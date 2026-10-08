@@ -3,14 +3,15 @@
 // modified: the release links to it and records its Node in `<release>/node-path`.
 import { spawnSync } from 'node:child_process';
 import {
-  closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync,
+  closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync,
   renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { isMain, run } from '../lcu/entry.mjs';
+import { isDirectory, isLink, isRegular, real, within } from '../lcu/fsutil.mjs';
 import { installLockPath, withLock } from '../lcu/lock.mjs';
 import { LINUX_APP_PATH, resolveInstalledLinuxApp, resolveInstalledMacApp } from '../lcu/platforms.mjs';
 import {
@@ -46,11 +47,6 @@ export const deps = {
   resolveMacApp: (app, options) => resolveInstalledMacApp(app, options),
 };
 
-const isDirectory = (path) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-const isRegular = (path) => { try { return lstatSync(path).isFile(); } catch { return false; } };
-const isLink = (path) => { try { return lstatSync(path).isSymbolicLink(); } catch { return false; } };
-const inside = (path, root) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
-const real = (path) => { try { return realpathSync(path); } catch { return resolve(path); } };
 const touch = (path) => closeSync(openSync(path, 'a'));
 const expandHome = (path) => (path === '~' || path?.startsWith('~/') ? homedir() + path.slice(1) : path);
 
@@ -84,7 +80,7 @@ export function runAs(command, owner, { quiet = false, env = {} } = {}) {
 export function checkedPrefix(path, source = deps.source) {
   if (typeof path !== 'string' || !isAbsolute(path)) throw new Error('The installation prefix must be absolute');
   const prefix = regularPath(path);
-  if (inside(real(prefix), real(source))) throw new Error('Choose an installation prefix outside the extracted release bundle.');
+  if (within(real(prefix), real(source))) throw new Error('Choose an installation prefix outside the extracted release bundle.');
   if (prefix.split(sep).filter(Boolean).length < 2 || prefix === '/usr/local') {
     throw new Error('Choose a dedicated absolute prefix, such as /opt/lcu.');
   }

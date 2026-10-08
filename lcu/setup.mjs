@@ -1,7 +1,7 @@
 // `lcu setup`: register LCU with agent harnesses, without requiring a running desktop.
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { accessSync, chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync,   realpathSync, renameSync, rmdirSync, rmSync, statSync, writeSync } from 'node:fs';
+import { accessSync, chmodSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,   realpathSync, renameSync, rmdirSync, rmSync, statSync, writeSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,6 +13,7 @@ import * as capture from './capture.mjs';
 import { installHooks, requireCliHookSupport, exportFiles } from './codex_hooks.mjs';
 import { install as installApprovalMod } from './claude_mod.mjs';
 import { install as hideHostOnlyTools } from './claude_visibility.mjs';
+import { isFile, lstat, shellQuote } from './fsutil.mjs';
 import { configureHermes, configureOmp } from './harness_setup.mjs';
 import { withLock } from './lock.mjs';
 import { ask, say, warn } from './terminal.mjs';
@@ -46,7 +47,6 @@ export const NEEDS_BINARY = ['pi', 'omp', 'hermes'];
 const USER_ONLY_AGENTS = ['omp', 'hermes'];
 
 // Shell and Windows command-line quoting for the commands LCU prints and registers.
-export const shellQuote = (arg) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", "'\"'\"'")}'`);
 export const shellJoin = (args) => args.map(shellQuote).join(' ');
 export function windowsCommandLine(args) {
   return args.map((arg) => {
@@ -125,8 +125,6 @@ export function checked(label, command, args, options) {
 
 // Files ----------------------------------------------------------------------------------------------
 
-const lstat = (path) => { try { return lstatSync(path); } catch { return null; } };
-const isFile = (path) => { try { return statSync(path).isFile(); } catch { return false; } };
 
 /** The absolute form of `path`; refuses parent traversal, control characters and symlinks anywhere on it. */
 export function regularPath(path) {

@@ -5,11 +5,11 @@ import { basename, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 import { withAppServer } from './app_server.mjs';
-import { applyChanges, change, member, readFile, regularPath, seams, shellQuote, spacedJson, windowsCommandLine } from './setup.mjs';
+import { readJson, shellQuote } from './fsutil.mjs';
+import { applyChanges, change, member, readFile, regularPath, seams, spacedJson, windowsCommandLine } from './setup.mjs';
 import { parse as parseToml } from './toml.mjs';
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 const decode = (data) => new TextDecoder('utf-8', { fatal: true }).decode(data ?? Buffer.alloc(0));
 
 export const originalPlugin = (hostRoot) => join(hostRoot, 'plugins/unified-computer-use');

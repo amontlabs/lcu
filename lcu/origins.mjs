@@ -11,6 +11,7 @@ import { isIPv6 } from 'node:net';
 import { basename, dirname, join, posix, win32 } from 'node:path';
 import { isDeepStrictEqual, parseArgs } from 'node:util';
 
+import { isFile } from './fsutil.mjs';
 import { acquire } from './lock.mjs';
 import { defaultCodexHome } from './runtime.mjs';
 import { say, warn } from './terminal.mjs';
@@ -86,7 +87,6 @@ export function checkSessionId(value) {
   return value;
 }
 
-const isFile = (path) => { try { return statSync(path).isFile(); } catch { return false; } };
 
 /** `[[session id, path]]` of the saved session files; only `session` when it is given. */
 export function sessionFiles(directory, session) {

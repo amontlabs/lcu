@@ -1,13 +1,14 @@
 // The `lcu` entry: dispatch commands, and launch the selected application's original computer-use provider.
 // Builtins come from process.getBuiltinModule: an ESM import of a builtin builds its export facade, which
 // costs milliseconds on every launch; child_process, crypto and tty are loaded only where they are used.
-const { accessSync, constants, readFileSync, readSync, realpathSync, statSync, writeSync } = process.getBuiltinModule('node:fs');
+const { accessSync, constants, readFileSync, readSync, realpathSync, writeSync } = process.getBuiltinModule('node:fs');
 const { userInfo } = process.getBuiltinModule('node:os');
 const { basename, dirname, isAbsolute, join, posix, resolve, win32 } = process.getBuiltinModule('node:path');
 const { fileURLToPath, pathToFileURL } = process.getBuiltinModule('node:url');
 
 import { locateCodexTools } from './app_layout.mjs';
 import { isMain, run } from './entry.mjs';
+import { isFile, readJson, real } from './fsutil.mjs';
 import { MAC_SOCKET_ENV, macSocketPath, resolveInstalledLinuxApp, resolveInstalledMacApp } from './platforms.mjs';
 import { configuration as shimConfiguration, CONFIG_ENV as SHIM_CONFIG_ENV, FAULT_ENV as SHIM_FAULT_ENV, SKY_SERVICE } from './sandbox_shim.mjs';
 import { nativeInput } from './tested.mjs';
@@ -18,9 +19,6 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const HELP = readFileSync(join(HERE, 'usage.txt'), 'utf8');
 export const USAGE = HELP.split('\n\n')[0];
 
-const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
-const isFile = (path) => { try { return statSync(path).isFile(); } catch { return false; } };
-const real = (path) => { try { return realpathSync(path); } catch { return resolve(path); } };
 const surfaces = (env) => new Set((env.CUA_REPL_ENABLED_SURFACES ?? '').split(',').map((surface) => surface.trim()));
 const unique = (values) => [...new Set(values)];
 

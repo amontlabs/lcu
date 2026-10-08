@@ -1,9 +1,10 @@
 // Validate an official Windows Store package and its intact private copy.
 // Builtins come from process.getBuiltinModule: an ESM import of a builtin builds its export facade, which
 // costs milliseconds on every launch; child_process, crypto and tty are loaded only where they are used.
-const { closeSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } = process.getBuiltinModule('node:fs');
+const { closeSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync} = process.getBuiltinModule('node:fs');
 const { dirname, join, relative, sep } = process.getBuiltinModule('node:path');
 const createHash = (algorithm) => process.getBuiltinModule('node:crypto').createHash(algorithm);
+import { isDirectory, isFile, within } from './fsutil.mjs';
 
 export const PACKAGE_NAME = 'OpenAI.Codex';
 export const PACKAGE_PUBLISHER = 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B';
@@ -27,9 +28,6 @@ export const WINDOWS_REQUIRED_FILES = [
   'app/resources/plugins/openai-bundled/plugins/unified-computer-use/.mcp.json',
 ];
 
-const isFile = (path) => { try { return statSync(path).isFile(); } catch { return false; } };
-const isDirectory = (path) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-const within = (path, root) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 
 /** A symbolic link or (on Windows, where Node reports them as links) a junction. */
 export function isRedirected(path) {

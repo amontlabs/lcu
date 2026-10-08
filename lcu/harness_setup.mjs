@@ -1,8 +1,9 @@
 // Local harness packages for Oh My Pi and Hermes; host configuration remains with their native installers.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
+import { real } from './fsutil.mjs';
 import { checked, json, regularPath, seams, spacedJson } from './setup.mjs';
 
 const MARKER = '.lcu-generated.json';
@@ -57,7 +58,7 @@ export function configureOmp(home, command, release, { scope, project, env }) {
   if (!existsSync(adapter)) throw new Error(`LCU Pi/OMP adapter missing: ${adapter}`);
   // Separate package trees prevent profile setup from changing another registration's selected runtime command
   // or Chrome opt-in. The name derives from the identity as earlier releases wrote it, so it stays the same.
-  const identity = [scope, project ? realpath(project) : '', ...['OMP_PROFILE', 'PI_PROFILE', 'PI_CODING_AGENT_DIR'].map((key) => env[key] ?? '')];
+  const identity = [scope, project ? real(project) : '', ...['OMP_PROFILE', 'PI_PROFILE', 'PI_CODING_AGENT_DIR'].map((key) => env[key] ?? '')];
   const suffix = createHash('sha256').update(spacedJson(identity)).digest('hex').slice(0, 16);
   const data = join(home, process.platform === 'win32' ? 'AppData/Local/LCU' : '.local/share/lcu');
   const destination = join(data, 'omp', `${scope}-${suffix}`);
@@ -94,4 +95,3 @@ export function configureHermes(home, command, node, release, { scope, env }) {
     () => checked('installer', executable, ['plugins', 'enable', 'lcu-cua'], { cwd: home, env: { ...env, HERMES_HOME: root }, timeout: 120_000 }));
 }
 
-const realpath = (path) => { try { return realpathSync(path); } catch { return resolve(path); } };

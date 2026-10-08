@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
+import { isDirectory } from './fsutil.mjs';
 import { plistStrings } from './platforms.mjs';
 import { say, warn } from './terminal.mjs';
 
@@ -30,7 +31,6 @@ const WRITE_ATTEMPTS = 8;
 export class AppsError extends Error {}
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-const isDirectory = (path) => { try { return statSync(path).isDirectory(); } catch { return false; } };
 const readOrNull = (path) => { try { return readFileSync(path); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
 
 export const storePath = (home = homedir()) => join(home, STORE);

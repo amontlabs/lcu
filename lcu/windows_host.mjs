@@ -6,11 +6,12 @@
 // declarations it needs are copied verbatim into one generated module.
 // Builtins come from process.getBuiltinModule, like the rest of the launch path.
 const { spawn, spawnSync } = process.getBuiltinModule('node:child_process');
-const { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } = process.getBuiltinModule('node:fs');
+const { lstatSync, mkdirSync, readFileSync, writeFileSync } = process.getBuiltinModule('node:fs');
 const { dirname, join, posix } = process.getBuiltinModule('node:path');
 const { fileURLToPath } = process.getBuiltinModule('node:url');
 
 import { listAsarMembers, readAsarMembers } from './asar.mjs';
+import { isFile } from './fsutil.mjs';
 import { component } from './windows.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -22,7 +23,6 @@ const MAX_CHUNKS = 400;
 const NODE_MEMBER = 'app/resources/cua_node/bin/node.exe';
 
 const unavailable = (detail) => new Error(`Required Windows host layout is unavailable: ${detail}`);
-const isFile = (path) => { try { return statSync(path).isFile(); } catch { return false; } };
 
 /** Run the structural analyzer on the original Node with a JSON request. */
 export function analyze(node, request) {

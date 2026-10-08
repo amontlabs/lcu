@@ -1,17 +1,17 @@
 // `lcu status`: the installed LCU release, the selected app, and whether the pair is tested.
-const { existsSync, readFileSync } = process.getBuiltinModule('node:fs');
+const { existsSync} = process.getBuiltinModule('node:fs');
 const { homedir } = process.getBuiltinModule('node:os');
 const { join } = process.getBuiltinModule('node:path');
 const { parseArgs } = process.getBuiltinModule('node:util');
 
 import * as diagnosticLog from './diagnostic_log.mjs';
+import { readJson } from './fsutil.mjs';
 import { paths } from './runtime.mjs';
 import { loadSetupState, setupStatePath } from './setup.mjs';
 import { say, warn } from './terminal.mjs';
 import * as tested from './tested.mjs';
 import * as update from './update.mjs';
 
-const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 /** The signed-in account's remembered opt-ins, or null when none are saved or readable. */
 function savedSetup() {

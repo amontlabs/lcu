@@ -1,13 +1,14 @@
 // Validate an installed official application for the original CUA runtime.
 // Builtins come from process.getBuiltinModule: an ESM import of a builtin builds its export facade, which
 // costs milliseconds on every launch; child_process, crypto and tty are loaded only where they are used.
-const { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } = process.getBuiltinModule('node:fs');
+const { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync} = process.getBuiltinModule('node:fs');
 const os = process.getBuiltinModule('node:os');
 const { basename, dirname, join, relative, resolve } = process.getBuiltinModule('node:path');
 const childProcess = () => process.getBuiltinModule('node:child_process');
 
 import { locateCodexTools } from './app_layout.mjs';
 import { readAsarMembers } from './asar.mjs';
+import { isDirectory, isLink, isRegular, within } from './fsutil.mjs';
 
 export const MAC_BUNDLE_ID = 'com.openai.codex';
 export const MAC_HELPER_ID = 'com.openai.sky.CUAService';
@@ -47,11 +48,7 @@ export function macSocketPathProblem(env = process.env) {
     'whose home folder path is short enough (13 ASCII characters or fewer after /Users/).';
 }
 
-const isFile = (path) => { try { return lstatSync(path).isFile(); } catch { return false; } };
-const isDirectory = (path) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-const isLink = (path) => { try { return lstatSync(path).isSymbolicLink(); } catch { return false; } };
 const executable = (path) => { try { accessSync(path, constants.X_OK); return true; } catch { return false; } };
-const within = (path, root) => path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`);
 
 /** Top-level string values of an XML or binary property list. */
 export function plistStrings(data) {
@@ -128,7 +125,7 @@ function binaryPlistStrings(data) {
 
 function bundleIdentity(bundle, identifier) {
   const info = join(bundle, 'Contents/Info.plist');
-  if (!isFile(info)) throw new Error(`Application bundle metadata is missing: ${info}`);
+  if (!isRegular(info)) throw new Error(`Application bundle metadata is missing: ${info}`);
   const details = plistStrings(readFileSync(info));
   if (details.CFBundleIdentifier !== identifier) throw new Error(`Unexpected application bundle identifier: ${bundle}`);
   return details;
@@ -181,12 +178,12 @@ export function resolveInstalledMacApp(appPath, { arch } = {}) {
   const helper = join(contents, MAC_HELPER);
   bundleIdentity(helper, MAC_HELPER_ID);
   const manifest = join(runtime, 'manifest.json');
-  if (!isFile(manifest)) throw new Error('Installed application CUA manifest is missing');
+  if (!isRegular(manifest)) throw new Error('Installed application CUA manifest is missing');
   const runtimeVersion = runtimeManifest(manifest, 'darwin', architecture,
     'Installed application CUA runtime has an incompatible platform or architecture');
   for (const relativePath of MAC_REQUIRED_FILES) {
     const file = join(contents, relativePath);
-    if (!isFile(file)) throw new Error(`Required application file is missing or invalid: ${relativePath}`);
+    if (!isRegular(file)) throw new Error(`Required application file is missing or invalid: ${relativePath}`);
     if (MAC_EXECUTABLES.has(relativePath) && !executable(file)) {
       throw new Error(`Installed application executable is not executable: ${relativePath}`);
     }
@@ -424,7 +421,7 @@ export function resolveInstalledLinuxApp(appPath, { arch, trustedUids = [], acco
   const resources = join(app, 'resources');
   const runtime = join(resources, 'cua_node');
   const manifest = join(runtime, 'manifest.json');
-  if (!isFile(manifest)) throw new Error(`Application runtime manifest is missing: ${manifest}`);
+  if (!isRegular(manifest)) throw new Error(`Application runtime manifest is missing: ${manifest}`);
   const runtimeVersion = runtimeManifest(manifest, 'linux', arch,
     'Application runtime manifest has an unsupported platform, architecture, or version');
   const tools = locateCodexTools(resources);
@@ -435,7 +432,7 @@ export function resolveInstalledLinuxApp(appPath, { arch, trustedUids = [], acco
   const required = [...programs, join(runtime, 'lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs'),
     join(resources, 'app.asar'), join(plugins, 'chrome/.codex-plugin/plugin.json'),
     join(plugins, 'unified-computer-use/.mcp.json')];
-  const missing = required.filter((path) => !isFile(path));
+  const missing = required.filter((path) => !isRegular(path));
   const browserPlugin = join(plugins, 'browser');
   if (isLink(browserPlugin) || !isDirectory(browserPlugin)) missing.push(browserPlugin);
   if (missing.length) throw new Error(`Application payload is incomplete: ${missing.join(', ')}`);

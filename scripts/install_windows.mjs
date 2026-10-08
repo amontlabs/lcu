@@ -34,7 +34,7 @@ export const deps = {
 };
 
 const redirected = (path) => deps.isRedirected(path);
-const isDirectory = (path) => { try { return lstatSync(path).isDirectory(); } catch { return false; } };
+const isUnlinkedDirectory = (path) => { try { return lstatSync(path).isDirectory(); } catch { return false; } };
 const newId = (length) => crypto.randomUUID().replaceAll('-', '').slice(0, length);
 
 /** Copy a directory tree, refusing any link or junction in it (Node's fs adds the long-path prefix itself). */
@@ -57,7 +57,7 @@ function validatedCopy(app, selected) {
 /** True when any release under the prefix records this app generation (or a record cannot be read). */
 export function generationInUse(prefix, generation) {
   const releases = join(prefix, 'releases');
-  if (!isDirectory(releases)) return false;
+  if (!isUnlinkedDirectory(releases)) return false;
   for (const name of readdirSync(releases)) {
     const descriptor = join(releases, name, 'installation.json');
     if (!existsSync(descriptor)) continue;
@@ -133,7 +133,7 @@ export function checkedPrefix(path) {
   if (prefix === source || source.startsWith(prefix.endsWith(sep) ? prefix : prefix + sep)) {
     throw new Error('Install outside the extracted release archive.');
   }
-  if (isDirectory(prefix) && readdirSync(prefix).length && !existsSync(join(prefix, '.lcu-install'))) {
+  if (isUnlinkedDirectory(prefix) && readdirSync(prefix).length && !existsSync(join(prefix, '.lcu-install'))) {
     throw new Error('Installation directory is occupied by another application.');
   }
   if (redirected(join(prefix, '.lcu-install'))) throw new Error('Refusing a redirected Windows installation marker.');
@@ -202,7 +202,7 @@ async function publish(prefix, arch, selected, inventory, digest) {
     const stage = join(apps, `.${newId(8)}`);
     try {
       mkdirSync(stage);
-      if (redirected(selected.app) || !isDirectory(selected.app)) {
+      if (redirected(selected.app) || !isUnlinkedDirectory(selected.app)) {
         throw new Error(`Windows application directory is missing or redirected: ${selected.app}`);
       }
       process.stderr.write('LCU: Copying the original application into the private runtime; this can take several minutes...\n');

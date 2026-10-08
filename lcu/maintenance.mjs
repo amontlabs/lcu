@@ -5,10 +5,11 @@
 // Nothing removes old generations automatically. Pruning keeps the current release plus the most recent others
 // and every app generation a kept release still references, so it also reclaims Linux app copies left by earlier
 // versions. It refuses to touch anything that does not match the layout the installers create.
-import { lstatSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
+import { isDirectory, readJson, real } from './fsutil.mjs';
 import { installLockPath, withLock } from './lock.mjs';
 import { say, warn } from './terminal.mjs';
 
@@ -19,9 +20,6 @@ const LINUX_APP = /^.+-(?:arm64|x64)-[0-9a-f]{16}$/;
 const WINDOWS_APP = /^[0-9a-f]{64}$/;
 
 const lstat = (path) => { try { return lstatSync(path); } catch { return null; } };
-const isDirectory = (path) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-const real = (path) => { try { return realpathSync(path); } catch { return resolve(path); } };
-const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 export function human(size) {
   let value = size;

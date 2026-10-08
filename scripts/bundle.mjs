@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { within } from '../lcu/fsutil.mjs';
 
 export const VERSION = '0.10.0';
 
@@ -17,7 +18,6 @@ export function architecture(target = 'linux') {
   return arch;
 }
 
-const inside = (path, root) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 
 /** Every file and link under `root` except bundle.json: `{relative: {type, sha256, mode} | {type, target}}`. */
 export function inventory(rootPath, target = 'linux') {
@@ -37,7 +37,7 @@ export function inventory(rootPath, target = 'linux') {
         } catch {
           resolved = resolve(directory, link); // dangling: judge the link text alone
         }
-        if (isAbsolute(link) || !inside(resolved, root)) throw new Error(`Unsafe bundle symlink: ${key}`);
+        if (isAbsolute(link) || !within(resolved, root)) throw new Error(`Unsafe bundle symlink: ${key}`);
         files[key] = { type: 'symlink', target: link };
       } else if (info.isFile()) {
         const entry = { type: 'file', sha256: createHash('sha256').update(readFileSync(path)).digest('hex') };

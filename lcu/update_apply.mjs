@@ -12,6 +12,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join, posix, relative, resolve, sep, win32 } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 
+import { isRegular } from './fsutil.mjs';
 import { downloadTo, getText } from './update.mjs';
 
 export const DOWNLOAD = 'https://github.com/amontlabs/lcu/releases/download';
@@ -41,9 +42,8 @@ export const deps = {
   report: (text) => process.stderr.write(text),
 };
 
-const isRegular = (path) => { try { return lstatSync(path).isFile(); } catch { return false; } };
 
-function readJson(path) {
+function readJsonObject(path) {
   let data;
   try {
     data = JSON.parse(readFileSync(path, 'utf8'));
@@ -73,7 +73,7 @@ function layout(rootPath) {
   if (basename(dirname(root)) !== 'releases' || !isRegular(join(prefix, '.lcu-install'))) {
     throw new Error(`${root} is not inside an LCU installation prefix (<prefix>/releases/<name>); update refused.`);
   }
-  return [prefix, readJson(join(root, 'bundle.json')), readJson(join(root, 'installation.json'))];
+  return [prefix, readJsonObject(join(root, 'bundle.json')), readJsonObject(join(root, 'installation.json'))];
 }
 
 /** The new release's installer, run on this release's Node, reproducing the existing install (runtime only). */
