@@ -8,7 +8,8 @@ fail() { printf 'LCU installer: %s\n' "$*" >&2; exit 1; }
 self=$0
 while [ -L "$self" ]; do
   link=$(readlink -- "$self")
-  case $link in /*) self=$link ;; *) self=${self%/*}/$link ;; esac
+  case $self in */*) dir=${self%/*} ;; *) dir=. ;; esac
+  case $link in /*) self=$link ;; *) self=$dir/$link ;; esac
 done
 case $self in */*) source_dir=$(cd -P -- "${self%/*}/.." && pwd -P) ;; *) source_dir=$(cd -P .. && pwd -P) ;; esac
 
@@ -41,16 +42,28 @@ if ! node_dir=$(cd -P -- "$node_dir" 2>/dev/null && pwd -P) || [ ! -f "$node_dir
   fail "LCU requires the official ChatGPT desktop app, which includes Codex, to be installed first. LCU does not download or install the app. No app with its Node was found at $app. Install it from https://chatgpt.com/download/ and rerun LCU. If it is installed elsewhere, pass --existing-app PATH."
 fi
 node=$node_dir/node
+[ -L "$node" ] && fail "$node is a symbolic link; the app's Node must be a regular file."
 
-# Check the Node before running it. Linux: no account other than root or this one may replace it or a
-# directory above it (the installer then checks the whole app tree). macOS: the binary carries OpenAI's
-# signature (the installer then verifies the app bundle and its helper).
+# Check the Node before running it. Linux: it and every directory above it are owned by root or this account
+# and writable by no other account (a sticky directory such as /tmp only lets others add entries); the
+# installer then checks the whole app tree. macOS: the binary carries OpenAI's signature (the installer then
+# verifies the app bundle and its helper).
 # (A function, so `set --` leaves the installer's arguments alone.)
 trusted() {
   # shellcheck disable=SC2046
   set -- $(ls -ldn -- "$1")
-  case $3 in 0|"$uid") ;; *) fail "$path is owned by uid $3; the app must be owned by root or this account." ;; esac
-  case $1 in d????????t*|d????????T*|l*) ;; ????????w*) fail "$path is writable by every account." ;; esac
+  case $3 in
+    0|"$uid") ;;
+    *)
+      if [ "$uid" = 0 ]; then
+        fail "$path is owned by uid $3. Installing as root would run that account's copy of the app's Node as root, which would let that account run code as root. Run the installer as the account that owns the app (provision system packages first and pass --skip-system), or make the app owned by root."
+      fi
+      fail "$path is owned by uid $3; the app must be owned by root or this account." ;;
+  esac
+  case $1 in
+    d????????t*|d????????T*|l*) ;;
+    ?????w*|????????w*) fail "$path is writable by other accounts; make it writable only by its owner." ;;
+  esac
 }
 if [ "$system" = Linux ]; then
   uid=$(id -u)

@@ -89,8 +89,6 @@ The Python test drivers (`tests/*.py`) treat LCU as a black box: they run `lcu`,
 
 `tests/e2e/run.sh [CHECK...]` builds (or reuses, with `--old-archive`/`--new-archive`) the 0.9.7 release and this tree, runs each in fresh sandboxes with a disposable account and a fake app made of recorder scripts, and compares parsed data, never output text: the files `lcu setup` writes for every agent and scope (`setup`), exit codes of commands, usage errors and the installer (`exit`), the original runtime's launch command and environment (`launch`), an upgrade with 0.9.7's own `lcu update` and a rollback (`upgrade`), install, setup and launch with every Python blocked (`nopython`), and the startup budget (`startup`: each entry point's median at most 10% + 5 ms above 0.9.7's). Run it as root (or with passwordless sudo) for the disposable accounts; `--self-test` checks that the harness catches planted differences. The only expected rename it accepts is the Chrome relay, `lcu-native-host.py` → `lcu-native-host.mjs` (`EXPECTED_RENAMES` in `tests/e2e/e2e.py`).
 
-`lcu update` can be exercised offline. **Test only:** `LCU_UPDATE_SOURCE` set to a local directory (or `file://` URL) replaces GitHub: `latest` holds the latest tag, `<tag>/<archive>` and `<tag>/<archive>.sha256` the release files, and an optional `<tag>/notes.md` the release notes. Releases never set it.
-
 LCU 0.9.7's `lcu update` runs the new archive's `scripts/install.py` (`install_macos.py`, `install_windows.py` on Windows) with its own Python. Those three files stay in the archive as stubs without logic that hand over to `install.sh` (or `install.ps1`) with the same arguments.
 
 Narrow `node --test` to one file, such as `tests/node/runtime.test.mjs`, while iterating.

@@ -13,11 +13,10 @@ function setup(t, version = '0.9.1') {
   const base = temporary(t);
   const home = join(base, 'home');
   mkdirSync(home);
-  const saved = { HOME: process.env.HOME, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME, LCU_NO_UPDATE_CHECK: process.env.LCU_NO_UPDATE_CHECK,
-    LCU_UPDATE_SOURCE: process.env.LCU_UPDATE_SOURCE };
+  const proxies = ['HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy'];
+  const saved = Object.fromEntries(['HOME', 'XDG_CACHE_HOME', 'LCU_NO_UPDATE_CHECK', ...proxies].map((key) => [key, process.env[key]]));
   Object.assign(process.env, { HOME: home, XDG_CACHE_HOME: join(home, 'xdg') });
-  delete process.env.LCU_NO_UPDATE_CHECK;
-  delete process.env.LCU_UPDATE_SOURCE;
+  for (const key of ['LCU_NO_UPDATE_CHECK', ...proxies]) delete process.env[key];
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -66,23 +65,79 @@ test('the cache is per account', (t) => {
   assert.ok(update.cachePath().endsWith('update.json'));
 });
 
-test('the latest release and its severity come from the release source', async (t) => {
+/** Answer fetch with `respond(url, init)` (a Response, or a thrown error) and record curl calls. */
+function network(t, respond, curlOutput = '') {
+  const calls = { fetch: [], curl: [] };
+  override(t, update.deps, 'fetch', async (url, init) => { calls.fetch.push([url, init.method ?? 'GET']); return respond(url, init); });
+  override(t, update.deps, 'curl', (args) => {
+    calls.curl.push(args);
+    const output = args.indexOf('-o');
+    if (output >= 0 && args[output + 1] !== '/dev/null') writeFileSync(args[output + 1], curlOutput);
+    return { status: 0, stdout: Buffer.from(curlOutput), stderr: '' };
+  });
+  return calls;
+}
+const redirect = (location) => new Response(null, { status: 302, headers: location ? { location } : {} });
+
+test('the latest tag comes from the redirect of /releases/latest', async (t) => {
+  setup(t);
+  network(t, () => redirect('https://github.com/amontlabs/lcu/releases/tag/v0.9.2'));
+  assert.equal(await update.latestTag(), 'v0.9.2');
+  network(t, () => redirect('/amontlabs/lcu/releases/tag/0.9.3'));
+  assert.equal(await update.latestTag(), '0.9.3');
+  network(t, () => new Response(null, { status: 404 }));
+  await assert.rejects(update.latestTag(), /HTTP 404/);
+  network(t, () => new Response(null, { status: 200 }));
+  await assert.rejects(update.latestTag(), /Unexpected response/);
+  network(t, () => redirect(null));
+  await assert.rejects(update.latestTag(), /Unexpected response/);
+});
+
+test('a failed request falls back to curl, and a proxy goes to curl directly', async (t) => {
+  setup(t);
+  let calls = network(t, () => { throw new TypeError('fetch failed'); }, 'https://github.com/amontlabs/lcu/releases/tag/v0.9.4');
+  assert.equal(await update.latestTag(), 'v0.9.4');
+  assert.equal(calls.fetch.length, 1);
+  assert.deepEqual(calls.curl[0].slice(0, 6), ['-fsS', '--proto', '=https', '--tlsv1.2', '--max-time', '5']);
+  assert.ok(calls.curl[0].includes('%{redirect_url}'));
+  process.env.HTTPS_PROXY = 'http://proxy.invalid:3128';
+  calls = network(t, () => assert.fail('fetch ignores the proxy'), 'https://github.com/amontlabs/lcu/releases/tag/v0.9.5');
+  assert.equal(await update.latestTag(), 'v0.9.5');
+  process.env.NO_PROXY = 'example.com,.github.com';
+  assert.equal(update.proxied('https://github.com/x'), false);
+  assert.equal(update.proxied('https://raw.githubusercontent.com/x'), true);
+});
+
+test('a download behind a proxy goes to a file through curl and is hashed', async (t) => {
   const { base } = setup(t);
-  const source = join(base, 'source');
-  process.env.LCU_UPDATE_SOURCE = `file://${source}`;
-  write(join(source, 'latest'), 'v0.9.2\n');
-  write(join(source, 'v0.9.2/notes.md'), '# LCU 0.9.2\n\n<!-- lcu-severity: security -->\n');
+  process.env.https_proxy = 'http://proxy.invalid:3128';
+  const calls = network(t, () => assert.fail('fetch ignores the proxy'), 'archive bytes');
+  const file = join(base, 'archive.tar.gz');
+  const digest = await update.downloadTo('https://github.com/a/b.tar.gz', file);
+  assert.equal(readFileSync(file, 'utf8'), 'archive bytes');
+  assert.equal(digest, (await import('node:crypto')).createHash('sha256').update('archive bytes').digest('hex'));
+  assert.deepEqual(calls.curl[0].slice(-4), ['-L', '-o', file, 'https://github.com/a/b.tar.gz']);
+  delete process.env.https_proxy;
+  network(t, () => new Response('fetched bytes'));
+  await update.downloadTo('https://github.com/a/b.tar.gz', file);
+  assert.equal(readFileSync(file, 'utf8'), 'fetched bytes');
+  network(t, () => new Response('gone', { status: 404 }));
+  await assert.rejects(update.downloadTo('https://github.com/a/b.tar.gz', file), /HTTP 404/);
+});
+
+test('the release and its severity marker', async (t) => {
+  setup(t);
+  let notes = '# LCU 0.9.2\n\n<!-- lcu-severity: security -->\n';
+  network(t, (url, init) => (init.method === 'HEAD' ? redirect('/amontlabs/lcu/releases/tag/v0.9.2') : new Response(notes)));
   assert.deepEqual(await update.fetchLatest(), { ...INFO, severity: 'security' });
   for (const [text, expected] of [['Add `<!-- lcu-severity: security -->` to the notes.', 'normal'],
-    ['<!-- lcu-severity: breaking -->', 'breaking'], ['<!-- lcu-severity: weird -->', 'normal']]) {
-    writeFileSync(join(source, 'v0.9.2/notes.md'), text);
+    ['<!-- lcu-severity: breaking -->', 'breaking'], ['<!-- lcu-severity: weird -->', 'normal'], ['nothing', 'normal']]) {
+    notes = text;
     assert.equal(await update.severityOf('v0.9.2', '0.9.2'), expected);
   }
-  unlinkSync(join(source, 'v0.9.2/notes.md'));
+  network(t, () => new Response('', { status: 500 }));
   assert.equal(await update.severityOf('v0.9.2', '0.9.2'), 'normal');
-  writeFileSync(join(source, 'latest'), '0.9.3');
-  assert.equal((await update.fetchLatest()).tag, '0.9.3');
-  writeFileSync(join(source, 'latest'), 'nightly');
+  network(t, () => redirect('/amontlabs/lcu/releases/tag/nightly'));
   await assert.rejects(update.fetchLatest(), /Unrecognized release tag/);
 });
 

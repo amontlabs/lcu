@@ -60,8 +60,9 @@ class BuildPlatformTests(unittest.TestCase):
                 prefix = f'lcu-{VERSION}-darwin-arm64/'
                 self.assertIn(prefix + 'scripts/install_macos.py', names)
                 self.assertIn(prefix + 'scripts/install.mjs', names)
-                self.assertIn(prefix + 'scripts/install.py', names)
+                self.assertNotIn(prefix + 'scripts/install.py', names)
                 self.assertNotIn(prefix + 'scripts/install_windows.mjs', names)
+                self.assertFalse(any(name.startswith(prefix + 'lcu/') and name.endswith('.py') for name in names))
                 self.assertIn(prefix + 'lcu/platforms.mjs', names)
                 self.assertIn(prefix + 'lcu/macos_host.mjs', names)
                 self.assertIn(prefix + 'lcu/macos_sky_service.mjs', names)
@@ -108,6 +109,7 @@ class BuildPlatformTests(unittest.TestCase):
                 for name in ('lcu/runtime.mjs', 'lcu/usage.txt', 'lcu/update_apply.mjs', 'lcu/status.mjs',
                              'scripts/install.sh', 'scripts/install.mjs', 'scripts/bundle.mjs', 'scripts/install.py'):
                     self.assertIn(f'lcu-{VERSION}-linux-x64/{name}', names)
+                self.assertFalse(any(name.endswith('.py') and '/lcu/' in name for name in names))
                 for name in ('scripts/bundle.py', 'scripts/installed_app.py', 'scripts/install_macos.py'):
                     self.assertNotIn(f'lcu-{VERSION}-linux-x64/{name}', names)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/bin/lcu-owner-auth', names)

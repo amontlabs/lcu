@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, rmSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { acquire, installLockPath } from '../../lcu/lock.mjs';
-import { SYSTEM_PACKAGES, checkedPrefix, deps, main, selectLinuxApp, selectRelease } from '../../scripts/install.mjs';
+import { SYSTEM_PACKAGES, checkedPrefix, deps, installMac, main, runAs, selectLinuxApp, selectRelease } from '../../scripts/install.mjs';
 import { REPO, linuxApp, override, posixTests, seal, temporary, write } from './fixtures.mjs';
 
 const test = posixTests('install.sh and the Linux/macOS installer (POSIX accounts, modes and sh)');
@@ -57,6 +57,8 @@ test('a foreign, linked, relative or nested prefix is refused and left untouched
   assert.throws(() => checkedPrefix(join(base, 'bundle/nested'), join(base, 'bundle')), /outside the extracted release/);
   assert.throws(() => checkedPrefix('/usr/local'), /dedicated/);
   assert.equal(checkedPrefix(join(base, 'fresh/lcu')), join(base, 'fresh/lcu'));
+  mkdirSync(join(base, 'marked/.lcu-install'), { recursive: true });
+  assert.throws(() => checkedPrefix(join(base, 'marked')), /non-regular file/);
 });
 
 test('the system packages no longer include Python or XRes', () => {
@@ -235,4 +237,116 @@ test('macOS: direct sessions only, and a missing app is reported before the pref
     /chatgpt\.com\/download\/.*--existing-app PATH/);
   assert.equal(existsSync(prefix), false);
   assert.deepEqual(calls, []);
+});
+
+/** install.sh run on an app fixture whose Node records its arguments; `edit` changes the script copy first. */
+function installSh(t, { edit = (text) => text, prepare = () => {} } = {}) {
+  const base = temporary(t);
+  chmodSync(base, 0o755);
+  const app = linuxApp(join(base, 'chatgpt'), { arch: ARCH });
+  write(join(app, 'resources/cua_node/bin/node'), `#!/bin/sh\nprintf '%s\\n' "$@" > ${base}/argv\n`, 0o755);
+  write(join(base, 'archive/scripts/install.sh'), edit(readFileSync(join(REPO, 'scripts/install.sh'), 'utf8')), 0o755);
+  prepare({ base, app });
+  const result = spawnSync(join(base, 'archive/scripts/install.sh'), ['--existing-app', app, '--runtime-only'], { encoding: 'utf8' });
+  return { ...result, ran: existsSync(join(base, 'argv')), base, app };
+}
+
+test('install.sh runs only a Node that other accounts cannot replace', { skip: !linux }, (t) => {
+  assert.equal(installSh(t).ran, true);
+  for (const [label, prepare, message] of [
+    ['foreign owner', ({ app }) => chownSync(join(app, 'resources/cua_node/bin'), 4242, 4242), /owned by uid 4242/],
+    ['group writable', ({ app }) => chmodSync(join(app, 'resources/cua_node'), 0o775), /writable by other accounts/],
+    ['world writable', ({ app }) => chmodSync(join(app, 'resources/cua_node/bin/node'), 0o757), /writable by other accounts/],
+    ['linked Node', ({ base, app }) => {
+      write(join(base, 'real-node'), '#!/bin/sh\n', 0o755);
+      (rmSync(join(app, 'resources/cua_node/bin/node')), symlinkSync(join(base, 'real-node'), join(app, 'resources/cua_node/bin/node')));
+    }, /symbolic link/],
+  ]) {
+    if (label === 'foreign owner' && process.getuid() !== 0) continue;
+    const result = installSh(t, { prepare });
+    assert.equal(result.status, 1, label);
+    assert.equal(result.ran, false, label);
+    assert.match(result.stderr, message, label);
+  }
+  // A sticky directory (like /tmp) above the app is fine.
+  assert.equal(installSh(t, { prepare: ({ base }) => chmodSync(base, 0o1777) }).ran, true);
+});
+
+test('install.sh as root explains why another account’s app is refused', { skip: !linux || process.getuid() !== 0 }, (t) => {
+  const result = installSh(t, { prepare: ({ app }) => chownSync(app, 4242, 4242) });
+  assert.equal(result.ran, false);
+  assert.match(result.stderr, /owned by uid 4242\. Installing as root would run that account's copy.*Run the installer as the account that owns the app/);
+});
+
+test('install.sh on macOS runs only a Node signed by OpenAI', { skip: !linux }, (t) => {
+  // The script as macOS runs it, with a stand-in codesign that accepts or refuses.
+  const mac = (t2, status) => installSh(t2, {
+    edit: (text) => text.replace('system=$(uname -s)', 'system=Darwin').replaceAll('/usr/bin/codesign', '"$LCU_TEST_CODESIGN"'),
+    prepare: ({ base, app }) => {
+      write(join(app, 'Contents/Resources/cua_node/bin/node'), readFileSync(join(app, 'resources/cua_node/bin/node')), 0o755);
+      write(join(base, 'codesign'), `#!/bin/sh\necho "$@" > ${base}/codesign-args\nexit ${status}\n`, 0o755);
+      process.env.LCU_TEST_CODESIGN = join(base, 'codesign');
+    },
+  });
+  t.after(() => { delete process.env.LCU_TEST_CODESIGN; });
+  const accepted = mac(t, 0);
+  assert.equal(accepted.ran, true);
+  assert.match(readFileSync(join(accepted.base, 'codesign-args'), 'utf8'), /--verify --strict .*2DC432GLL2.*Contents\/Resources\/cua_node\/bin\/node/);
+  const refused = mac(t, 1);
+  assert.equal(refused.status, 1);
+  assert.equal(refused.ran, false);
+  assert.match(refused.stderr, /is not signed by OpenAI/);
+});
+
+test('macOS: a failed validation keeps the previous selection, and setup’s exit status is kept', async (t) => {
+  const base = temporary(t);
+  const bundle = join(base, 'bundle');
+  write(join(bundle, 'runtime.lock.json'), JSON.stringify({ platforms: { darwin: { architectures: { [ARCH]: {} } } } }));
+  seal(bundle, ARCH, 'darwin');
+  override(t, deps, 'source', bundle);
+  override(t, process, 'platform', 'darwin');
+  const app = join(base, 'ChatGPT.app');
+  mkdirSync(join(app, 'Contents/Resources/cua_node/bin'), { recursive: true });
+  override(t, deps, 'resolveMacApp', (location) => ({ app: location, runtime: join(location, 'Contents/Resources/cua_node'),
+    version: '26.1', runtimeVersion: 'runtime-mac' }));
+  const prefix = existing(base);
+  override(t, deps, 'validateRelease', () => { throw new Error('signature check failed'); });
+  await assert.rejects(installMac(prefix, app), /signature check failed/);
+  assert.equal(readFileSync(join(prefix, 'current/data'), 'utf8'), 'previous version');
+  assert.deepEqual(readdirSync(join(prefix, 'releases')), ['old']);
+  const calls = stubbed(t, { setupStatus: 3 });
+  const errors = [];
+  t.mock.method(process.stderr, 'write', (text) => { errors.push(text); return true; });
+  t.mock.method(process.stdout, 'write', () => true);
+  assert.equal(await main([...USER, '--prefix', prefix, '--existing-app', app, '--session', 'direct', '--agent', 'codex', '--yes']), 3);
+  const [name, , forwarded] = calls.at(-1);
+  assert.equal(name, 'setup');
+  assert.deepEqual(forwarded.slice(forwarded.indexOf('--session'), forwarded.indexOf('--session') + 2), ['--session', 'direct']);
+  assert.match(errors.join(''), /setup failed; see the errors above/);
+});
+
+test('validation commands run as the target account, with its groups and environment', { skip: !linux || process.getuid() !== 0 ||
+    spawnSync('useradd', ['--help']).error !== undefined }, (t) => {
+  const name = `lcutest${process.pid}`;
+  assert.equal(spawnSync('useradd', ['-M', '-d', '/tmp', '-s', '/bin/sh', '-U', '-G', 'adm', name]).status, 0);
+  t.after(() => spawnSync('userdel', [name]));
+  const [uid, gid] = ['-u', '-g'].map((flag) => Number(spawnSync('id', [flag, name], { encoding: 'utf8' }).stdout));
+  const base = temporary(t);
+  chmodSync(base, 0o777);
+  const out = join(base, 'out.json');
+  const home = join(base, 'home');
+  mkdirSync(home);
+  chownSync(home, uid, gid);
+  const umask = process.umask();
+  runAs([process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({ uid: process.getuid(),
+    euid: process.geteuid(), gid: process.getgid(), groups: process.getgroups(), umask: process.umask(), cwd: process.cwd(),
+    env: { HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME } }))`], { name, uid, gid, home });
+  const seen = JSON.parse(readFileSync(out, 'utf8'));
+  const adm = Number(spawnSync('getent', ['group', 'adm'], { encoding: 'utf8' }).stdout.split(':')[2]);
+  assert.deepEqual([seen.uid, seen.euid, seen.gid], [uid, uid, gid]);
+  assert.deepEqual(seen.groups.sort(), [gid, adm].sort());
+  assert.equal(seen.umask, umask);
+  assert.equal(seen.cwd, home);
+  assert.deepEqual(seen.env, { HOME: home, USER: name, LOGNAME: name });
+  assert.throws(() => runAs([process.execPath, '-e', 'process.exit(4)'], { name, uid, gid, home }), /exit status 4/);
 });

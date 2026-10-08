@@ -4,14 +4,15 @@
 // reuses the app the installation already points at. Agent registrations point at `<prefix>/current` (or
 // `<prefix>\lcu.cmd`), so a runtime-only reinstall keeps them working; setup is not re-run.
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { accessSync, chmodSync, constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
-import { basename, dirname, join, posix, win32 } from 'node:path';
+import { basename, dirname, join, posix, relative, resolve, sep, win32 } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { gunzipSync, inflateRawSync } from 'node:zlib';
 
-import { request, testSource } from './update.mjs';
+import { downloadTo, getText } from './update.mjs';
 
 export const DOWNLOAD = 'https://github.com/amontlabs/lcu/releases/download';
 const TIMEOUT = 60;
@@ -26,17 +27,21 @@ export const deps = {
       : spawnSync(command[0], command.slice(1), { stdio: 'inherit' });
     return result.status ?? 1;
   },
-  download: async (url) => {
-    const source = testSource();
-    if (source) return readFileSync(join(source, ...url.slice(DOWNLOAD.length + 1).split('/')));
-    return (await request(url, { limit: Infinity, timeout: TIMEOUT * 30 })).body;
-  },
+  /** Download `url` into `file`; returns its SHA-256. */
+  download: (url, file) => downloadTo(url, file, { timeout: TIMEOUT * 30 }),
+  /** A small text file (the checksum). */
+  text: (url) => getText(url, { timeout: TIMEOUT }),
+  /** The system tar (Windows: its own bsdtar, which also reads zip): `{status, stdout, stderr, error}`. */
+  tar: (args) => spawnSync(process.platform === 'win32' ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'tar',
+    args, { encoding: 'utf8', maxBuffer: 256 << 20, env: process.platform === 'win32' ? process.env : { ...process.env, PATH: '/usr/bin:/bin' } }),
   interactive: () => process.stdin.isTTY,
   writable: (path) => { try { accessSync(path, constants.W_OK); return true; } catch { return false; } },
   uid: () => process.getuid?.() ?? null,
   print: (text) => process.stdout.write(text),
   report: (text) => process.stderr.write(text),
 };
+
+const isRegular = (path) => { try { return lstatSync(path).isFile(); } catch { return false; } };
 
 function readJson(path) {
   let data;
@@ -65,7 +70,7 @@ function layout(rootPath) {
   }
   const root = realpathSync(rootPath);
   const prefix = dirname(dirname(root));
-  if (basename(dirname(root)) !== 'releases' || !existsSync(join(prefix, '.lcu-install'))) {
+  if (basename(dirname(root)) !== 'releases' || !isRegular(join(prefix, '.lcu-install'))) {
     throw new Error(`${root} is not inside an LCU installation prefix (<prefix>/releases/<name>); update refused.`);
   }
   return [prefix, readJson(join(root, 'bundle.json')), readJson(join(root, 'installation.json'))];
@@ -93,112 +98,134 @@ export function expectedSha256(text, name) {
   throw new Error(`Malformed checksum file for ${name}.`);
 }
 
-const unsafe = (name) => !name || posix.isAbsolute(name) || win32.isAbsolute(name) || /^[A-Za-z]:/.test(name) ||
-  name.split(/[\\/]/).includes('..');
+const absolute = (path) => posix.isAbsolute(path) || win32.isAbsolute(path) || /^[A-Za-z]:/.test(path);
+const unsafe = (name) => !name || absolute(name) || name.split(/[\\/]/).includes('..');
 
-/** Entries of a gzip-compressed tar: `{name, type: file|directory|symlink|hardlink, mode, data, link}`. */
-export function tarEntries(archive) {
-  const data = gunzipSync(archive);
-  const entries = [];
-  const text = (start, length) => data.toString('utf8', start, start + length).replace(/\0[\s\S]*$/, '');
-  const octal = (start, length) => parseInt(text(start, length).trim() || '0', 8);
-  let pax = {};
-  let longName = null;
-  let longLink = null;
-  for (let offset = 0; offset + 512 <= data.length;) {
-    if (data.subarray(offset, offset + 512).every((byte) => byte === 0)) break;
-    const size = octal(offset + 124, 12);
-    const flag = String.fromCharCode(data[offset + 156] || 48);
-    const body = data.subarray(offset + 512, offset + 512 + size);
-    const prefix = text(offset + 345, 155);
-    const header = { name: (prefix ? `${prefix}/` : '') + text(offset, 100), link: text(offset + 157, 100), mode: octal(offset + 100, 8) };
-    offset += 512 + Math.ceil(size / 512) * 512;
-    if (flag === 'x') {
-      for (const record of body.toString('utf8').matchAll(/\d+ ([^=]+)=([^\n]*)\n/g)) pax[record[1]] = record[2];
-      continue;
-    }
-    if (flag === 'g') continue;
-    if (flag === 'L' || flag === 'K') {
-      const value = body.toString('utf8').replace(/\0[\s\S]*$/, '');
-      if (flag === 'L') longName = value;
-      else longLink = value;
-      continue;
-    }
-    const type = { 0: 'file', 7: 'file', 5: 'directory', 2: 'symlink', 1: 'hardlink' }[flag];
-    const name = pax.path ?? longName ?? header.name;
-    if (!type) throw new Error(`Unsupported entry in archive: ${name}`);
-    entries.push({ name, type, mode: header.mode, data: type === 'file' ? body : null, link: pax.linkpath ?? longLink ?? header.link });
-    pax = {};
-    longName = longLink = null;
+function tar(args) {
+  const result = deps.tar(args);
+  if (result.error || result.status !== 0) {
+    throw new Error(`tar ${args[0]} failed: ${`${result.stderr ?? ''}`.trim() || result.error?.message || `exit status ${result.status}`}`);
   }
-  return entries;
+  return result.stdout;
 }
 
-/** Entries of a zip archive, as `tarEntries` gives them. */
-export function zipEntries(archive) {
-  const end = archive.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-  if (end < 0) throw new Error('The archive is not a zip file.');
-  const entries = [];
-  let at = archive.readUInt32LE(end + 16);
-  for (let count = archive.readUInt16LE(end + 10); count > 0; count -= 1) {
-    if (archive.readUInt32LE(at) !== 0x02014b50) throw new Error('The zip directory is corrupt.');
-    const method = archive.readUInt16LE(at + 10);
-    const compressed = archive.readUInt32LE(at + 20);
-    const nameLength = archive.readUInt16LE(at + 28);
-    const extra = archive.readUInt16LE(at + 30) + archive.readUInt16LE(at + 32);
-    const attributes = archive.readUInt32LE(at + 38);
-    const local = archive.readUInt32LE(at + 42);
-    const name = archive.toString('utf8', at + 46, at + 46 + nameLength);
-    at += 46 + nameLength + extra;
-    if (((attributes >>> 16) & 0o170000) === 0o120000) throw new Error(`Unsafe entry in archive: ${name}`);
-    if (name.endsWith('/')) {
-      entries.push({ name, type: 'directory', mode: 0o755 });
+/**
+ * True when `path` (relative to the extraction root) leaves it once the archive's own symlinks (`links`, name to
+ * target) are followed as the kernel would: a link to `.` followed by `..` goes up for real.
+ */
+export function escapes(path, links) {
+  const pending = path.split('/').filter(Boolean);
+  const stack = [];
+  for (let hops = 0; pending.length;) {
+    const part = pending.shift();
+    if (part === '.') continue;
+    if (part === '..') {
+      if (!stack.length) return true;
+      stack.pop();
       continue;
     }
-    const start = local + 30 + archive.readUInt16LE(local + 26) + archive.readUInt16LE(local + 28);
-    const raw = archive.subarray(start, start + compressed);
-    if (![0, 8].includes(method)) throw new Error(`Unsupported compression in archive: ${name}`);
-    entries.push({ name, type: 'file', mode: 0o644, data: method === 8 ? inflateRawSync(raw) : raw });
+    const target = links.get([...stack, part].join('/'));
+    if (target === undefined) {
+      stack.push(part);
+      continue;
+    }
+    if (++hops > 40 || absolute(target)) return true; // a loop, or an absolute target
+    pending.unshift(...target.split('/').filter(Boolean));
   }
-  return entries;
+  return false;
 }
 
-/** Write checked entries under `destination`; refuses paths and links that leave it, and special files. */
-export function extract(entries, destination) {
-  for (const entry of entries) {
-    if (unsafe(entry.name)) throw new Error(`Unsafe path in archive: ${entry.name}`);
-    if (entry.type === 'symlink' || entry.type === 'hardlink') {
-      const base = entry.type === 'symlink' ? posix.dirname(entry.name) : '';
-      const resolved = posix.normalize(posix.join(base, entry.link));
-      if (posix.isAbsolute(entry.link) || /^[A-Za-z]:/.test(entry.link) || resolved === '..' || resolved.startsWith('../')) {
-        throw new Error(`Archive link escapes the release: ${entry.name}`);
+/**
+ * The archive's members from the system tar's listings: `{name, type, target}` with type `file`, `directory`,
+ * `symlink` or `hardlink`. Anything else (devices, FIFOs, ...) is refused.
+ */
+export function members(archive) {
+  const names = tar(['-tf', archive]).split('\n').filter(Boolean);
+  const lines = tar(['-tvf', archive]).split('\n').filter(Boolean);
+  if (names.length !== lines.length) throw new Error('The archive listing is inconsistent; refusing to extract it.');
+  return names.map((listed, index) => {
+    const line = lines[index];
+    const name = listed.replace(/\/+$/, '');
+    const link = (marker) => {
+      const at = line.lastIndexOf(` ${listed}${marker}`);
+      return at < 0 ? null : line.slice(at + listed.length + 1 + marker.length);
+    };
+    const hard = link(' link to ');
+    if (hard !== null) return { name, type: 'hardlink', target: hard };
+    const type = { '-': 'file', d: 'directory', l: 'symlink' }[line[0]];
+    if (!type) throw new Error(`Unsupported entry in archive: ${listed}`);
+    if (type !== 'symlink') return { name, type };
+    const target = link(' -> ');
+    if (target === null) throw new Error(`Unreadable link in archive: ${listed}`);
+    return { name, type, target };
+  });
+}
+
+/** Refuse what Python's tarfile 'data' filter refused: paths and links that leave the release, odd entries. */
+export function check(entries, { links: allowLinks = true } = {}) {
+  const links = new Map(entries.filter((entry) => entry.type === 'symlink').map((entry) => [entry.name, entry.target]));
+  const files = new Set();
+  for (const { name, type, target } of entries) {
+    if (unsafe(name) || escapes(posix.dirname(name), links)) throw new Error(`Unsafe path in archive: ${name}`);
+    if (type === 'symlink' && (!allowLinks || absolute(target) ||
+        escapes(posix.join(posix.dirname(name), target), links))) {
+      throw new Error(`Archive link escapes the release: ${name}`);
+    }
+    if (type === 'hardlink' && (unsafe(target) || !files.has(target))) throw new Error(`Archive link escapes the release: ${name}`);
+    if (type === 'file') files.add(name);
+  }
+}
+
+/** After extraction: only files, directories and links that stay inside; modes as the 'data' filter left them. */
+function settle(root) {
+  const real = realpathSync(root);
+  const inside = (path) => path === real || path.startsWith(real + sep);
+  const walk = (directory) => {
+    for (const name of readdirSync(directory)) {
+      const path = join(directory, name);
+      const info = lstatSync(path);
+      if (info.isSymbolicLink()) {
+        let resolved;
+        try {
+          resolved = realpathSync(path);
+        } catch {
+          resolved = resolve(dirname(path), readlinkSync(path)); // dangling: judge the link text
+        }
+        if (!inside(resolved)) throw new Error(`Archive link escapes the release: ${relative(real, path)}`);
+      } else if (info.isDirectory()) {
+        chmodSync(path, (info.mode & 0o755) | 0o700);
+        walk(path);
+      } else if (info.isFile()) {
+        chmodSync(path, (info.mode & 0o755) | 0o600);
+      } else {
+        throw new Error(`Unsupported entry in archive: ${relative(real, path)}`);
       }
     }
-  }
-  for (const entry of entries) {
-    const path = join(destination, ...entry.name.split('/').filter(Boolean));
-    mkdirSync(entry.type === 'directory' ? path : dirname(path), { recursive: true });
-    if (entry.type === 'file') {
-      writeFileSync(path, entry.data);
-      if (process.platform !== 'win32') chmodSync(path, entry.mode & 0o755);
-    } else if (entry.type === 'symlink') {
-      symlinkSync(entry.link, path);
-    } else if (entry.type === 'hardlink') {
-      copyFileSync(join(destination, ...entry.link.split('/').filter(Boolean)), path);
-    }
-  }
+  };
+  walk(real);
+}
+
+/** Check the archive's listing, extract it with the system tar into the empty `destination`, then check the result. */
+export function extract(archive, destination) {
+  check(members(archive), { links: !archive.endsWith('.zip') });
+  tar(['-xf', archive, '-C', destination, '--no-same-owner', '--no-same-permissions']);
+  settle(destination);
 }
 
 /** Download, verify and extract the archive; returns the extracted release directory. */
 export async function download(info, name, directory) {
   const base = `${DOWNLOAD}/${info.tag}/${name}`;
   deps.report(`Downloading ${base}\n`);
-  const archive = await deps.download(base);
-  const expected = expectedSha256((await deps.download(`${base}.sha256`)).toString('utf8'), name);
-  if (createHash('sha256').update(archive).digest('hex') !== expected) throw new Error(`Checksum mismatch for ${name}; refusing to install it.`);
+  const archive = join(directory, name);
+  const actual = await deps.download(base, archive);
+  const expected = expectedSha256(await deps.text(`${base}.sha256`), name);
+  if (actual !== expected) {
+    rmSync(archive, { force: true });
+    throw new Error(`Checksum mismatch for ${name}; refusing to install it.`);
+  }
   const extracted = join(directory, 'extract');
   mkdirSync(extracted);
-  extract(name.endsWith('.zip') ? zipEntries(archive) : tarEntries(archive), extracted);
+  extract(archive, extracted);
   const source = join(extracted, name.replace(/\.(zip|tar\.gz)$/, ''));
   if (!existsSync(join(source, 'bundle.json'))) throw new Error('The archive does not contain an LCU release bundle.');
   return source;
