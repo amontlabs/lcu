@@ -13,7 +13,7 @@ import * as capture from './capture.mjs';
 import { installHooks, requireCliHookSupport, exportFiles } from './codex_hooks.mjs';
 import { install as installApprovalMod } from './claude_mod.mjs';
 import { install as hideHostOnlyTools } from './claude_visibility.mjs';
-import { accountHome, isFile, lstat, shellQuote } from './fsutil.mjs';
+import { accountHome, isFile, lstat, real, shellQuote } from './fsutil.mjs';
 import { configureHermes, configureOmp } from './harness_setup.mjs';
 import { withLock } from './lock.mjs';
 import { ask, say, warn } from './terminal.mjs';
@@ -1061,7 +1061,7 @@ async function setup(args, account, home, names, register) {
   const outcome = await setupLock(home, () => registerLocked(args, account, home, names, missing, register,
     { releaseRoot, desktopCommand, directRuntime, toolsRoot, setupCommand, setupEnvironment }));
   if (outcome === 'cancelled') return 0;
-  return finish(args, outcome, { desktopCommand, directRuntime, setupCommand });
+  return finish(args, outcome, { desktopCommand, directRuntime, setupCommand, home });
 }
 
 async function registerLocked(args, account, home, names, missing, register, paths) {
@@ -1169,11 +1169,18 @@ async function registerLocked(args, account, home, names, missing, register, pat
   return { chrome, audio };
 }
 
-async function finish(args, { chrome, audio }, { desktopCommand, directRuntime, setupCommand }) {
+async function finish(args, { chrome, audio }, { desktopCommand, directRuntime, setupCommand, home }) {
   say('Configuration prepared. Restart/reconnect the selected agent, then ask it to use LCU to inspect the desktop.');
   if (process.platform === 'darwin') {
-    const problem = (await import('./platforms.mjs')).macSocketPathProblem();
+    const { MAC_SOCKET_ENV, macSocketPathProblem } = await import('./platforms.mjs');
+    const problem = macSocketPathProblem();
     if (problem) say(`Warning: ${problem}`);
+    const accountHome = userInfo().homedir;
+    if (!args.export && !(MAC_SOCKET_ENV in process.env) && real(home) !== real(accountHome)) {
+      say(`Warning: setup configured the agents in ${home}, not in this account's home folder ${accountHome}. ` +
+        'The original Computer Use client finds the ChatGPT helper from HOME, so an agent started with this HOME ' +
+        'cannot reach it (\'native pipe startup failed\') unless ' + `${MAC_SOCKET_ENV} names the helper's socket.`);
+    }
   }
   if (chrome) {
     const status = seams.run(directRuntime[0], [...directRuntime.slice(1), 'browser', 'status'], { timeout: 20_000 });

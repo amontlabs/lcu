@@ -541,6 +541,16 @@ test('a too-long macOS socket path is a warning at the end of setup', async (t) 
   const { code, out } = await f.main('--agent', 'codex');
   assert.equal(code, 0);
   assert.ok(out.indexOf('Warning: Computer Use cannot start for this macOS account') > out.indexOf('Configuration prepared.'));
+  assert.doesNotMatch(out, /not in this account's home folder/);
+});
+
+test('macOS setup into a home other than the account home warns that the helper is out of reach', async (t) => {
+  const f = fixture(t);
+  override(t, process, 'platform', 'darwin');
+  const { code, out } = await f.main('--agent', 'codex');
+  assert.equal(code, 0);
+  assert.match(out, new RegExp(`Warning: setup configured the agents in ${f.home}, not in this account's home folder`));
+  assert.match(out, /SKY_CUA_SERVICE_NATIVE_PIPE_PATH names the helper's socket/);
 });
 
 test('Windows setup configures only the signed-in account, in a direct session, without export', (t) => {
