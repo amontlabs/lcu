@@ -135,14 +135,15 @@ export function approvalApp(params) {
 
 /**
  * Shared by every adapter: a decline response for an approval of an agent-hosting app,
- * answered before the host or user is asked; undefined for any other request.
+ * answered before the host or user is asked; undefined for any other request. `report` receives
+ * the explanation (stderr by default; the shared client, which runs inside a TUI, passes a no-op).
  */
-export function declineAgentHostApp(params, options = {}) {
+export function declineAgentHostApp(params, { report = message => console.error(message), ...options } = {}) {
   const app = approvalApp(params);
   if (!app) return undefined;
   const name = agentHostReason(app, options);
   if (!name) return undefined;
-  console.error(`LCU does not allow computer use to control the app hosting this agent (${name}); ` +
+  report(`LCU does not allow computer use to control the app hosting this agent (${name}); ` +
     `declined approval for ${app}`);
   return { action: 'decline' };
 }
