@@ -19,7 +19,7 @@ const CONFIG = 'lcu.json';
 const walk = (root) => readdirSync(root, { recursive: true }).map((name) => join(root, name)).sort().reverse();
 
 /** `{relative path: bytes}` of the mod shipped in a release. */
-export function sourceFiles(releaseRoot) {
+function sourceFiles(releaseRoot) {
   const root = join(releaseRoot, SOURCE);
   if (!existsSync(join(root, MANIFEST))) throw new Error(`LCU Claude mod missing: ${root}. Reinstall LCU into this release prefix, then rerun setup.`);
   const files = {};
@@ -32,7 +32,7 @@ export function sourceFiles(releaseRoot) {
 }
 
 /** The stable `lcu` path of an installation: through `current` when the release sits in a prefix. */
-export function lcuCommand(releaseRoot) {
+function lcuCommand(releaseRoot) {
   const root = basename(dirname(releaseRoot)) === 'releases' ? join(dirname(dirname(releaseRoot)), 'current') : releaseRoot;
   return join(root, 'bin', 'lcu');
 }

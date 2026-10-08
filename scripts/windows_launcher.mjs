@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** The release `current.json` selects, after checking it stays inside `<prefix>\releases`. */
-export function selectedRelease(prefixPath) {
+function selectedRelease(prefixPath) {
   const prefix = realpathSync(prefixPath);
   const name = JSON.parse(readFileSync(join(prefix, 'current.json'), 'utf8'))?.release;
   if (typeof name !== 'string' || !name || /[/\\\x00-\x1f]/.test(name) || name === '.' || name === '..') {

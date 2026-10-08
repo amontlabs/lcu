@@ -10,9 +10,9 @@ import { locateCodexTools } from './app_layout.mjs';
 import { readAsarMembers } from './asar.mjs';
 import { isDirectory, isLink, isRegular, within } from './fsutil.mjs';
 
-export const MAC_BUNDLE_ID = 'com.openai.codex';
-export const MAC_HELPER_ID = 'com.openai.sky.CUAService';
-export const OPENAI_TEAM_ID = '2DC432GLL2';
+const MAC_BUNDLE_ID = 'com.openai.codex';
+const MAC_HELPER_ID = 'com.openai.sky.CUAService';
+const OPENAI_TEAM_ID = '2DC432GLL2';
 export const MAC_HELPER = 'Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app';
 export const MAC_REQUIRED_FILES = [
   'Resources/cua_node/bin/node',
@@ -27,7 +27,7 @@ const MAC_EXECUTABLES = new Set(MAC_REQUIRED_FILES.slice(0, 2));
 // longer than the AF_UNIX sun_path limit. LCU cannot change that in the helper; it can only detect it.
 export const MAC_SOCKET_ENV = 'SKY_CUA_SERVICE_NATIVE_PIPE_PATH';
 export const MAC_SOCKET_SUFFIX = `Library/Group Containers/${OPENAI_TEAM_ID}.${MAC_HELPER_ID}/IPC/computeruse.sock`;
-export const MAC_SOCKET_MAX_BYTES = 103;
+const MAC_SOCKET_MAX_BYTES = 103;
 
 /** `{path, overridden}`: the helper's socket path; the override wins, else the account's real home (not $HOME). */
 export function macSocketPath(env = process.env) {

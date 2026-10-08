@@ -170,7 +170,7 @@ export function environment(root, resolved, { chrome = false, audio = false, pla
 
 const LINUX_INPUT_TOOLKITS = ['gtk4', 'qt-scroll'];
 
-export const linuxInputTranslationOff = (env) =>
+const linuxInputTranslationOff = (env) =>
   ['off', '0', 'false', 'no'].includes((env.LCU_LINUX_INPUT_TRANSLATION ?? '').trim().toLowerCase());
 
 /**
@@ -279,7 +279,7 @@ export function leaveUnusableWorkingDirectory() {
 }
 
 /** Answer a legacy-version probe with an error, reading byte by byte so nothing past its line is consumed. */
-export function replyToServerDiscover(input = 0, output = 1) {
+function replyToServerDiscover(input = 0, output = 1) {
   const raw = [];
   const byte = Buffer.alloc(1);
   while (raw.length <= 1024 * 1024) {
@@ -311,7 +311,7 @@ export function replyToServerDiscover(input = 0, output = 1) {
 }
 
 /** Add the native-cleanup Sky wrapper while keeping any other trusted services. */
-export function overrideTrustedService(env, wrapper, separator, platformName, { computerGated }) {
+function overrideTrustedService(env, wrapper, separator, platformName, { computerGated }) {
   const enabled = surfaces(env);
   const gate = computerGated ? enabled.has('computer') : true;
   let supplied;

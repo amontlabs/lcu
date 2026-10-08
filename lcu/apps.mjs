@@ -36,7 +36,7 @@ const readOrNull = (path) => { try { return readFileSync(path); } catch (error) 
 export const storePath = (home = homedir()) => join(home, STORE);
 
 /** `{raw, document, ids}` of the approvals file (raw null when absent). A damaged file is never overwritten. */
-export function readStore(path) {
+function readStore(path) {
   let raw;
   try {
     raw = readOrNull(path);
@@ -99,7 +99,7 @@ export async function modify(path, change, { attempts = WRITE_ATTEMPTS, wait = s
 
 // App lookup -----------------------------------------------------------------------------------------
 
-export const appDirectories = (home = homedir()) => ['/Applications', '/Applications/Utilities', '/System/Applications',
+const appDirectories = (home = homedir()) => ['/Applications', '/Applications/Utilities', '/System/Applications',
   '/System/Applications/Utilities', join(home, 'Applications')];
 
 /** `[bundle id, display name]` of an .app directory, or null when it is not a bundle. */
@@ -133,7 +133,7 @@ function best(candidates, directories) {
 }
 
 /** Where the app with this bundle id is installed, or null. */
-export function findById(identifier, directories) {
+function findById(identifier, directories) {
   let candidates = directories.flatMap((directory) => bundles(directory).map((name) => join(directory, name)))
     .filter((app) => bundleInfo(app)?.[0] === identifier);
   if (!candidates.length) {
@@ -189,7 +189,7 @@ export function resolveApp(query, { home } = {}) {
 }
 
 /** Like resolveApp, but a name or id that matches an approved entry wins, even if uninstalled. */
-export function resolveApproved(query, ids, { home } = {}) {
+function resolveApproved(query, ids, { home } = {}) {
   const directories = appDirectories(home);
   if (ids.includes(query)) return [query, displayName(query, directories) ?? query];
   const named = ids.filter((id) => (displayName(id, directories) ?? '').toLowerCase() === query.toLowerCase());

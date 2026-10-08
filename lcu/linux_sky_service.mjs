@@ -249,9 +249,9 @@ function callTimeoutMs(env) {
 // the hard cap (5 minutes, or the base if that is larger). A drag adds 20 ms per path point and 2 ms per
 // pixel of path length; a click adds its hold duration for every click; a key chord adds its hold duration.
 // Anything else keeps the base bound.
-export const DRAG_POINT_MS = 20;
-export const DRAG_PIXEL_MS = 2;
-export const BUDGET_CAP_MS = 300_000;
+const DRAG_POINT_MS = 20;
+const DRAG_PIXEL_MS = 2;
+const BUDGET_CAP_MS = 300_000;
 export function translatedBudgetMs(method, input, base) {
   let extra = 0;
   if (method === 'drag' && Array.isArray(input.path)) {

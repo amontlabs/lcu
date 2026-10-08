@@ -5,7 +5,7 @@
 // that must tell 1.0 from 1. Invalid input throws. Codex validates its own config, so only what LCU needs to
 // stay safe is checked here: syntax and duplicate keys.
 
-export class TomlDateTime {
+class TomlDateTime {
   constructor(text) { this.text = text; }
   toJSON() { return this.text; }
   toString() { return this.text; }

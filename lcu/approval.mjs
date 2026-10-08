@@ -14,7 +14,7 @@ import { selectedCodexHome } from './codex_hooks.mjs';
 import { applyChanges, atomicWrite, change, checked, json, member, parseJson, readFile, seams, setupStatePath, spacedJson } from './setup.mjs';
 import { parse as parseToml } from './toml.mjs';
 
-export const MODES = ['ask', 'auto'];
+const MODES = ['ask', 'auto'];
 // The tools the model sees. Approval entries name exactly these, never the whole server, so a tool LCU adds
 // later (especially one that requires the user) is not allowed by an earlier `auto`. The other tools of the
 // server are host-only.
@@ -22,16 +22,16 @@ export const MODEL_TOOLS = ['js', 'js_reset'];
 // Claude Code: exact permission rules. Host-only tools also stay denied (deny takes precedence over allow).
 export const CLAUDE_RULES = MODEL_TOOLS.map((tool) => `mcp__lcu__${tool}`);
 // Earlier versions added this server-wide rule; `auto` replaces it, `ask` still removes it.
-export const LEGACY_CLAUDE_RULE = 'mcp__lcu';
+const LEGACY_CLAUDE_RULE = 'mcp__lcu';
 // Codex: per-tool `approval_mode` under `[mcp_servers.lcu.tools.<tool>]`. Earlier versions wrote the
 // server-wide `default_tools_approval_mode = "approve"`.
-export const CODEX_KEY = 'default_tools_approval_mode';
-export const CODEX_VALUE = 'approve';
+const CODEX_KEY = 'default_tools_approval_mode';
+const CODEX_VALUE = 'approve';
 const NOTHING_TO_CONFIGURE = {
   pi: 'Pi has no permission system; nothing to configure',
   hermes: 'Hermes gates only plugin tools through a pre_tool_call hook, which LCU does not register; nothing to configure',
 };
-export const KEEP = 'keep'; // codexPlan: leave the stored record as it is
+const KEEP = 'keep'; // codexPlan: leave the stored record as it is
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const sortKeys = (value) => (Array.isArray(value) ? value.map(sortKeys)
@@ -68,7 +68,7 @@ function commit(home, key, value) {
   saveRecord(home, record);
 }
 
-export function codexConfigPath(home, scope, project, env) {
+function codexConfigPath(home, scope, project, env) {
   if (scope === 'project') return join(project, '.codex/config.toml');
   return join(selectedCodexHome({ ...env, HOME: env.HOME ?? String(home) }), 'config.toml');
 }
@@ -155,7 +155,7 @@ export function codexPlan(mode, home, { scope, project, env }) {
   return { policy, key, record: next, restored, migrated: legacy };
 }
 
-export const claudeSettingsPath = (home, project) => (project ? join(project, '.claude/settings.local.json') : join(home, '.claude/settings.json'));
+const claudeSettingsPath = (home, project) => (project ? join(project, '.claude/settings.local.json') : join(home, '.claude/settings.json'));
 
 function applyClaude(mode, home, project) {
   const path = claudeSettingsPath(home, project);

@@ -20,7 +20,7 @@ import { ask, say, warn } from './terminal.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const windows = () => process.platform === 'win32';
-export const APP_DOWNLOAD_URL = 'https://chatgpt.com/download/';
+const APP_DOWNLOAD_URL = 'https://chatgpt.com/download/';
 
 export function appPrerequisiteMessage(location, { alternateLocation = false } = {}) {
   let message = 'LCU requires the official ChatGPT desktop app, which includes Codex, to be installed first. ' +
@@ -42,7 +42,7 @@ export const CLIENTS = {
 export const ALIASES = { claude: 'claude-code', 'oh-my-pi': 'omp', 'hermes-agent': 'hermes' };
 // Harnesses whose native registration needs their own executable; Codex and Claude Code register through
 // add-mcp and their config files without the CLI installed.
-export const NEEDS_BINARY = ['pi', 'omp', 'hermes'];
+const NEEDS_BINARY = ['pi', 'omp', 'hermes'];
 // Native harness plugins are profile-scoped; project scope is unsupported.
 const USER_ONLY_AGENTS = ['omp', 'hermes'];
 
@@ -268,7 +268,7 @@ export function saveSetupState(home, { chrome, audio, approval = 'ask', pending 
 }
 
 /** PATH plus the user-level directories harness installers use, for a harness installed after login. */
-export function harnessSearchPath(home, path = process.env.PATH ?? '') {
+function harnessSearchPath(home, path = process.env.PATH ?? '') {
   const extra = ['.local/bin', '.bun/bin', '.npm-global/bin', '.cargo/bin'].map((name) => join(home, name));
   return [...new Set([...path.split(delimiter).filter(Boolean), ...extra])].join(delimiter);
 }
@@ -306,7 +306,7 @@ export function installerEnvironment(home, names, environ = process.env) {
 }
 
 /** `[node, skills, mcp]`: the bundled agent installers of a release. */
-export async function installerPaths(toolsRoot) {
+async function installerPaths(toolsRoot) {
   const node = windows() ? join((await import('./runtime.mjs')).paths(dirname(toolsRoot)).runtime, 'bin/node.exe')
     : join(toolsRoot, 'node/bin/node');
   const paths = [node, join(toolsRoot, 'node_modules/skills/bin/cli.mjs'), join(toolsRoot, 'node_modules/add-mcp/dist/index.js')];
@@ -375,7 +375,7 @@ try {
 } catch (error) { console.error(error.message); process.exitCode = 1; }
 `;
 
-export function preflightMcp(node, mcp, client, scope, cwd, env) {
+function preflightMcp(node, mcp, client, scope, cwd, env) {
   const result = seams.run(node, ['--input-type=module', '-e', MCP_PREFLIGHT, mcp, client.mcpAgent, scope], { cwd, env, timeout: 20_000 });
   if (result.error) throw new Error(`MCP configuration preflight could not run: ${result.error.message}`);
   if (result.status !== 0) throw new Error(result.stderr.trim() || 'MCP configuration preflight failed');
@@ -835,7 +835,7 @@ export function validate(args) {
   return { account, names };
 }
 
-export const agentScopes = (name) => (USER_ONLY_AGENTS.includes(name) ? 'user' : 'user, project');
+const agentScopes = (name) => (USER_ONLY_AGENTS.includes(name) ? 'user' : 'user, project');
 
 function validateAgentScope(names, scope) {
   if (scope === 'project' && names.some((name) => USER_ONLY_AGENTS.includes(name))) {

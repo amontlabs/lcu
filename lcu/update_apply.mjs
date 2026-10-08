@@ -15,7 +15,7 @@ import { createInterface } from 'node:readline/promises';
 import { isRegular } from './fsutil.mjs';
 import { downloadTo, getText } from './update.mjs';
 
-export const DOWNLOAD = 'https://github.com/amontlabs/lcu/releases/download';
+const DOWNLOAD = 'https://github.com/amontlabs/lcu/releases/download';
 const TIMEOUT = 60;
 
 /** What tests replace. */

@@ -17,7 +17,7 @@ import { defaultCodexHome } from './runtime.mjs';
 import { say, warn } from './terminal.mjs';
 import { parse as parseToml } from './toml.mjs';
 
-export const KINDS = ['allowed', 'denied'];
+const KINDS = ['allowed', 'denied'];
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/; // the original runtime's own rule for a session id
 const WRITE_ATTEMPTS = 5;
 export const LOCK_NAME = '.lcu-origins.lock'; // not a session file: no .toml suffix
@@ -30,7 +30,7 @@ const STRING = /"(?:[^"\\\n]|\\.)*"|'[^'\n]*'/g;
 /** A problem to show the user. */
 export class OriginsError extends Error {}
 /** A session file LCU can read but will not rewrite. */
-export class UnsupportedShape extends OriginsError {}
+class UnsupportedShape extends OriginsError {}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // A table: plain objects only, so a float or a date read from the file is a value, not a table.
@@ -78,7 +78,7 @@ export function codexHome(env = process.env, { windows = process.platform === 'w
   return normal.length > path.parse(normal).root.length ? normal.replace(/[\\/]+$/, '') : normal;
 }
 
-export const sessionsDirectory = (home) => join(home, 'browser', 'sessions');
+const sessionsDirectory = (home) => join(home, 'browser', 'sessions');
 
 export function checkSessionId(value) {
   if (!SESSION_ID.test(value) || value.endsWith('\n')) {
@@ -89,7 +89,7 @@ export function checkSessionId(value) {
 
 
 /** `[[session id, path]]` of the saved session files; only `session` when it is given. */
-export function sessionFiles(directory, session) {
+function sessionFiles(directory, session) {
   if (session !== undefined) {
     const path = join(directory, `${checkSessionId(session)}.toml`);
     if (!isFile(path)) throw new OriginsError(`no saved site decisions for session ${session} (${path} does not exist).`);
@@ -230,7 +230,7 @@ export function render(document, path = 'the file') {
 }
 
 /** The text to write for `document`, or UnsupportedShape when rewriting could lose something. */
-export function rewritableText(raw, document, path) {
+function rewritableText(raw, document, path) {
   const text = raw.toString('utf8');
   if (text.includes('"""') || text.includes("'''") || text.replace(STRING, '').includes('#')) {
     throw new UnsupportedShape(`${path} has comments or multi-line strings, which LCU cannot rewrite without losing them; leaving it untouched.`);

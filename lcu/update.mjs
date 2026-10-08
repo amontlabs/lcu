@@ -6,14 +6,14 @@ const { dirname, join } = process.getBuiltinModule('node:path');
 const { parseArgs } = process.getBuiltinModule('node:util');
 
 export const REPO = 'amontlabs/lcu';
-export const LATEST_URL = `https://github.com/${REPO}/releases/latest`;
-export const RELEASE_URL = `https://github.com/${REPO}/releases/tag/`;
+const LATEST_URL = `https://github.com/${REPO}/releases/latest`;
+const RELEASE_URL = `https://github.com/${REPO}/releases/tag/`;
 const notesUrl = (tag, version) => `https://raw.githubusercontent.com/${REPO}/${tag}/docs/releases/${version}.md`;
-export const INTERVAL = 600;
-export const RETRY = 3600;
-export const STAMP_TTL = 120;
+const INTERVAL = 600;
+const RETRY = 3600;
+const STAMP_TTL = 120;
 export const STAMP_SKEW = 2; // Windows file times can run ahead of the clock
-export const ANNOUNCE_TTL = 7 * 24 * 3600;
+const ANNOUNCE_TTL = 7 * 24 * 3600;
 export const ANNOUNCE_COOLDOWN = 24 * 3600;
 export const ANNOUNCE_ACCOUNT = '*';
 export const TIMEOUT = 5;
@@ -63,7 +63,7 @@ const compare = (left, right) => {
 };
 
 /** The release version, or null for a source checkout or unreadable bundle. */
-export function installedVersion(root) {
+function installedVersion(root) {
   try {
     const version = JSON.parse(readFileSync(join(root, 'bundle.json'), 'utf8')).version;
     return version ?? null;
@@ -107,7 +107,7 @@ function writeJson(path, data) {
 }
 
 /** Atomic write; failures are ignored (the cache is only a courtesy). */
-export function writeCache(latest, error) {
+function writeCache(latest, error) {
   try {
     writeJson(cachePath(), { checked_at: deps.now(), latest, error });
   } catch {
@@ -324,7 +324,7 @@ export function statusLine(root) {
 }
 
 /** session_id from the hook input JSON on stdin (the harness closes it), or null. */
-export function hookSessionId() {
+function hookSessionId() {
   try {
     const data = JSON.parse(deps.readStdin());
     const value = data && typeof data === 'object' && !Array.isArray(data) ? data.session_id : null;

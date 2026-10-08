@@ -153,7 +153,7 @@ export function selectRelease(prefix, arch, app, descriptor, node, { owner, targ
 }
 
 /** Linux: check the source and the app, then publish a release that links to it. */
-export function installLinux(prefixPath, { existingApp, owner } = {}) {
+function installLinux(prefixPath, { existingApp, owner } = {}) {
   const prefix = checkedPrefix(prefixPath);
   const arch = architecture();
   verify(deps.source, arch);

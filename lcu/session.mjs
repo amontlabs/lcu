@@ -6,7 +6,7 @@ const { delimiter, join } = process.getBuiltinModule('node:path');
 
 import { isMain, run } from './entry.mjs';
 
-export const GUI_KEYS = ['DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'XDG_SESSION_TYPE'];
+const GUI_KEYS = ['DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'XDG_SESSION_TYPE'];
 const USAGE = 'Usage: lcu-session --user ACCOUNT -- COMMAND [ARG...]\n' +
   'Run COMMAND in the one XFCE desktop session of ACCOUNT, which must be the calling account.';
 

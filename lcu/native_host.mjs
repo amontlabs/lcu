@@ -10,7 +10,7 @@ const { realpathSync, statSync } = process.getBuiltinModule('node:fs');
 const { dirname, join } = process.getBuiltinModule('node:path');
 const { fileURLToPath } = process.getBuiltinModule('node:url');
 
-export const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 
 /** Native-messaging payloads (4-byte little-endian length, then the body) from a byte stream. */
 export async function* readFrames(stream) {

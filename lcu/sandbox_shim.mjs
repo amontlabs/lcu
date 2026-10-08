@@ -151,10 +151,10 @@ export function parseTomlValue(text) {
  * node_repl first runs a short `/bin/sh` command in the sandbox to learn whether it works. A refused probe
  * would read as "no sandbox here" and leave the kernel unsandboxed, so any `/bin/sh` command passes through.
  */
-export const isAvailabilityProbe = (argv) => argv.includes('--') && argv[argv.indexOf('--') + 1] === '/bin/sh';
+const isAvailabilityProbe = (argv) => argv.includes('--') && argv[argv.indexOf('--') + 1] === '/bin/sh';
 
 /** `{profile, command}` for exactly the invocation node_repl makes. */
-export function parseSandbox(argv) {
+function parseSandbox(argv) {
   const head = SANDBOX_PREFIX.length;
   if (SANDBOX_PREFIX.some((part, index) => argv[index] !== part) || argv.length < head + 4 || argv[head] !== '-c' ||
       !argv[head + 1].startsWith(PROFILE_KEY) || argv[head + 2] !== '--') {
@@ -201,7 +201,7 @@ function servicePackage(runtime, specifier) {
 }
 
 /** null when `command` is the selected runtime's trusted worker hosting its Sky service, else the reason it is not. */
-export function identifySkyWorker(command, config, env, parentExe) {
+function identifySkyWorker(command, config, env, parentExe) {
   const { runtime, wrapper } = config;
   const nodeRepl = real(`${runtime}/bin/node_repl`);
   if (parentExe !== nodeRepl || !within(nodeRepl, real(runtime))) return "it was not started by the selected runtime's node_repl";

@@ -10,7 +10,7 @@ const { join } = process.getBuiltinModule('node:path');
 export const RECORD = 'tested-versions.json';
 // Toolkits whose window-targeted input a tested app version handles itself, so LCU's Linux input translation
 // (docs/STANDALONE-ADAPTATIONS.md) is not applied to them for that exact pair.
-export const NATIVE_INPUT_TOOLKITS = ['gtk4', 'qt-scroll'];
+const NATIVE_INPUT_TOOLKITS = ['gtk4', 'qt-scroll'];
 const FIELDS = ['platform', 'architecture', 'app_version', 'runtime', 'lcu_version'];
 
 const validEntry = (entry) => entry && typeof entry === 'object' && !Array.isArray(entry) &&
@@ -94,7 +94,7 @@ export function changedSinceInstall(descriptor, metadata) {
     'may be running a mix of old and new files: stop them, restart them, and rerun the LCU installer to update the record.';
 }
 
-export const assessRelease = async (root, descriptor, metadata) => assess(root, await observe(root, descriptor, metadata));
+const assessRelease = async (root, descriptor, metadata) => assess(root, await observe(root, descriptor, metadata));
 
 /** Plain-text lines for setup, install and doctor output; the last is a warning when untested. */
 export function statusLines(result) {

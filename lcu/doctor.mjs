@@ -141,7 +141,7 @@ function failureText(check) {
   return 'The original runtime did not complete this check.';
 }
 
-export function macInstructions(app) {
+function macInstructions(app) {
   const { accessibility, screen_capture: screen } = macPermissionTargets(app);
   say('macOS privacy status is not available to this CLI. The original Mac API requires',
     'its connected agent approval before it can inspect an app, so LCU will not inspect one here.',

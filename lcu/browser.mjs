@@ -67,7 +67,7 @@ export function pluginDigest(plugin) {
 const homeOf = (env, system) => (system === 'Windows' ? env.USERPROFILE || homedir() : env.HOME || homedir());
 
 /** The per-user native-host manifest locations the original installer writes. */
-export function manifestPaths(env, system) {
+function manifestPaths(env, system) {
   const home = homeOf(env, system);
   // macOS: the per-user destinations in the original plugin's installManifest.mjs; never system-wide ones.
   if (system === 'Darwin') return MACOS_NATIVE_HOST_DIRS.map((browser) => join(home, 'Library/Application Support', browser, 'NativeMessagingHosts', MANIFEST_NAME));

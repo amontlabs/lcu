@@ -12,7 +12,7 @@ import { parse as parseToml } from './toml.mjs';
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const decode = (data) => new TextDecoder('utf-8', { fatal: true }).decode(data ?? Buffer.alloc(0));
 
-export const originalPlugin = (hostRoot) => join(hostRoot, 'plugins/unified-computer-use');
+const originalPlugin = (hostRoot) => join(hostRoot, 'plugins/unified-computer-use');
 
 /** The original plugin's lifecycle hooks, addressed to LCU's server. */
 export function originalHooks(hostRoot) {
@@ -32,7 +32,7 @@ export function originalHooks(hostRoot) {
   return events;
 }
 
-export const NOTICE_EVENTS = ['SessionStart', 'UserPromptSubmit'];
+const NOTICE_EVENTS = ['SessionStart', 'UserPromptSubmit'];
 const NOTICE_SUFFIXES = Object.fromEntries(NOTICE_EVENTS.map((event) => [event, ` update --notice --hook ${event}`]));
 const NOTICE_MATCHER = 'startup|resume';
 

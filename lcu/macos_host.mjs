@@ -29,7 +29,7 @@ export const LSOF = '/usr/sbin/lsof';
 export const CODESIGN = '/usr/bin/codesign';
 // `ps` reports the start time in whole seconds and the file time has sub-second precision, so a change this
 // close to the start is never read as an update.
-export const STALE_MARGIN_SECONDS = 2;
+const STALE_MARGIN_SECONDS = 2;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** UTC epoch seconds from the five `ps lstart` fields, or null when malformed. */
@@ -91,7 +91,7 @@ export function bundleChangeTimes(executable, stat = fs.statSync) {
 }
 
 /** English month names and UTC times; UTF-8 so `ps` does not escape non-ASCII paths; no COLUMNS, which cuts paths. */
-export function toolEnvironment(env = process.env) {
+function toolEnvironment(env = process.env) {
   const result = { ...env, LC_TIME: 'C', LC_CTYPE: 'UTF-8', TZ: 'UTC' };
   delete result.LC_ALL;
   delete result.COLUMNS;
@@ -186,7 +186,7 @@ const LSOF_TIMEOUT_SECONDS = 3;
 // requester waits 15 s for the answer, including the exit wait below).
 export const SIGNAL_BUDGET_SECONDS = 9;
 const PEER_LOCK_WAIT_SECONDS = 4;
-export const TERMINATE_WAIT_SECONDS = 3;
+const TERMINATE_WAIT_SECONDS = 3;
 const TERMINATE_POLL_SECONDS = 0.1;
 const RECOVERY_WAIT_SECONDS = 16;
 // What `codesign --verify <pid>` prints when the code that is running is not the code now on disk
@@ -480,7 +480,7 @@ export const TURN_ENDED_CLI_TIMEOUT_SECONDS = 10;
 const TURN_ENDED_CLI_SLOW_SECONDS = 4.5;
 const STDERR_LOG_BYTES = 512;
 
-export const turnEndedPayload = (sessionId, turnId) =>
+const turnEndedPayload = (sessionId, turnId) =>
   JSON.stringify({ type: 'agent-turn-complete', 'thread-id': sessionId, 'turn-id': turnId });
 
 /**
@@ -603,7 +603,7 @@ const closeServer = (server, address) => new Promise((resolve) => {
 }).finally(() => fs.rmSync(address, { force: true }));
 
 /** Route human control through the original trusted Sky service. */
-export class TrustedControlBridge {
+class TrustedControlBridge {
   service = null;
   active = new Map();
   pending = new Map();
