@@ -119,6 +119,7 @@ def build(output, package=None, *, target='linux', app=None):
             shutil.copy2(SOURCE / 'lcu' / filename, release / 'lcu' / filename)
         if target == 'linux':
             shutil.copy2(SOURCE / 'lcu/linux_sky_service.mjs', release / 'lcu/linux_sky_service.mjs')
+            shutil.copy2(SOURCE / 'lcu/x11.mjs', release / 'lcu/x11.mjs')
         if target == 'darwin':
             build_owner_auth(release / 'bin' / OWNER_AUTH)
             shutil.copy2(SOURCE / 'lcu/macos_host.py', release / 'lcu/macos_host.py')
