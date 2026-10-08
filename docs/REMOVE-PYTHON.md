@@ -1,6 +1,6 @@
 # Remove Python from LCU
 
-Status: agreed goal, not started. This brief replaces the first attempt (PR #25, branch `node-runtime`), which was
+Status: in progress, delivered as one PR. This brief replaces the first attempt (PR #25, branch `node-runtime`), which was
 closed unmerged. Every agent working on this port works from this page; if something here is wrong or unclear, raise
 it before working around it.
 
@@ -98,15 +98,45 @@ Either way, no Python remains on Linux.
 
 ## Order of work
 
-Each step is a small PR that can be reviewed on its own, green in CI, with its unit tests ported in the same PR.
+The port is delivered as **one PR**. It merges once everything below is done and CI is green. Work proceeds in this
+order inside it:
 
-1. **Launch path:** the three launchers and the modules they need. These are the most frequently run, and the
+1. **Foundation and launch path:** the launcher contract below, the three launchers and the modules they need. The
    speed budget applies here first.
-2. **Setup and management commands.**
-3. **Install and update** on all three platforms, including Windows, plus the upgrade test from 0.9.7.
-4. **The Linux input guard**, per the open question.
-5. **Cleanup:** delete the Python runtime, update `docs/INSTALLATION.md`, `docs/ADAPTERS.md` and
-   `docs/DEVELOPMENT.md` requirements, and run the macOS guest and Windows checks before claiming those platforms.
+2. **Setup and management commands. Install and update** on all three platforms, plus the upgrade test from 0.9.7.
+   **The Linux input guard**, per the open question.
+3. **End-to-end checks, the speed budget in CI, and a check that no `python3` is reachable** while installing and
+   running.
+4. **Cleanup:** delete the Python runtime, update `docs/INSTALLATION.md`, `docs/ADAPTERS.md` and
+   `docs/DEVELOPMENT.md` requirements, and record what was verified on which platform.
+
+## Conventions for the Node code
+
+- ES modules (`.mjs`) under `lcu/`, one per Python module, with the same name (`lcu/setup.py` becomes
+  `lcu/setup.mjs`). Merge or drop modules only where the Python split no longer makes sense. Node 22.15 or later
+  (`process.execve`). No npm dependencies in the runtime.
+- **Errors:** throw an `Error` with a clear message. The entry point prints `LCU: <message>` and exits 1, like the
+  Python launchers. No custom exception hierarchies beyond what callers need to tell cases apart.
+- **Tests:** `tests/node/<module>.test.mjs` with `node:test` and `node:assert/strict`, run by `node --test tests/node/`.
+  A ported module's Python test file is deleted in the same change.
+- **Reading the Python originals:** once a `.py` file is deleted, read it with `git show origin/main:<path>`.
+
+### Launcher contract (Linux and macOS)
+
+- `bin/lcu`, `bin/lcu-session` and `bin/lcu-codex-sandbox` are short `/bin/sh` scripts. They read the absolute path
+  of the app's Node that the installer recorded in the release, check that it is executable, and `exec` it on the
+  matching `.mjs` entry with all arguments. They spawn nothing else.
+- Identity checks on the app (signature, ownership) run inside Node, as the Python runtime ran them, and each runs
+  once per launch.
+- `lcu --help` must still work when the recorded Node is missing, and every other command must say clearly that the
+  app needs repairing or LCU needs reinstalling.
+
+### Windows bootstrap
+
+- `scripts/install.ps1` finds the registered official Store app, checks its identity and signature, and runs the
+  app's `node.exe` on the Node installer. If that `node.exe` cannot be executed in place, it uses a temporary copy of
+  `cua_node` instead.
+- Everything else, including the private app copy, is Node.
 
 ## Using the first attempt as reference
 
