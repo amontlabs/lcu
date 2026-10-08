@@ -247,11 +247,3 @@ export function parse(text, options) {
     read.end();
   }
 }
-
-/** The value of one inline TOML value (`key = <text>` without the key), with an optional trailing comment. */
-export function parseValue(text) {
-  const read = reader(text);
-  const result = read.value(assign);
-  read.end();
-  return result;
-}

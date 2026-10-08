@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { parse, parseValue, TomlFloat } from '../../lcu/toml.mjs';
+import { parse, TomlFloat } from '../../lcu/toml.mjs';
 
 test('a Codex config with tables, arrays of tables, inline hooks and comments', () => {
   const text = `# user config
@@ -70,9 +70,4 @@ test('invalid documents throw', () => {
 test('an empty document is an empty table', () => {
   assert.deepEqual(parse(''), {});
   assert.deepEqual(parse('\n# only a comment\n'), {});
-});
-
-test('lone inline values', () => {
-  assert.deepEqual(parseValue('{a = 1, b.c = "x"}'), { a: 1, b: { c: 'x' } });
-  assert.throws(() => parseValue('{a = 1} x'));
 });
