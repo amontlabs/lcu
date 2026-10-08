@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { acquire, installLockPath } from '../../lcu/lock.mjs';
 import { WINDOWS_REQUIRED_FILES, applicationInventory, canonicalJson, inventorySha256 } from '../../lcu/windows.mjs';
 import { checkedPrefix, deps, generationInUse, install, launcherCommand, main, preflightHost } from '../../scripts/install_windows.mjs';
-import { override, temporary, write } from './fixtures.mjs';
+import { override, temporary, write, mockWrite } from './fixtures.mjs';
 
 const NODE_MEMBER = 'app/resources/cua_node/bin/node.exe';
 
@@ -36,7 +36,7 @@ function fixture(t) {
     paths: async () => calls.push('paths'),
   };
   for (const [name, value] of Object.entries(stubs)) override(t, deps, name, value);
-  t.mock.method(process.stderr, 'write', () => true);
+  mockWrite(t, process.stderr, () => true);
   return { base, source, official, selected, calls, prefix: join(base, 'installed') };
 }
 
@@ -199,7 +199,7 @@ test('the prefix must be dedicated and free of links', (t) => {
 
 test('agent setup gets the shared options from the new release', async (t) => {
   const f = fixture(t);
-  t.mock.method(process.stdout, 'write', () => true);
+  mockWrite(t, process.stdout, () => true);
   const seen = [];
   override(t, deps, 'setup', async (release) => ({ main: async (argv) => { seen.push(release, argv); return 0; } }));
   assert.equal(await main(['--prefix', f.prefix, '--agent', 'codex', '--audio', '--yes']), 0);

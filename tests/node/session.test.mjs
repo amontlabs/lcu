@@ -3,7 +3,7 @@ import { userInfo } from 'node:os';
 import { join } from 'node:path';
 
 import { discover, main, which } from '../../lcu/session.mjs';
-import { override, posixTests, temporary, write } from './fixtures.mjs';
+import { override, posixTests, temporary, write, mockWrite } from './fixtures.mjs';
 
 const test = posixTests('Linux desktop sessions (POSIX accounts and sh stand-ins)');
 
@@ -35,7 +35,7 @@ test('the launcher runs the command in the discovered session as the calling acc
   const other = process.getuid() === 0 ? 'daemon' : 'root';
   assert.throws(() => main(['--user', other, '--', 'true']), /selected desktop account/);
   assert.equal(calls.length, 0);
-  t.mock.method(process.stderr, 'write', () => true);
+  mockWrite(t, process.stderr, () => true);
   assert.equal(main(['--user', userInfo().username]), 2);
 });
 

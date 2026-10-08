@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { environment, leaveUnusableWorkingDirectory, main, paths } from '../../lcu/runtime.mjs';
-import { REPO, linuxApp, override, posixTests, temporary, write } from './fixtures.mjs';
+import { REPO, linuxApp, override, posixTests, temporary, write, mockWrite } from './fixtures.mjs';
 
 const test = posixTests('the Linux launch path (process.execve, sh stand-ins, POSIX modes)');
 
@@ -256,7 +256,7 @@ test('--chrome and --audio reach the original child; an explicit surface wins', 
 
 function captureStdout(t) {
   let output = '';
-  t.mock.method(process.stdout, 'write', (text) => { output += text; return true; });
+  mockWrite(t, process.stdout, (text) => { output += text; return true; });
   return () => output;
 }
 
@@ -357,7 +357,7 @@ test('a bare server in an interactive terminal reports the usage and exits 2', a
   const tty = await import('node:tty');
   t.mock.method(tty.default, 'isatty', () => true);
   let message = '';
-  t.mock.method(process.stderr, 'write', (text) => { message += text; return true; });
+  mockWrite(t, process.stderr, (text) => { message += text; return true; });
   const { status, calls } = await launch(t, r, []);
   assert.deepEqual([status, calls], [2, []]);
   assert.match(message, /stdio MCP server/);

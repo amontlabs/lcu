@@ -10,7 +10,7 @@ import {
   parseProcessStart, parseProcessTable, processExists, recoverResponse, recoverStaleService, runTurnEnded, singleFlight,
   startOriginalHost, verifyServiceSignature,
 } from '../../lcu/macos_host.mjs';
-import { override, posixTests, temporary, write } from './fixtures.mjs';
+import { override, posixTests, temporary, write, mockWrite } from './fixtures.mjs';
 
 const test = posixTests('the macOS lifetime host uses Unix sockets and sh stand-ins for ps, lsof and codesign');
 
@@ -42,7 +42,7 @@ test('the lifecycle host passes exact IDs to the original client and rejects mis
   const host = await startOriginalHost({ client: client(t, `printf '%s\\n' "$@" > "${capture}"`) });
   t.after(() => host.stop());
   let logged = '';
-  t.mock.method(process.stderr, 'write', (text) => { logged += text; return true; });
+  mockWrite(t, process.stderr, (text) => { logged += text; return true; });
   const malformed = await request(host.address, { session_id: '', turn_id: 'turn-exact' });
   assert.equal(malformed.notified, false);
   assert.match(malformed.error, /turn IDs are missing/);
@@ -54,7 +54,7 @@ test('the lifecycle host passes exact IDs to the original client and rejects mis
 });
 
 test('the lifecycle host reports the original client’s failure, and waits for a helper as slow as the real one', async (t) => {
-  t.mock.method(process.stderr, 'write', () => true);
+  mockWrite(t, process.stderr, () => true);
   const failing = await startOriginalHost({ client: client(t, 'exit 23') });
   t.after(() => failing.stop());
   const result = await request(failing.address, { session_id: 'session', turn_id: 'turn' });
@@ -76,7 +76,7 @@ test('stopping the host ends its turn-ended commands and waiting control request
   const base = temporary(t);
   const control = join(base, 'control.sock');
   const started = join(base, 'started');
-  t.mock.method(process.stderr, 'write', () => true);
+  mockWrite(t, process.stderr, () => true);
   const host = await startOriginalHost({ client: client(t, `echo $$ > "${started}"\nexec sleep 30`), controlAddress: control });
   const turn = request(host.address, { session_id: 's', turn_id: 't' }, { timeout: 20_000 }).catch((error) => error);
   // No trusted service is connected: this request would wait 40 s for one.
@@ -98,7 +98,7 @@ test('stopping the host ends its turn-ended commands and waiting control request
 
 async function turnEnded(t, path, options) {
   let log = '';
-  const stderr = t.mock.method(process.stderr, 'write', (text) => { log += text; return true; });
+  const stderr = mockWrite(t, process.stderr, (text) => { log += text; return true; });
   const started = performance.now();
   let error = null;
   try {
@@ -181,7 +181,7 @@ test('the control socket routes only to an active trusted session and turn', asy
 test('an unusable control socket keeps the lifecycle host working and leaves the occupied path alone', async (t) => {
   const occupied = write(join(temporary(t), 'occupied-control.sock'), 'owned by another process');
   let logged = '';
-  t.mock.method(process.stderr, 'write', (text) => { logged += text; return true; });
+  mockWrite(t, process.stderr, (text) => { logged += text; return true; });
   const host = await startOriginalHost({ client: client(t, 'exit 0'), controlAddress: occupied });
   t.after(() => host.stop());
   assert.match(logged, /user control unavailable/);
@@ -210,7 +210,7 @@ test('a slow recovery does not delay turn cleanup and sees whether its requester
     setTimeout(() => releases.shift()(), 100);
   });
   assert.equal(JSON.parse(gone).waiting, false, 'a requester that closed its end is not waiting');
-  t.mock.method(process.stderr, 'write', () => true);
+  mockWrite(t, process.stderr, () => true);
   assert.equal((await request(host.address, { type: 'diagnose' })).notified, false);
 });
 

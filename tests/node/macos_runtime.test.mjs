@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { MAC_HELPER, MAC_REQUIRED_FILES } from '../../lcu/platforms.mjs';
 import { configureMacosLifecycle, environment, main, paths } from '../../lcu/runtime.mjs';
-import { override, posixTests, temporary, write } from './fixtures.mjs';
+import { override, posixTests, temporary, write, mockWrite } from './fixtures.mjs';
 
 const test = posixTests('the macOS launch path, with sh stand-ins and POSIX modes');
 
@@ -110,7 +110,7 @@ test('metadata comes from the selected app, not the stale descriptor or lock', a
   assert.equal(environment(r.root, undefined, { env: {} }).BROWSER_USE_CODEX_APP_VERSION, VERSION);
   write(join(r.root, 'bundle.json'), JSON.stringify({ version: '0.3.0' }));
   let output = '';
-  t.mock.method(process.stdout, 'write', (text) => { output += text; return true; });
+  mockWrite(t, process.stdout, (text) => { output += text; return true; });
   await main(r.root, ['--version']);
   assert.match(output, new RegExp(`lcu 0\\.3\\.0 \\(ChatGPT darwin ${VERSION}; CUA ${RUNTIME}\\)`));
   unlinkSync(join(r.root, 'installation.json'));

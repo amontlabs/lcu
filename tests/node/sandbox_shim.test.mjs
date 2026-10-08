@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, statSync, symlinkSync, unlinkSync } from 'node:fs
 import { join } from 'node:path';
 
 import { FAULT_ENV, Unrecognized, decide, main, parseTomlValue, unshimmedEnv } from '../../lcu/sandbox_shim.mjs';
-import { REPO, override, posixTests, temporary, write } from './fixtures.mjs';
+import { REPO, override, posixTests, temporary, write, mockWrite } from './fixtures.mjs';
 
 const test = posixTests('the Linux/macOS sandbox shim, with POSIX modes and sh stand-ins');
 
@@ -168,7 +168,7 @@ function runMain(t, f, { command, env = f.env, parent = f.parent }) {
   const calls = [];
   let message = '';
   t.mock.method(process, 'execve', (...args) => calls.push(args));
-  const stderr = t.mock.method(process.stderr, 'write', (text) => { message += text; return true; });
+  const stderr = mockWrite(t, process.stderr, (text) => { message += text; return true; });
   const status = main(f.argv(command), env, { parentExe: () => parent });
   stderr.mock.restore();
   process.execve.mock.restore();

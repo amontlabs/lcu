@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 
 import { acquire, installLockPath } from '../../lcu/lock.mjs';
 import { SYSTEM_PACKAGES, checkedPrefix, deps, installMac, main, runAs, selectLinuxApp, selectRelease } from '../../scripts/install.mjs';
-import { REPO, linuxApp, override, posixTests, seal, temporary, write } from './fixtures.mjs';
+import { REPO, linuxApp, override, posixTests, seal, temporary, write, mockWrite } from './fixtures.mjs';
 
 const test = posixTests('install.sh and the Linux/macOS installer (POSIX accounts, modes and sh)');
 
@@ -68,8 +68,8 @@ test('the system packages no longer include Python or XRes', () => {
 
 test('usage errors exit 2 and --help exits 0 before anything else', { skip: !linux }, async (t) => {
   const calls = stubbed(t);
-  t.mock.method(process.stderr, 'write', () => true);
-  t.mock.method(process.stdout, 'write', () => true);
+  mockWrite(t, process.stderr, () => true);
+  mockWrite(t, process.stdout, () => true);
   assert.equal(await main([...USER, '--bogus']), 2);
   assert.equal(await main([...USER, '--scope', 'x']), 2);
   assert.equal(await main([...USER, '--help']), 0);
@@ -114,7 +114,7 @@ test('a runtime-only install links the app, records its Node and reports the tes
   const base = temporary(t);
   const calls = stubbed(t, { base });
   const app = linuxApp(join(base, 'chatgpt'), { arch: ARCH });
-  t.mock.method(process.stdout, 'write', () => true);
+  mockWrite(t, process.stdout, () => true);
   const prefix = join(base, 'lcu');
   assert.equal(await main([...USER, '--prefix', prefix, '--existing-app', app, '--skip-system', '--offline', '--runtime-only']), 0);
   const release = realpathSync(join(prefix, 'current'));
@@ -134,7 +134,7 @@ test('agent setup runs from the new release with the forwarded options, and its 
   const prefix = join(base, 'lcu');
   const argv = [...USER, '--prefix', prefix, '--existing-app', app, '--agent', 'pi', '--audio', '--yes', '--skip-system'];
   let calls = stubbed(t, { base });
-  t.mock.method(process.stdout, 'write', () => true);
+  mockWrite(t, process.stdout, () => true);
   assert.equal(await main(argv), 0);
   const [, root, forwarded] = calls.at(-1);
   assert.equal(root, join(prefix, 'current'));
@@ -142,7 +142,7 @@ test('agent setup runs from the new release with the forwarded options, and its 
     '--agent', 'pi', '--yes', '--audio']);
   calls = stubbed(t, { setupStatus: 5 });
   const errors = [];
-  t.mock.method(process.stderr, 'write', (text) => errors.push(text));
+  mockWrite(t, process.stderr, (text) => errors.push(text));
   assert.equal(await main(argv), 5);
   assert.match(errors.join(''), /setup failed; see the errors above/);
   assert.ok(errors.join('').includes(join(prefix, 'current/bin/lcu')));
@@ -316,8 +316,8 @@ test('macOS: a failed validation keeps the previous selection, and setup’s exi
   assert.deepEqual(readdirSync(join(prefix, 'releases')), ['old']);
   const calls = stubbed(t, { setupStatus: 3 });
   const errors = [];
-  t.mock.method(process.stderr, 'write', (text) => { errors.push(text); return true; });
-  t.mock.method(process.stdout, 'write', () => true);
+  mockWrite(t, process.stderr, (text) => { errors.push(text); return true; });
+  mockWrite(t, process.stdout, () => true);
   assert.equal(await main([...USER, '--prefix', prefix, '--existing-app', app, '--session', 'direct', '--agent', 'codex', '--yes']), 3);
   const [name, , forwarded] = calls.at(-1);
   assert.equal(name, 'setup');

@@ -116,3 +116,16 @@ export function seal(root, arch, target = 'linux') {
   writeFileSync(join(root, 'bundle.json'), JSON.stringify({ format: 1, version: VERSION, platform: target, architecture: arch,
     files: inventory(root, target) }));
 }
+
+/**
+ * Capture text written to `stream` (process.stdout or process.stderr) with `fn`. Non-string chunks pass through:
+ * on some Node releases the test runner reports results over the same stream with binary writes.
+ */
+export function mockWrite(t, stream, fn) {
+  const original = stream.write;
+  return t.mock.method(stream, 'write', function write(chunk, ...rest) {
+    if (typeof chunk !== 'string') return original.call(this, chunk, ...rest);
+    fn(chunk);
+    return true;
+  });
+}

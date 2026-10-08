@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import * as update from '../../lcu/update.mjs';
-import { override, temporary, write } from './fixtures.mjs';
+import { override, temporary, write, mockWrite } from './fixtures.mjs';
 
 const INFO = { version: '0.9.2', tag: 'v0.9.2', severity: 'normal', release_url: 'https://github.com/amontlabs/lcu/releases/tag/v0.9.2' };
 
@@ -38,8 +38,8 @@ function cache(latest = INFO, { error = null, age = 0 } = {}) {
 /** Run `lcu update ARGV`; returns `[status, stdout]`. */
 async function cli(t, root, ...argv) {
   const out = [];
-  const stdout = t.mock.method(process.stdout, 'write', (text) => { out.push(text); return true; });
-  const stderr = t.mock.method(process.stderr, 'write', () => true);
+  const stdout = mockWrite(t, process.stdout, (text) => { out.push(text); return true; });
+  const stderr = mockWrite(t, process.stderr, () => true);
   try {
     return [await update.main(root, argv), out.join('')];
   } finally {
@@ -367,8 +367,8 @@ async function postInstall(t, root, home, { refresh = async () => ['absent', nul
   }
   const out = [];
   const err = [];
-  const stdout = t.mock.method(process.stdout, 'write', (text) => { out.push(text); return true; });
-  const stderr = t.mock.method(process.stderr, 'write', (text) => { err.push(text); return true; });
+  const stdout = mockWrite(t, process.stdout, (text) => { out.push(text); return true; });
+  const stderr = mockWrite(t, process.stderr, (text) => { err.push(text); return true; });
   try {
     assert.equal(await update.postInstall(root, home), 0);
   } finally {
