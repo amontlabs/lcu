@@ -289,7 +289,8 @@ export async function main(argv) {
     return 0;
   }
   // Setup runs from the selected release, and drops privileges itself before account writes.
-  const forwarded = setupArguments({ ...values, prefix }, owner.name);
+  // --user only when given: without it, setup targets this account's $HOME, as validate() did above.
+  const forwarded = setupArguments({ ...values, prefix }, values.user);
   let status;
   try {
     status = (await (await deps.module(current, 'setup')).main(forwarded)) ?? 0;

@@ -1,7 +1,8 @@
 // Small filesystem and quoting helpers shared by the LCU modules.
 
 const { lstatSync, readFileSync, realpathSync, statSync } = process.getBuiltinModule('node:fs');
-const { resolve, sep } = process.getBuiltinModule('node:path');
+const { userInfo } = process.getBuiltinModule('node:os');
+const { dirname, isAbsolute, resolve, sep } = process.getBuiltinModule('node:path');
 
 export const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 /** `lstat`, or null when the path cannot be read. */
@@ -20,3 +21,26 @@ export const within = (path, root) => path === root || path.startsWith(root.ends
 export const shellQuote = (arg) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : quoteAlways(arg));
 /** One POSIX shell word, always single-quoted (for generated scripts). */
 export const quoteAlways = (text) => `'${text.replaceAll("'", "'\"'\"'")}'`;
+
+/**
+ * The calling account's home, the one its agents use. Without root, `$HOME` when it is an absolute, existing
+ * directory owned by this account with no symbolic link on its path and no parent traversal; otherwise the user
+ * database's home. Root always gets the user database's home (setup then requires --user). Windows: USERPROFILE.
+ */
+export function accountHome(env = process.env, own = userInfo) {
+  if (process.platform === 'win32') return env.USERPROFILE || own().homedir;
+  const home = env.HOME;
+  const uid = process.getuid();
+  if (uid !== 0 && home && isAbsolute(home) && !home.split('/').includes('..') && !/[\x00-\x1f]/.test(home)) {
+    const path = resolve(home);
+    const info = lstat(path);
+    if (info?.isDirectory() && info.uid === uid) {
+      let linked = false;
+      for (let item = dirname(path); item !== dirname(item); item = dirname(item)) {
+        if (lstat(item)?.isSymbolicLink() !== false) { linked = true; break; }
+      }
+      if (!linked) return path;
+    }
+  }
+  return own().homedir;
+}

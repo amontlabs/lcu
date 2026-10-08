@@ -13,7 +13,7 @@ import * as capture from './capture.mjs';
 import { installHooks, requireCliHookSupport, exportFiles } from './codex_hooks.mjs';
 import { install as installApprovalMod } from './claude_mod.mjs';
 import { install as hideHostOnlyTools } from './claude_visibility.mjs';
-import { isFile, lstat, shellQuote } from './fsutil.mjs';
+import { accountHome, isFile, lstat, shellQuote } from './fsutil.mjs';
 import { configureHermes, configureOmp } from './harness_setup.mjs';
 import { withLock } from './lock.mjs';
 import { ask, say, warn } from './terminal.mjs';
@@ -86,7 +86,9 @@ export function which(name, path = process.env.PATH ?? '') {
 /** `{name, uid, gid, home}` of a local account, or null. */
 function lookupAccount(name) {
   const own = userInfo();
-  if (name === undefined || name === own.username) {
+  // Without --user, the calling account's home as its agents see it ($HOME when that is safe to use).
+  if (name === undefined) return { name: own.username, uid: own.uid, gid: own.gid, home: accountHome(process.env, () => own) };
+  if (name === own.username) {
     return { name: own.username, uid: own.uid, gid: own.gid, home: windows() ? process.env.USERPROFILE || own.homedir : own.homedir };
   }
   if (process.platform === 'darwin') {
@@ -690,7 +692,7 @@ export async function exportBundle(destination, command, releaseRoot, { chrome =
 // Command line -------------------------------------------------------------------------------------------
 
 const defaultPrefix = () => (windows() ? join(process.env.LOCALAPPDATA || join(homedir(), 'AppData/Local'), 'LCU')
-  : process.platform === 'darwin' ? join(homedir(), '.local/share/lcu') : '/opt/lcu');
+  : process.platform === 'darwin' ? join(accountHome(), '.local/share/lcu') : '/opt/lcu');
 const defaultSession = () => (process.platform === 'darwin' || windows() ? 'direct' : 'discover');
 
 export const OPTIONS = {
@@ -747,7 +749,7 @@ Options:
   --reconcile         Register pending harnesses that are now installed, using the saved opt-ins and approval
                       mode; non-interactive, idempotent, and silent when there is nothing to do
   --check-desktop     Require live desktop readiness after setup; never opens System Settings automatically
-  --user ACCOUNT      Target account; root must select one explicitly
+  --user ACCOUNT      Target account (its user-database home); root must select one. Default: this account, in $HOME when usable
   --prefix PATH       Runtime prefix (Linux: /opt/lcu; macOS: ~/.local/share/lcu; Windows: %LOCALAPPDATA%\\LCU)
 
 Run on the machine hosting the agent backend. For Codex SSH remote projects, that is the VM. This command never
@@ -1151,7 +1153,7 @@ async function registerLocked(args, account, home, names, missing, register, pat
   saveSetupState(home, { chrome, audio, approval: approvalMode, pending, pendingContext: pending.length
     ? (missing.length ? { scope: args.scope, session: args.session, project: args.project ?? null } : state.pending_context) : null });
   if (failures.length) {
-    const retry = [setupCommand, 'setup', '--prefix', args.prefix, '--user', account.name, '--scope', args.scope,
+    const retry = [setupCommand, 'setup', '--prefix', args.prefix, ...(args.user ? ['--user', account.name] : []), '--scope', args.scope,
       '--session', args.session, '--yes', ...(args.project ? ['--project', args.project] : []),
       chrome ? '--chrome' : '--no-chrome', audio ? '--audio' : '--no-audio',
       // A defaulted `ask` must not be passed: it would remove approval entries.

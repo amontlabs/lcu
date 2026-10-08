@@ -1,9 +1,10 @@
 // Find out whether a newer LCU release exists, cache the answer and tell the agent.
 // `lcu update --notice --hook ...` runs on agent prompts: it reads only the cache and never waits on the network.
 const { mkdirSync, readFileSync, readSync, renameSync, statSync, utimesSync, writeFileSync, closeSync, openSync } = process.getBuiltinModule('node:fs');
-const { homedir } = process.getBuiltinModule('node:os');
 const { dirname, join } = process.getBuiltinModule('node:path');
 const { parseArgs } = process.getBuiltinModule('node:util');
+
+import { accountHome } from './fsutil.mjs';
 
 export const REPO = 'amontlabs/lcu';
 const LATEST_URL = `https://github.com/${REPO}/releases/latest`;
@@ -80,7 +81,7 @@ export function enabled(root, env = process.env) {
 
 /** Per-account cache file; the install prefix may be root-owned. */
 export function cachePath() {
-  const home = homedir();
+  const home = accountHome();
   let base;
   if (process.platform === 'win32') base = join(process.env.LOCALAPPDATA || join(home, 'AppData/Local'), 'LCU/cache');
   else if (process.platform === 'darwin') base = join(home, 'Library/Caches/lcu');
@@ -395,7 +396,7 @@ async function refreshChromeRelay(root) {
 }
 
 /** Refresh what setup copied out of an earlier release; `lcu update` runs it from the new release. */
-export async function postInstall(root, home = homedir()) {
+export async function postInstall(root, home = accountHome()) {
   const claudeMod = await deps.module('claude_mod');
   const target = claudeMod.destination(home);
   // An absent mod, or a plugin of that name that is not LCU's, is left alone.
@@ -411,7 +412,7 @@ export async function postInstall(root, home = homedir()) {
 }
 
 /** True when Codex has LCU registered but not the update-notice hooks (`lcu setup --agent codex` adds them). */
-export async function codexNeedsSetup(home = homedir(), env = process.env) {
+export async function codexNeedsSetup(home = accountHome(), env = process.env) {
   let config;
   try {
     const { parse } = await deps.module('toml');

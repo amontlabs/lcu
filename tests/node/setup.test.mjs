@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -180,6 +181,38 @@ test('failed registration still saves choices and prints a retry without a defau
   assert.match(retry.err, /retry:/);
   assert.doesNotMatch(retry.err, /--approval/);
   assert.match((await other.main('--agent', 'codex', '--approval', 'ask')).err, /--approval ask/);
+});
+
+test('without --user, setup targets $HOME when it is usable, else the user database home', (t) => {
+  const own = userInfo();
+  const home = temporary(t);
+  const saved = process.env.HOME;
+  t.after(() => { process.env.HOME = saved; });
+  process.env.HOME = home;
+  assert.deepEqual(setup.seams.account(), { name: own.username, uid: own.uid, gid: own.gid, home });
+  const check = (...argv) => setup.validate(setup.parse(['--prefix', join(home, 'prefix'), ...argv]));
+  assert.equal(check('--agent', 'codex').account.home, home);
+  // --user keeps the user database home, as it does for root.
+  assert.equal(check('--agent', 'codex', '--user', own.username).account.home, own.homedir);
+  for (const unusable of ['relative', join(home, 'missing'), '/']) {
+    process.env.HOME = unusable;
+    assert.equal(setup.seams.account().home, own.homedir, unusable);
+  }
+  override(t, process, 'getuid', () => 0);
+  process.env.HOME = home;
+  assert.throws(() => check('--agent', 'codex'), /Root must specify --user ACCOUNT/);
+});
+
+test('a retry names --user only when the caller did', async (t) => {
+  const f = fixture(t);
+  f.failing = new Set(['codex']);
+  assert.match((await f.main('--agent', 'codex')).err, /--user fixture/);
+  const seen = await output(t);
+  const code = await setup.main(['--prefix', f.prefix, '--session', 'direct', '--yes', '--no-chrome', '--agent', 'codex'],
+    { configure: f.configure });
+  assert.equal(code, 1);
+  assert.match(seen.err, /retry:/);
+  assert.doesNotMatch(seen.err, /--user/);
 });
 
 test('--allow-missing skips and records missing harnesses and exits 0', async (t) => {
