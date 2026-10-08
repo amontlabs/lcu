@@ -413,7 +413,7 @@ def snapshot(root, label, copies=None):
 # and NEW are the same archive (the self-test).
 EXPECTED_RENAMES = (
     # The Chrome native-host relay: Python's lcu-native-host.py became lcu-native-host.mjs, run by the same
-    # `lcu-native-host` sh launcher on the recorded Node (docs/releases/UNRELEASED.md).
+    # `lcu-native-host` sh launcher on the recorded Node (docs/releases/0.10.0.md).
     ('/lcu-native-host.py', '/lcu-native-host.mjs'),
 )
 
