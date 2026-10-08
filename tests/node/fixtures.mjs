@@ -69,7 +69,28 @@ export function linuxRelease(base, { runtimeVersion = 'fixture-runtime-new' } = 
 
 /** Replace a property of `object` for the duration of the test. */
 export function override(t, object, name, value) {
-  const descriptor = Object.getOwnPropertyDescriptor(object, name);
-  Object.defineProperty(object, name, { value, configurable: true, writable: true });
-  t.after(() => Object.defineProperty(object, name, descriptor));
+  // Only the first override in a test records what to restore, so repeated overrides restore the original.
+  const seen = overridden.get(t) ?? new Map();
+  overridden.set(t, seen);
+  const properties = seen.get(object) ?? new Set();
+  seen.set(object, properties);
+  if (!properties.has(name)) {
+    properties.add(name);
+    const descriptor = Object.getOwnPropertyDescriptor(object, name);
+    t.after(() => (descriptor ? Object.defineProperty(object, name, descriptor) : delete object[name]));
+  }
+  Object.defineProperty(object, name, { value, configurable: true, writable: true, enumerable: true });
 }
+const overridden = new WeakMap();
+
+/** Collect what LCU's management commands print (lcu/terminal.mjs) during the test: `{out, err}` strings. */
+export async function output(t) {
+  const { terminal } = await import('../../lcu/terminal.mjs');
+  const seen = { out: '', err: '' };
+  override(t, terminal, 'out', (text) => { seen.out += text; });
+  override(t, terminal, 'err', (text) => { seen.err += text; });
+  return seen;
+}
+
+/** A captured child result as lcu/capture.mjs returns it. */
+export const result = (status = 0, stdout = '', stderr = '') => ({ status, signal: null, error: undefined, stdout, stderr });

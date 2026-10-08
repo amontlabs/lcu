@@ -4,6 +4,7 @@
 // crash never blocks later runs. Only LCU's own processes take these locks.
 import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { hostname } from 'node:os';
+import { join } from 'node:path';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -78,3 +79,6 @@ export async function withLock(path, fn, options) {
     release();
   }
 }
+
+/** The lock installs, updates and `lcu prune` take on one prefix. */
+export const installLockPath = (prefix) => join(prefix, '.lcu-install.lock');

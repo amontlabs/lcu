@@ -1,10 +1,10 @@
 // `lcu setup`: register LCU with agent harnesses, without requiring a running desktop.
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { accessSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync,
-  rmdirSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { accessSync, chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync,
+  realpathSync, renameSync, rmdirSync, rmSync, statSync, writeSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -103,7 +103,7 @@ function ask(question) {
   }
   return Buffer.from(bytes).toString('utf8').replace(/\r$/, '');
 }
-const readByte = (byte) => process.getBuiltinModule('node:fs').readSync(0, byte, 0, 1, null);
+const readByte = (byte) => readSync(0, byte, 0, 1, null);
 
 /** `{name, uid, gid, home}` of a local account, or null. */
 function lookupAccount(name) {
@@ -149,6 +149,7 @@ export function checked(label, command, args, options) {
 // Files ----------------------------------------------------------------------------------------------
 
 const lstat = (path) => { try { return lstatSync(path); } catch { return null; } };
+const isFile = (path) => { try { return statSync(path).isFile(); } catch { return false; } };
 
 /** The absolute form of `path`; refuses parent traversal, control characters and symlinks anywhere on it. */
 export function regularPath(path) {
@@ -190,7 +191,7 @@ export function atomicWrite(path, data) {
     } finally {
       closeSync(fd);
     }
-    process.getBuiltinModule('node:fs').chmodSync(temporary, mode);
+    chmodSync(temporary, mode);
     renameSync(temporary, path);
   } finally {
     rmSync(temporary, { force: true });
@@ -202,6 +203,14 @@ const same = (left, right) => (left === null || right === null ? left === right 
 /** One planned file change; `after` null removes the file. */
 export const change = (path, before, after) => ({ path, before, after: typeof after === 'string' ? Buffer.from(after) : after });
 export const json = (value) => `${JSON.stringify(value, null, 2)}\n`;
+
+/**
+ * Compact JSON with `, ` and `: ` separators and non-ASCII escaped: the form of the record keys, package
+ * identities and hook trust keys earlier releases stored, so existing records keep matching.
+ */
+export const spacedJson = (value) => (Array.isArray(value) ? `[${value.map(spacedJson).join(', ')}]`
+  : value !== null && typeof value === 'object' ? `{${Object.entries(value).map(([key, item]) => `${spacedJson(key)}: ${spacedJson(item)}`).join(', ')}}`
+    : JSON.stringify(value).replace(/[\u0080-\uffff]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`));
 
 /** Apply changes after a preflight; roll back our own writes if a later write fails. Returns how many changed. */
 export function applyChanges(changes) {
@@ -315,7 +324,7 @@ export async function installerPaths(toolsRoot) {
     : join(toolsRoot, 'node/bin/node');
   const paths = [node, join(toolsRoot, 'node_modules/skills/bin/cli.mjs'), join(toolsRoot, 'node_modules/add-mcp/dist/index.js')];
   for (const path of paths) {
-    if (!lstat(path)?.isFile() && !existsSync(path)) throw new Error(`Bundled agent installer missing: ${path}. Rerun scripts/install.sh with this --prefix.`);
+    if (!isFile(path)) throw new Error(`Bundled agent installer missing: ${path}. Rerun scripts/install.sh with this --prefix.`);
   }
   try {
     accessSync(node, constants.X_OK);
@@ -414,7 +423,7 @@ export async function installedAppResources(releaseRoot) {
   releaseRoot = realpath(resolve(releaseRoot));
   if (WINDOWS) return (await import('./runtime.mjs')).paths(releaseRoot).resources;
   const descriptor = join(releaseRoot, 'installation.json');
-  if (!lstat(descriptor) || !statSync(descriptor).isFile()) throw new Error(`Installed application descriptor missing: ${descriptor}`);
+  if (!isFile(descriptor)) throw new Error(`Installed application descriptor missing: ${descriptor}`);
   let installation;
   try {
     installation = JSON.parse(readFileSync(descriptor, 'utf8'));
@@ -438,7 +447,7 @@ export async function installedAppResources(releaseRoot) {
   if (!existsSync(resources) || !statSync(resources).isDirectory()) throw new Error(`Installed application resources missing: ${resources}`);
   return resources;
 }
-const realpathStrict = (path) => process.getBuiltinModule('node:fs').realpathSync(path);
+const realpathStrict = (path) => realpathSync(path);
 const realpath = (path) => { try { return realpathStrict(path); } catch { return path; } };
 
 /** Delete the skill earlier LCU versions generated; official Codex computer use registers none. */
@@ -1208,5 +1217,3 @@ async function finish(args, { chrome, audio }, { desktopCommand, directRuntime, 
   }
   return 0;
 }
-
-export { basename, sep };
