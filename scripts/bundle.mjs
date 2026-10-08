@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-export const VERSION = '0.9.7';
+export const VERSION = '0.10.0';
 
 const PLATFORMS = { linux: 'linux', darwin: 'darwin', windows: 'win32' };
 
