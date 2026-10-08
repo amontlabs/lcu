@@ -128,7 +128,8 @@ def build(output, package=None, *, target='linux', app=None):
         scratch = Path(temporary)
         release = scratch / name
         release.mkdir()
-        ignored = ['*.cmd'] if target != 'windows' else ['lcu-session']
+        # bin/lcu and bin/lcu-session are POSIX sh launchers; Windows runs lcu.cmd.
+        ignored = ['*.cmd'] if target != 'windows' else ['lcu', 'lcu-session']
         if target != 'linux':
             ignored.append('lcu-codex-sandbox')
         shutil.copytree(SOURCE / 'bin', release / 'bin', ignore=shutil.ignore_patterns(*ignored))

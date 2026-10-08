@@ -74,7 +74,9 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertIn(prefix + 'bin/lcu-owner-auth', names)
                 self.assertIn(prefix + 'lcu/app_layout.mjs', names)
                 self.assertIn(prefix + 'lcu/asar.mjs', names)
-                self.assertNotIn(prefix + 'lcu/windows_host.mjs', names)
+                # runtime.mjs imports windows.mjs on every platform; the Windows host modules stay out.
+                self.assertEqual({name for name in names if name.startswith(prefix + 'lcu/windows')}, {prefix + 'lcu/windows.mjs'})
+                self.assertNotIn(prefix + 'bin/lcu.cmd', names)
                 self.assertIn(prefix + 'adapters/client.mjs', names)
                 self.assertIn(prefix + 'adapters/claude.mjs', names)
                 self.assertIn(prefix + 'adapters/audio-files.mjs', names)
@@ -119,6 +121,9 @@ class BuildPlatformTests(unittest.TestCase):
                 shim = bundle.getmember(f'lcu-{VERSION}-linux-x64/bin/lcu-codex-sandbox')
                 self.assertTrue(shim.mode & 0o111)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/lcu/macos_sky_service.mjs', names)
+                self.assertEqual({name for name in names if name.startswith(f'lcu-{VERSION}-linux-x64/lcu/windows')},
+                                 {f'lcu-{VERSION}-linux-x64/lcu/windows.mjs'})
+                self.assertNotIn(f'lcu-{VERSION}-linux-x64/bin/lcu.cmd', names)
 
     @posix_archive
     def test_shipped_document_links_resolve_inside_the_release(self):

@@ -53,7 +53,7 @@ class WindowsBuildTests(unittest.TestCase):
                 self.assertEqual((manifest['platform'], manifest['architecture']), ('windows', 'x64'))
                 self.assertFalse(any(name.startswith(prefix + 'app/') for name in names))
                 self.assertFalse(any(name.endswith(('.exe', '.msix', '.node')) for name in names))
-                for path in ('bin/lcu-session', 'lcu/session.mjs', 'lcu/x11.mjs', 'lcu/macos_host.mjs',
+                for path in ('bin/lcu', 'bin/lcu-session', 'bin/lcu-codex-sandbox', 'lcu/session.mjs', 'lcu/x11.mjs', 'lcu/macos_host.mjs',
                              'scripts/install.sh', 'scripts/install.py', 'scripts/install.mjs', 'scripts/bundle.py'):
                     self.assertNotIn(prefix + path, names)
 
