@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { VERSION, inventory } from '../../scripts/bundle.mjs';
+
 export const REPO = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 /** A resolved temporary directory removed after the test. */
@@ -67,9 +69,21 @@ export function linuxRelease(base, { runtimeVersion = 'fixture-runtime-new' } = 
   return { root, app };
 }
 
-/** Replace a property of `object` for the duration of the test. */
+const restores = new WeakMap();
+
+/** Replace a property of `object` for the duration of the test; repeated overrides are undone newest first. */
 export function override(t, object, name, value) {
   const descriptor = Object.getOwnPropertyDescriptor(object, name);
   Object.defineProperty(object, name, { value, configurable: true, writable: true });
-  t.after(() => Object.defineProperty(object, name, descriptor));
+  if (!restores.has(t)) {
+    restores.set(t, []);
+    t.after(() => { for (const restore of restores.get(t).reverse()) restore(); });
+  }
+  restores.get(t).push(() => (descriptor ? Object.defineProperty(object, name, descriptor) : delete object[name]));
+}
+
+/** Seal a release `root` the way scripts/bundle.py does. */
+export function seal(root, arch, target = 'linux') {
+  writeFileSync(join(root, 'bundle.json'), JSON.stringify({ format: 1, version: VERSION, platform: target, architecture: arch,
+    files: inventory(root, target) }));
 }

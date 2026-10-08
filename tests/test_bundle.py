@@ -1,15 +1,24 @@
+"""The build's Python seal and the installer's Node verify agree on the release inventory."""
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
-from zipfile import ZipFile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from bundle import inventory, seal, verify
+SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
+sys.path.insert(0, str(SCRIPTS))
+from bundle import VERSION, seal
+
+NODE = shutil.which('node')
+VERIFY = ('const { verify } = await import(process.argv[1]); '
+          'try { verify(process.argv[2], process.argv[3], process.argv[4]); } '
+          'catch (error) { console.error(error.message); process.exit(3); }')
 
 
-class BundleTests(unittest.TestCase):
+@unittest.skipIf(NODE is None, 'Node is required to check scripts/bundle.mjs')
+class SealVerifyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -19,80 +28,29 @@ class BundleTests(unittest.TestCase):
         self.binary.write_bytes(b'fixture binary')
         self.binary.chmod(0o755)
         (self.root / 'runtime/bin/alias').symlink_to('node')
+        (self.root / 'docs').mkdir()
+        (self.root / 'docs/nötes.md').write_text('unicode name')
+
+    def verify(self, target='linux', arch='arm64'):
+        return subprocess.run([NODE, '--input-type=module', '-e', VERIFY, (SCRIPTS / 'bundle.mjs').as_uri(),
+                               str(self.root), arch, target], capture_output=True, text=True).returncode
+
+    def test_version_has_one_source(self):
+        self.assertRegex((SCRIPTS / 'bundle.mjs').read_text(), f"export const VERSION = '{VERSION}';")
+
+    def test_python_seal_verifies_in_node_and_tampering_is_caught(self):
         seal(self.root, 'arm64')
-
-    def test_file_after_symlink_still_records_mode(self):
-        # A symlink sorts before 'node'; the loop must not shadow the target
-        # parameter with the readlink result and drop later files' modes.
-        files = inventory(self.root, 'linux')
-        self.assertEqual(files['runtime/bin/alias']['type'], 'symlink')
-        self.assertIn('mode', files['runtime/bin/node'])
-
-    def test_relocated_bundle_verifies(self):
-        moved = self.root.with_name('moved')
-        self.root.rename(moved)
-        verify(moved, 'arm64')
-
-    def test_modified_file_is_rejected(self):
-        self.binary.write_bytes(b'corrupted binary')
-        with self.assertRaisesRegex(ValueError, 'integrity'):
-            verify(self.root, 'arm64')
-
-    def test_missing_file_is_rejected(self):
-        self.binary.unlink()
-        with self.assertRaises(ValueError):
-            verify(self.root, 'arm64')
-
-    def test_injected_module_is_rejected(self):
-        (self.root / 'runtime/unexpected.js').write_text('unexpected code')
-        with self.assertRaisesRegex(ValueError, 'integrity'):
-            verify(self.root, 'arm64')
-
-    def test_wrong_architecture_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, 'architecture'):
-            verify(self.root, 'x64')
-
-    def test_invalid_manifest_shape_is_rejected(self):
-        (self.root / 'bundle.json').write_text('[]')
-        with self.assertRaisesRegex(ValueError, 'manifest'):
-            verify(self.root, 'arm64')
-
-    def test_missing_payload_does_not_download(self):
-        (self.root / 'bundle.json').unlink()
-        with self.assertRaisesRegex(ValueError, 'release bundle'):
-            verify(self.root, 'arm64')
-
-    def test_escaping_symlink_is_rejected(self):
-        alias = self.root / 'runtime/bin/alias'
-        alias.unlink()
-        alias.symlink_to('/bin/sh')
-        with self.assertRaisesRegex(ValueError, 'symlink'):
-            verify(self.root, 'arm64')
-
-    @unittest.skipIf(sys.platform == 'win32', 'Windows has no POSIX executable bit to seal')
-    def test_executable_bit_change_is_rejected(self):
+        self.assertEqual(json.loads((self.root / 'bundle.json').read_text())['version'], VERSION)
+        self.assertEqual(self.verify(), 0)
+        self.assertEqual(self.verify(arch='x64'), 3)
         self.binary.chmod(0o644)
-        with self.assertRaisesRegex(ValueError, 'integrity'):
-            verify(self.root, 'arm64')
+        self.assertEqual(self.verify(), 3)
 
-    def test_windows_zip_extraction_preserves_byte_integrity_without_unix_modes(self):
-        windows = self.root.with_name('windows')
-        (windows / 'bin').mkdir(parents=True)
-        launcher = windows / 'bin/lcu.cmd'
-        launcher.write_bytes(b'fixture launcher\r\n')
-        launcher.chmod(0o755)
-        seal(windows, 'x64', 'windows')
-        archive = self.root.with_name('windows.zip')
-        with ZipFile(archive, 'w') as zipped:
-            for path in windows.rglob('*'):
-                if path.is_file():
-                    zipped.write(path, path.relative_to(windows))
-        extracted = self.root.with_name('extracted')
-        with ZipFile(archive) as zipped:
-            zipped.extractall(extracted)
-        # Windows ZIP extraction does not preserve a Unix executable bit.
-        (extracted / 'bin/lcu.cmd').chmod(0o644)
-        verify(extracted, 'x64', 'windows')
-        (extracted / 'bin/lcu.cmd').write_bytes(b'tampered\r\n')
-        with self.assertRaisesRegex(ValueError, 'integrity'):
-            verify(extracted, 'x64', 'windows')
+    def test_windows_seal_ignores_modes(self):
+        seal(self.root, 'x64', 'windows')
+        self.binary.chmod(0o600)
+        self.assertEqual(self.verify('windows', 'x64'), 0)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -13,44 +13,10 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'scripts'))
-import install_windows
 from lcu import setup
 
 
 class WindowsSetupTests(unittest.TestCase):
-    def test_windows_installer_forwards_audio_option_to_shared_setup(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            prefix = Path(temporary) / 'LCU'
-            release = Path(temporary) / 'release'
-            with mock.patch.object(install_windows, 'install', return_value=release) as install, \
-                 mock.patch.object(install_windows.subprocess, 'run') as run:
-                install_windows.main(['--prefix', str(prefix), '--agent', 'pi', '--audio', '--yes'])
-            install.assert_called_once_with(prefix)
-            command = run.call_args.args[0]
-            self.assertIn('--audio', command)
-            self.assertIn('--agent', command)
-            self.assertIn('pi', command)
-
-    def test_missing_registered_app_has_official_download_link_before_prefix_writes(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary).resolve()
-            source = base / 'source'
-            source.mkdir()
-            (source / 'runtime.lock.json').write_text(json.dumps({'platforms': {'windows': {
-                'architectures': {'x64': {}}}}}))
-            prefix = base / 'LCU'
-            with mock.patch.object(install_windows.platform, 'system', return_value='Windows'), \
-                 mock.patch.object(install_windows, 'SOURCE', source), \
-                 mock.patch.object(install_windows, 'architecture', return_value='x64'), \
-                 mock.patch.object(install_windows, 'verify'), \
-                 mock.patch.object(install_windows, 'resolve_installed_windows_app',
-                                   side_effect=ValueError(
-                                       'Install the official ChatGPT MSIX for this Windows account first.')):
-                with self.assertRaisesRegex(ValueError, 'chatgpt.com/download/'):
-                    install_windows.install(prefix)
-            self.assertFalse(prefix.exists())
-
     @unittest.skipIf(os.name == 'nt', 'This decoder fixture uses a POSIX executable shebang')
     def test_node_installer_output_decodes_under_legacy_windows_locale(self):
         with tempfile.TemporaryDirectory() as temporary:

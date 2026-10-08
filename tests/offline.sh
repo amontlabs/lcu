@@ -106,7 +106,7 @@ assert not (prefix / 'apps').exists(), 'installer copied the application'
 actual = {}
 for path in sorted(release.rglob('*')):
     relative = path.relative_to(release).as_posix()
-    if relative in {'bundle.json', 'installation.json', 'app'}:
+    if relative in {'bundle.json', 'installation.json', 'app', 'node-path'}:
         continue
     mode = path.lstat().st_mode
     if stat.S_ISLNK(mode):

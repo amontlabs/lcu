@@ -16,10 +16,9 @@ else
 import json,sys
 from pathlib import Path
 sys.path[:0]=["/src/scripts","/src"]
-from bundle import architecture
-from installed_app import _download
+from bundle import architecture, download_fixture
 lock=json.loads(Path("/src/runtime.lock.json").read_text()); entry=lock["architectures"][architecture()]
-_download(lock,entry,Path("/out/upstream.deb"))
+download_fixture(lock,entry,Path("/out/upstream.deb"))
 '
 fi
 mounts=(-v "$repo:/src:ro" -v "$package:/package.deb:ro")
