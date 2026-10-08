@@ -1,8 +1,7 @@
 // `lcu setup`: register LCU with agent harnesses, without requiring a running desktop.
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { accessSync, chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync,
-  realpathSync, renameSync, rmdirSync, rmSync, statSync, writeSync } from 'node:fs';
+import { accessSync, chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync,   realpathSync, renameSync, rmdirSync, rmSync, statSync, writeSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -16,10 +15,10 @@ import { install as installApprovalMod } from './claude_mod.mjs';
 import { install as hideHostOnlyTools } from './claude_visibility.mjs';
 import { configureHermes, configureOmp } from './harness_setup.mjs';
 import { withLock } from './lock.mjs';
-import { say, warn } from './terminal.mjs';
+import { ask, say, warn } from './terminal.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const WINDOWS = process.platform === 'win32';
+const windows = () => process.platform === 'win32';
 export const APP_DOWNLOAD_URL = 'https://chatgpt.com/download/';
 
 export function appPrerequisiteMessage(location, { alternateLocation = false } = {}) {
@@ -68,14 +67,14 @@ export function windowsCommandLine(args) {
 
 /** The first executable named `name` on `path` (PATHEXT applies on Windows), or null. */
 export function which(name, path = process.env.PATH ?? '') {
-  const extensions = WINDOWS ? ['', ...(process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')] : [''];
+  const extensions = windows() ? ['', ...(process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')] : [''];
   for (const directory of path.split(delimiter).filter(Boolean)) {
     for (const extension of extensions) {
       const candidate = join(directory, name + extension);
       try {
         if (!statSync(candidate).isFile()) continue;
         accessSync(candidate, constants.X_OK);
-        if (!WINDOWS || extension) return candidate;
+        if (!windows() || extension) return candidate;
       } catch {
         // not here
       }
@@ -84,32 +83,11 @@ export function which(name, path = process.env.PATH ?? '') {
   return null;
 }
 
-/** Read one line from the terminal (empty at end of input). */
-function ask(question) {
-  process.stdout.write(question);
-  const bytes = [];
-  const byte = Buffer.alloc(1);
-  for (;;) {
-    let count;
-    try {
-      count = readByte(byte);
-    } catch (error) {
-      if (error.code === 'EAGAIN') continue;
-      if (error.code === 'EOF') break;
-      throw error;
-    }
-    if (!count || byte[0] === 0x0a) break;
-    bytes.push(byte[0]);
-  }
-  return Buffer.from(bytes).toString('utf8').replace(/\r$/, '');
-}
-const readByte = (byte) => readSync(0, byte, 0, 1, null);
-
 /** `{name, uid, gid, home}` of a local account, or null. */
 function lookupAccount(name) {
   const own = userInfo();
   if (name === undefined || name === own.username) {
-    return { name: own.username, uid: own.uid, gid: own.gid, home: WINDOWS ? process.env.USERPROFILE || own.homedir : own.homedir };
+    return { name: own.username, uid: own.uid, gid: own.gid, home: windows() ? process.env.USERPROFILE || own.homedir : own.homedir };
   }
   if (process.platform === 'darwin') {
     const result = capture.run('/usr/bin/dscacheutil', ['-q', 'user', '-a', 'name', name], { timeout: 20_000 });
@@ -247,7 +225,7 @@ export function applyChanges(changes) {
 
 // Saved choices ----------------------------------------------------------------------------------------
 
-const stateDirectory = (home) => (WINDOWS ? join(home, 'AppData/Local/LCU') : join(home, '.local/state/lcu'));
+const stateDirectory = (home) => (windows() ? join(home, 'AppData/Local/LCU') : join(home, '.local/state/lcu'));
 
 /** Run `fn` holding the account's setup lock. */
 export function setupLock(home, fn) {
@@ -332,7 +310,7 @@ export function installerEnvironment(home, names, environ = process.env) {
 
 /** `[node, skills, mcp]`: the bundled agent installers of a release. */
 export async function installerPaths(toolsRoot) {
-  const node = WINDOWS ? join((await import('./runtime.mjs')).paths(dirname(toolsRoot)).runtime, 'bin/node.exe')
+  const node = windows() ? join((await import('./runtime.mjs')).paths(dirname(toolsRoot)).runtime, 'bin/node.exe')
     : join(toolsRoot, 'node/bin/node');
   const paths = [node, join(toolsRoot, 'node_modules/skills/bin/cli.mjs'), join(toolsRoot, 'node_modules/add-mcp/dist/index.js')];
   for (const path of paths) {
@@ -433,7 +411,7 @@ export async function hostPolicy(releaseRoot) {
 /** The selected app's resource directory, without depending on release payload copies. */
 export async function installedAppResources(releaseRoot) {
   releaseRoot = realpath(resolve(releaseRoot));
-  if (WINDOWS) return (await import('./runtime.mjs')).paths(releaseRoot).resources;
+  if (windows()) return (await import('./runtime.mjs')).paths(releaseRoot).resources;
   const descriptor = join(releaseRoot, 'installation.json');
   if (!isFile(descriptor)) throw new Error(`Installed application descriptor missing: ${descriptor}`);
   let installation;
@@ -464,7 +442,7 @@ const realpath = (path) => { try { return realpathStrict(path); } catch { return
 
 /** Delete the skill earlier LCU versions generated; official Codex computer use registers none. */
 export function removeGeneratedSkill(home) {
-  const root = WINDOWS ? join(home, 'AppData/Local/LCU/skills') : join(home, '.local/share/lcu/skills');
+  const root = windows() ? join(home, 'AppData/Local/LCU/skills') : join(home, '.local/share/lcu/skills');
   const generated = join(regularPath(root), 'lcu');
   const info = lstat(generated);
   if (info?.isDirectory() && !info.isSymbolicLink()) {
@@ -615,7 +593,7 @@ export async function configure(names, home, command, toolsRoot, releaseRoot,
           const detail = (result.stdout || result.stderr || '').trim();
           throw new Error(`Codex registration returned unexpected output${detail ? `: ${detail}` : ''}`);
         }
-        const cli = locateCodexTools(resources, { windows: WINDOWS }).cli;
+        const cli = locateCodexTools(resources, { windows: windows() }).cli;
         await installHooks(cli, registered.path, cwd, env, originalPlugins, setupCommand);
       } else if (name === 'claude-code') {
         hideHostOnlyTools(home, { project: projectScope });
@@ -639,7 +617,7 @@ function registerPi(home, command, releaseRoot, { scope, project, env, cwd, setu
   }
   const adapter = join(releaseRoot, 'adapters/pi/index.ts');
   if (!existsSync(adapter)) throw new Error(`LCU Pi adapter missing: ${adapter}`);
-  const root = WINDOWS ? join(home, 'AppData/Local/LCU/pi') : join(home, '.local/share/lcu/pi');
+  const root = windows() ? join(home, 'AppData/Local/LCU/pi') : join(home, '.local/share/lcu/pi');
   const extension = join(root, 'extension.mjs');
   const selectedCommand = join(root, 'commands.json');
   const wrapper = `import lcu from ${JSON.stringify(pathToFileURL(adapter).href)};\n` +
@@ -715,12 +693,12 @@ seams.exportFiles = exportFiles;
 
 // Command line -------------------------------------------------------------------------------------------
 
-const DEFAULT_PREFIX = WINDOWS ? join(process.env.LOCALAPPDATA || join(homedir(), 'AppData/Local'), 'LCU')
-  : process.platform === 'darwin' ? join(homedir(), '.local/share/lcu') : '/opt/lcu';
-const DEFAULT_SESSION = process.platform === 'darwin' || WINDOWS ? 'direct' : 'discover';
+const defaultPrefix = () => (windows() ? join(process.env.LOCALAPPDATA || join(homedir(), 'AppData/Local'), 'LCU')
+  : process.platform === 'darwin' ? join(homedir(), '.local/share/lcu') : '/opt/lcu');
+const defaultSession = () => (process.platform === 'darwin' || windows() ? 'direct' : 'discover');
 
 export const OPTIONS = {
-  prefix: { type: 'string', default: DEFAULT_PREFIX },
+  prefix: { type: 'string' },
   user: { type: 'string' },
   agent: { type: 'string', multiple: true, default: [] },
   scope: { type: 'string', default: 'user' },
@@ -733,7 +711,7 @@ export const OPTIONS = {
   audio: { type: 'boolean', default: false },
   'no-audio': { type: 'boolean', default: false },
   approval: { type: 'string' },
-  session: { type: 'string', default: DEFAULT_SESSION },
+  session: { type: 'string' },
   'allow-missing': { type: 'boolean', default: false },
   reconcile: { type: 'boolean', default: false },
   'browser-host': { type: 'boolean', default: false },
@@ -796,6 +774,8 @@ export function parse(argv, options = {}) {
       throw new UsageError(`argument --${key}: invalid choice: '${values[key]}' (choose from ${choices.join(', ')})`);
     }
   }
+  values.prefix ??= defaultPrefix();
+  values.session ??= defaultSession();
   return values;
 }
 
@@ -816,11 +796,11 @@ export function validate(args) {
   if (args.audio && args['no-audio']) throw new Error('Use either --audio or --no-audio, not both.');
   const prefix = args.prefix;
   const parts = normalize(prefix).split(/[\\/]/).filter(Boolean);
-  if (!isAbsolute(prefix) || parts.length < (WINDOWS ? 3 : 2) || prefix.split(/[\\/]/).includes('..') || /[\x00-\x1f]/.test(prefix)) {
+  if (!isAbsolute(prefix) || parts.length < (windows() ? 3 : 2) || prefix.split(/[\\/]/).includes('..') || /[\x00-\x1f]/.test(prefix)) {
     throw new Error('Use a dedicated absolute prefix, such as /opt/lcu.');
   }
   let account;
-  if (WINDOWS) {
+  if (windows()) {
     account = seams.account();
     if (args.user && args.user.toLowerCase() !== account.name.toLowerCase()) throw new Error('Windows setup only configures the current signed-in account.');
     if (args.session !== 'direct') throw new Error('Windows requires --session direct.');
@@ -870,13 +850,13 @@ function validateAgentScope(names, scope) {
 export const detect = (home) => Object.entries(CLIENTS)
   .filter(([, client]) => seams.which(client.executable) || existsSync(join(home, client.detectPath))).map(([name]) => name);
 
-function chooseAgents(home) {
+async function chooseAgents(home) {
   const detected = detect(home);
   say('Select one or more agents for this account (comma-separated IDs).');
   for (const [name, client] of Object.entries(CLIENTS)) say(`  ${name.padEnd(16)} ${client.label}${detected.includes(name) ? ' [detected]' : ''}`);
   say('Use all for every supported client, including those not installed yet.',
     'For other clients, cancel and use --export /absolute/new/plugin-directory.');
-  let names = [...new Set(seams.ask('Agents: ').trim().split(',').map((name) => name.trim()).filter(Boolean)
+  let names = [...new Set((await seams.ask('Agents: ')).trim().split(',').map((name) => name.trim()).filter(Boolean)
     .map((name) => ALIASES[name] ?? name))];
   if (names.length === 1 && names[0] === 'all') return Object.keys(CLIENTS);
   if (names.length === 1 && names[0] === 'auto') names = detected;
@@ -897,6 +877,7 @@ export function desktopReadinessRequest(args, { interactive, desktopCommand }) {
 
 /** Run a doctor command on this terminal; `{status, interrupted, error}`. An interrupt stops only the doctor. */
 function runDesktopDoctor(command, timeout) {
+  command = startable(command);
   const ignore = () => {};
   process.on('SIGINT', ignore);
   try {
@@ -907,18 +888,29 @@ function runDesktopDoctor(command, timeout) {
   }
 }
 
-/** `{releaseRoot, runtime, launcher, desktopCommand}` for the selected session mode. */
+/**
+ * `{releaseRoot, runtime, launcher, desktopCommand, directRuntime}` for the selected session mode. Registrations
+ * name stable launchers: on Windows `<prefix>\lcu.cmd`, which the installer rewrites to run the selected app's
+ * Node, since that Node lives in a private app generation `lcu prune` may remove. `directRuntime` is how setup
+ * itself runs LCU: Node does not start a .cmd file without a shell, so on Windows it runs the launcher on the
+ * current Node.
+ */
 export function runtimePaths(args, account, session = args.session) {
-  if (WINDOWS) {
+  if (windows()) {
+    const runtime = join(args.prefix, 'lcu.cmd');
     const launcher = join(args.prefix, 'windows_launcher.mjs');
-    return { releaseRoot: dirname(HERE), runtime: join(args.prefix, 'lcu.cmd'), launcher, desktopCommand: [process.execPath, launcher] };
+    return { releaseRoot: dirname(HERE), runtime, launcher, desktopCommand: [runtime], directRuntime: [process.execPath, launcher] };
   }
   const releaseRoot = join(args.prefix, 'current');
   const runtime = join(releaseRoot, 'bin/lcu');
   const launcher = join(releaseRoot, 'bin/lcu-session');
-  return { releaseRoot, runtime, launcher,
+  return { releaseRoot, runtime, launcher, directRuntime: [runtime],
     desktopCommand: session === 'direct' ? [runtime] : [launcher, '--user', account.name, '--', runtime] };
 }
+
+/** A command setup can start itself: the Windows `lcu.cmd` launcher becomes the current Node on its script. */
+const startable = (command) => (windows() && /\.cmd$/i.test(command[0])
+  ? [process.execPath, join(dirname(command[0]), 'windows_launcher.mjs'), ...command.slice(1)] : command);
 
 function requireLaunchers(...paths) {
   for (const path of paths) {
@@ -959,9 +951,9 @@ async function reconcile(args, account, home) {
       throw new Error(`Saved project directory is missing: ${context.project}. ` +
         'Rerun `lcu setup --agent all --allow-missing --scope project --project PATH`.');
     }
-    const { releaseRoot, runtime, launcher, desktopCommand } = runtimePaths(args, account, context.session);
+    const { releaseRoot, runtime, launcher, desktopCommand, directRuntime } = runtimePaths(args, account, context.session);
     requireLaunchers(runtime, launcher);
-    checkRuntime(WINDOWS ? desktopCommand : [runtime]);
+    checkRuntime(directRuntime);
     const toolsRoot = join(releaseRoot, 'agent-tools');
     const environment = { ...process.env, PATH: path };
     installerEnvironment(home, names, environment);
@@ -1014,7 +1006,7 @@ export async function main(argv) {
   try {
     const { account, names: selected } = validate(args);
     let names = selected;
-    const otherAccount = !WINDOWS && process.getuid() === 0 && account.uid !== 0;
+    const otherAccount = !windows() && process.getuid() === 0 && account.uid !== 0;
     if (args['validate-only']) {
       // Another account must never inherit the caller's profile overrides.
       if (!args.export) installerEnvironment(account.home, names, otherAccount ? {} : process.env);
@@ -1038,7 +1030,7 @@ export async function main(argv) {
 }
 
 async function setup(args, account, home, names) {
-  const { releaseRoot, runtime, launcher, desktopCommand } = runtimePaths(args, account);
+  const { releaseRoot, runtime, launcher, desktopCommand, directRuntime } = runtimePaths(args, account);
   requireLaunchers(runtime, launcher);
   if (names.length === 1 && names[0] === 'auto') {
     names = detect(home);
@@ -1050,7 +1042,7 @@ async function setup(args, account, home, names) {
     if (!seams.interactive()) {
       throw new Error('Noninteractive setup requires --agent ID (repeatable), --agent all, --agent auto, or --export PATH.');
     }
-    names = chooseAgents(home);
+    names = await chooseAgents(home);
   }
   validateAgentScope(names, args.scope);
   let missing = [];
@@ -1061,7 +1053,6 @@ async function setup(args, account, home, names) {
     missing = names.filter((name) => NEEDS_BINARY.includes(name) && !harnessInstalled(name, home));
     names = names.filter((name) => !missing.includes(name));
   }
-  const directRuntime = WINDOWS ? desktopCommand : [runtime];
   checkRuntime(directRuntime);
   const toolsRoot = join(releaseRoot, 'agent-tools');
   if (!args.export) {
@@ -1094,7 +1085,7 @@ async function registerLocked(args, account, home, names, missing, paths) {
     chrome = true;
     say('Keeping Chrome control enabled from the previous setup (use --no-chrome to disable).');
   } else if (!saved && !args.yes && seams.interactive()) {
-    chrome = ['y', 'yes'].includes(seams.ask('Enable Chrome browser control and its extension connector? [y/N] ').trim().toLowerCase());
+    chrome = ['y', 'yes'].includes((await seams.ask('Enable Chrome browser control and its extension connector? [y/N] ')).trim().toLowerCase());
   }
   // `ask` keeps harness defaults. A saved `auto` is reapplied to each harness and scope selected now; an
   // explicit `--approval ask` is the only thing that removes entries.
@@ -1135,13 +1126,13 @@ async function registerLocked(args, account, home, names, missing, paths) {
     say('Approval mode ask: remove only the entries `--approval auto` added, restoring harness defaults.');
   }
   if (audio) say('Computer audio selected: enable the original optional recording API and its approval flow. A saved audio file is not model audio input.');
-  if (WINDOWS && names.includes('claude-code')) {
+  if (windows() && names.includes('claude-code')) {
     say('Claude Code: original turn cleanup runs on normal Stop and active MCP-call cancellation. Esc during model wait after a tool completes has no cleanup event and may leave native helpers active.');
   }
   await (await import('./tested.mjs')).report(releaseRoot, { write: (text) => say(text.trimEnd()) });
   if (!args.yes) {
     if (!seams.interactive()) throw new Error('Review the selection above, then rerun with --yes for noninteractive setup.');
-    if (!['y', 'yes'].includes(seams.ask('Apply this setup? [y/N] ').trim().toLowerCase())) {
+    if (!['y', 'yes'].includes((await seams.ask('Apply this setup? [y/N] ')).trim().toLowerCase())) {
       say('Cancelled; no agent configuration changed.');
       return 'cancelled';
     }
@@ -1164,7 +1155,7 @@ async function registerLocked(args, account, home, names, missing, paths) {
   saveSetupState(home, { chrome, audio, approval: approvalMode, pending, pendingContext: pending.length
     ? (missing.length ? { scope: args.scope, session: args.session, project: args.project ?? null } : state.pending_context) : null });
   if (failures.length) {
-    const retry = [...directRuntime, 'setup', '--prefix', args.prefix, '--user', account.name, '--scope', args.scope,
+    const retry = [setupCommand, 'setup', '--prefix', args.prefix, '--user', account.name, '--scope', args.scope,
       '--session', args.session, '--yes', ...(args.project ? ['--project', args.project] : []),
       chrome ? '--chrome' : '--no-chrome', audio ? '--audio' : '--no-audio',
       // A defaulted `ask` must not be passed: it would remove approval entries.

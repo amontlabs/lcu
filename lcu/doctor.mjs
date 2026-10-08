@@ -1,6 +1,6 @@
 // `lcu doctor`: check the original desktop provider and guide first-use permissions.
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -10,7 +10,7 @@ import { summary as diagnosticLogSummary } from './diagnostic_log.mjs';
 import { MAC_HELPER, macSocketPathProblem, plistStrings } from './platforms.mjs';
 import { unshimmedEnv } from './sandbox_shim.mjs';
 import { changedSinceInstall, report as reportTestedPair } from './tested.mjs';
-import { say, warn } from './terminal.mjs';
+import { ask, say, warn } from './terminal.mjs';
 
 const MAC_ACCESSIBILITY_SETTINGS = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
 const MAC_SCREEN_CAPTURE_SETTINGS = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
@@ -76,25 +76,6 @@ try {
 }
 console.log(JSON.stringify(report));
 `;
-
-/** Read one line from the terminal (empty at end of input). */
-function ask(question) {
-  process.stdout.write(question);
-  const bytes = [];
-  const byte = Buffer.alloc(1);
-  for (;;) {
-    let count;
-    try {
-      count = readSync(0, byte, 0, 1, null);
-    } catch (error) {
-      if (error.code === 'EAGAIN') continue;
-      break;
-    }
-    if (!count || byte[0] === 0x0a) break;
-    bytes.push(byte[0]);
-  }
-  return Buffer.from(bytes).toString('utf8').replace(/\r$/, '');
-}
 
 /** The runtime checks, prompts and host calls doctor makes, replaceable in tests. */
 export const host = {
@@ -170,12 +151,12 @@ export function macInstructions(app) {
     'macOS may not list an app until its first approved use. LCU never grants access or opens Settings on its own.');
 }
 
-function macGuidance(app, retry) {
+async function macGuidance(app, retry) {
   macInstructions(app);
   say('', 'Choose a settings pane, retry the installed-runtime check, or finish:', '  [a] Open Accessibility settings',
     '  [s] Open Screen & System Audio Recording settings', '  [r] Recheck original runtime metadata', '  [Enter] Finish');
   for (;;) {
-    const choice = host.ask('Choice [a/s/r/Enter]: ').trim().toLowerCase();
+    const choice = (await host.ask('Choice [a/s/r/Enter]: ')).trim().toLowerCase();
     if (choice === 'a' || choice === '1') host.openSettings(MAC_ACCESSIBILITY_SETTINGS, 'System Settings > Privacy & Security > Accessibility');
     else if (choice === 's' || choice === '2') {
       host.openSettings(MAC_SCREEN_CAPTURE_SETTINGS, 'System Settings > Privacy & Security > Screen & System Audio Recording');
@@ -258,7 +239,7 @@ function printLinuxStatus(report) {
   return Boolean(windows.ok && screenshot.ok);
 }
 
-function linuxGuidance(report, retry) {
+async function linuxGuidance(report, retry) {
   for (;;) {
     if (printLinuxStatus(report)) {
       say('Computer use is ready for the first agent call.');
@@ -266,7 +247,7 @@ function linuxGuidance(report, retry) {
     }
     say('A failed check can be a desktop-service problem; this result alone does not identify a missing permission.',
       '  [r] Retry the original checks', '  [Enter] Finish');
-    if (host.ask('Choice [r/Enter]: ').trim().toLowerCase() !== 'r') {
+    if ((await host.ask('Choice [r/Enter]: ')).trim().toLowerCase() !== 'r') {
       say('Desktop readiness remains incomplete. Rerun lcu doctor after resolving the issue.');
       return false;
     }
@@ -349,7 +330,7 @@ export async function main(root, argv, { resolved, env } = {}) {
     if (target === 'mac') {
       say('This is a runtime/backend failure; it does not prove that a macOS permission is missing.');
       if (interactive) {
-        macGuidance(app, check);
+        await macGuidance(app, check);
         return 2;
       }
       macInstructions(app);
@@ -359,7 +340,7 @@ export async function main(root, argv, { resolved, env } = {}) {
   }
   if (target === 'linux') {
     let ready;
-    if (interactive) ready = linuxGuidance(report, check);
+    if (interactive) ready = await linuxGuidance(report, check);
     else {
       ready = printLinuxStatus(report);
       if (ready) say('Computer use is ready for the first agent call.');
@@ -376,7 +357,7 @@ export async function main(root, argv, { resolved, env } = {}) {
   }
   if (target === 'mac') {
     const ok = printMacStatus(report);
-    if (interactive) macGuidance(app, check);
+    if (interactive) await macGuidance(app, check);
     else {
       macInstructions(app);
       say('Next: reconnect your agent and make the first approved LCU screenshot call to verify access.');

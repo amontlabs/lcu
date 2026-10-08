@@ -81,9 +81,21 @@ test('visibility denies exactly the host-only tools, adds the lifecycle hooks on
   assert.ok(!visibility.MOD_ONLY.some((tool) => settings.permissions.deny.includes(tool)));
   visibility.install(home);
   assert.equal(readFileSync(path, 'utf8'), first);
-  for (const bad of ['[]', '{"permissions": []}', '{"permissions": {"deny": [1]}}', '{"hooks": {"Stop": {}}}', '{"hooks": {"Stop": [{"matcher": 1, "hooks": []}]}}']) {
+  for (const bad of ['[]', '{"permissions": []}', '{"permissions": {"deny": [1]}}', '{"hooks": {"Stop": {}}}', '{"hooks": {"Stop": [{"matcher": 1, "hooks": []}]}}',
+    '{"permissions": null}', '{"permissions": {"deny": null}}', '{"hooks": null}', '{"hooks": {"Stop": null}}']) {
     writeFileSync(path, bad);
     assert.throws(() => visibility.install(home), Error, bad);
     assert.equal(readFileSync(path, 'utf8'), bad);
+  }
+});
+
+test('an empty settings file or one with a byte order mark is read as before', (t) => {
+  for (const content of ['', '\uFEFF{"model": "sonnet"}']) {
+    const home = temporary(t);
+    const path = write(join(home, '.claude/settings.json'), content);
+    visibility.install(home);
+    const settings = JSON.parse(readFileSync(path, 'utf8'));
+    assert.deepEqual(settings.permissions.deny, visibility.HOST_ONLY);
+    if (content) assert.equal(settings.model, 'sonnet');
   }
 });

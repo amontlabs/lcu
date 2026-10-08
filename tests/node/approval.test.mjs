@@ -104,7 +104,8 @@ test('Claude: host-only tools stay denied; mod-only tools are never allowed or d
 
 test('Claude: malformed settings are refused without a write', (t) => {
   const c = claude(t);
-  for (const content of ['{ not json', '[]', '{"permissions": []}', '{"permissions": {"allow": "x"}}', '{"permissions": {"allow": [1]}}']) {
+  for (const content of ['{ not json', '[]', '{"permissions": []}', '{"permissions": {"allow": "x"}}', '{"permissions": {"allow": [1]}}',
+    '{"permissions": null}', '{"permissions": {"allow": null}}']) {
     write(c.user, content);
     assert.throws(() => c.apply('auto'), Error, content);
     assert.equal(readFileSync(c.user, 'utf8'), content);
@@ -314,4 +315,14 @@ test('setup remembers the approval mode: default ask leaves harnesses alone, aut
   assert.equal(saved(), 'auto');
   assert.match(seen.err, /--approval auto/);
   assert.equal(await setup.main(['--approval', 'yolo']), 2);
+});
+
+test('Claude: an empty settings file or a byte order mark reads as before', (t) => {
+  const c = claude(t);
+  write(c.user, '');
+  assert.match(c.apply('auto'), /added/);
+  assert.deepEqual(c.read(c.user), { permissions: { allow: ['mcp__lcu__js', 'mcp__lcu__js_reset'] } });
+  write(c.user, '\uFEFF{"model": "x"}');
+  c.apply('auto');
+  assert.equal(c.read(c.user).model, 'x');
 });
