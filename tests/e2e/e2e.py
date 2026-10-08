@@ -396,6 +396,29 @@ def snapshot(root, label):
     return found
 
 
+# Files the port renamed on purpose. Each OLD path ending in the first name is compared with the NEW path
+# ending in the second; anything else under either name still shows as a difference. Not applied when OLD
+# and NEW are the same archive (the self-test).
+EXPECTED_RENAMES = (
+    # The Chrome native-host relay: Python's lcu-native-host.py became lcu-native-host.mjs, run by the same
+    # `lcu-native-host` sh launcher on the recorded Node (docs/releases/UNRELEASED.md).
+    ('/lcu-native-host.py', '/lcu-native-host.mjs'),
+)
+
+
+def expected_renames(old):
+    """OLD data with the EXPECTED_RENAMES applied to its keys, so NEW is compared under its own names."""
+    if isinstance(old, dict):
+        renamed = {}
+        for key, value in old.items():
+            for before, after in EXPECTED_RENAMES:
+                if isinstance(key, str) and key.endswith(before):
+                    key = key[:-len(before)] + after
+            renamed[key] = expected_renames(value)
+        return renamed
+    return [expected_renames(item) for item in old] if isinstance(old, list) else old
+
+
 def diff(old, new, path='', out=None):
     out = [] if out is None else out
     if isinstance(old, dict) and isinstance(new, dict):
@@ -674,6 +697,8 @@ def launch_registered(sandbox, argv):
     except subprocess.TimeoutExpired:
         process.kill()
     launches, _ = sandbox.take_records()
+    for record in launches:  # as in launch(): JSON-valued variables are compared as data, not spacing
+        record['env'] = {key: parse_json(value) for key, value in record['env'].items()}
     return [{k: v for k, v in record.items() if k != 'stdin'} for record in launches]
 
 
@@ -719,7 +744,9 @@ def check_upgrade(sandbox, old, new, mode):
         failures.extend(f'{stage}: launch {line}' for line in diff(before['launch'], after['launch']))
         if agent:
             failures.extend(f'{stage}: registered path missing: {path}' for path in after['missing-paths'])
-            failures.extend(f'{stage}: agent files {line}' for line in diff(before['files'], after['files']))
+            renamed = version == new.version and old.archive != new.archive  # the self-test compares OLD with itself
+            files = expected_renames(before['files']) if renamed else before['files']
+            failures.extend(f'{stage}: agent files {line}' for line in diff(files, after['files']))
 
     before = observe()
     if agent and (not before['registrations'] or before['missing-paths'] or not before['launch']):
@@ -825,7 +852,7 @@ class Run:
             finally:
                 sandbox.close()
                 sandbox.root.rename(sandbox.root.with_name(f'{label}-{impl.label}'))
-        return diff(*results)
+        return diff(expected_renames(results[0]) if old.archive != new.archive else results[0], results[1])
 
     def check(self, name, old, new):
         """(status, lines): status is PASS, FAIL or SKIP."""
