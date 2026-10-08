@@ -582,6 +582,7 @@ test('a service that does not exit is waited for a bounded time and never force-
 
 test('off macOS nothing is looked for; on macOS the response passes the lock path and the requester', async (t) => {
   const run = t.mock.method(process, 'kill');
+  override(t, process, 'platform', 'linux');
   assert.deepEqual(await recoverResponse(), { ok: true, recovered: false, reason: 'not macOS' });
   assert.equal(run.mock.callCount(), 0);
   assert.equal(await executablePath(process.pid), null);
@@ -713,10 +714,9 @@ test('the peer lock never follows a link, needs its directory, and is never take
   const base = temporary(t);
   write(join(base, 'real'));
   symlinkSync(join(base, 'real'), join(base, 'link'));
-  if (process.platform !== 'darwin') {
-    assert.equal(PeerLock.defaultPath(), null);
-    assert.equal((await new PeerLock(join(base, 'linux.lock')).acquire()).acquired, false);
-  }
+  override(t, process, 'platform', 'linux');
+  assert.equal(PeerLock.defaultPath(), null);
+  assert.equal((await new PeerLock(join(base, 'linux.lock')).acquire()).acquired, false);
   macLocks(t);
   assert.equal((await new PeerLock(join(base, 'link'), { waitSeconds: 0 }).acquire()).acquired, false, 'a symlink is never followed');
   assert.equal((await new PeerLock(join(base, 'missing-dir/x.lock'), { waitSeconds: 0 }).acquire()).acquired, false);

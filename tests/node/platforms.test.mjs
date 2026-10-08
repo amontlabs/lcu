@@ -72,6 +72,7 @@ test('a compatible update is accepted without version, runtime or hash pins', (t
 
 test('missing files, partial CLI layouts, wrong identity, architecture or host are refused', (t) => {
   const { app, contents, cli } = macApp(t);
+  override(t, process, 'platform', 'linux');
   assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64' }), /only be validated on macOS/);
   onMac(t);
   assert.throws(() => resolveInstalledMacApp(app, { arch: 'x86' }), /Unsupported macOS architecture/);
