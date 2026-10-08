@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import fs, { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { join } from 'node:path';
-import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
@@ -11,7 +10,9 @@ import {
   parseProcessStart, parseProcessTable, processExists, recoverResponse, recoverStaleService, runTurnEnded, singleFlight,
   startOriginalHost, verifyServiceSignature,
 } from '../../lcu/macos_host.mjs';
-import { override, temporary, write } from './fixtures.mjs';
+import { override, posixTests, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the macOS lifetime host uses Unix sockets and sh stand-ins for ps, lsof and codesign');
 
 // ---- the private lifetime host --------------------------------------------------------------------------
 

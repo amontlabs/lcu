@@ -9,7 +9,7 @@ import {
   PACKAGE_NAME, PACKAGE_PUBLISHER, WINDOWS_REQUIRED_FILES, applicationInventory, canonicalJson, inventorySha256, registeredPackage,
   resolveInstalledWindowsApp, validateWindowsAppTree,
 } from '../../lcu/windows.mjs';
-import { override, temporary, write } from './fixtures.mjs';
+import { override, posixOnly, temporary, write } from './fixtures.mjs';
 
 const VERSION = '26.917.9434.0';
 const RUNTIME = '0.0.16/20260915001755-492f19756c31';
@@ -148,7 +148,7 @@ function windowsRelease(t) {
   return { base, prefix, root, app, runtime: join(app, runtime), resources: join(app, 'app/resources'), digest, out: join(base, 'child.json') };
 }
 
-test('the managed app supplies the original Windows paths and environment', (t) => {
+test('the managed app supplies the original Windows paths and environment', { skip: posixOnly('the managed-copy fixture stands in sh scripts for node.exe') }, (t) => {
   const r = windowsRelease(t);
   const selected = paths(r.root);
   assert.deepEqual([selected.app, selected.resources, selected.runtime], [r.app, r.resources, r.runtime]);
@@ -169,7 +169,7 @@ async function launchWindows(t, r, argv, settings = {}) {
   return { status, child: JSON.parse(readFileSync(r.out, 'utf8')), host: JSON.parse(readFileSync(`${r.out}.host`, 'utf8')) };
 }
 
-test('the original launcher runs with the original pipe host around it', async (t) => {
+test('the original launcher runs with the original pipe host around it', { skip: posixOnly('the managed-copy fixture stands in sh scripts for node.exe') }, async (t) => {
   const r = windowsRelease(t);
   const { status, child, host } = await launchWindows(t, r, []);
   assert.equal(status, 0);
@@ -183,7 +183,7 @@ test('the original launcher runs with the original pipe host around it', async (
   assert.equal(child.env.LCU_WRE_SKY_SERVICE_PATH, join(r.runtime, 'bin/node_modules/@oai/sky/dist/project/cua/sky_js/src/service.js'));
 });
 
-test('other trusted services are kept, the browser one with --chrome; a custom Sky service or a bad map is refused', async (t) => {
+test('other trusted services are kept, the browser one with --chrome; a custom Sky service or a bad map is refused', { skip: posixOnly('the managed-copy fixture stands in sh scripts for node.exe') }, async (t) => {
   const r = windowsRelease(t);
   assert.equal(JSON.parse((await launchWindows(t, r, [], { NODE_REPL_TRUSTED_SERVICES: '{"browser":"fixture"}' })).child.env.NODE_REPL_TRUSTED_SERVICES).browser, 'fixture');
   const chrome = JSON.parse((await launchWindows(t, r, ['--chrome'])).child.env.NODE_REPL_TRUSTED_SERVICES);
@@ -198,7 +198,7 @@ test('other trusted services are kept, the browser one with --chrome; a custom S
   assert.throws(() => readFileSync(r.out), /ENOENT/, 'the original server never started');
 });
 
-test('the descriptor must name the managed generation and its intact inventory', (t) => {
+test('the descriptor must name the managed generation and its intact inventory', { skip: posixOnly('the managed-copy fixture stands in sh scripts for node.exe') }, (t) => {
   const r = windowsRelease(t);
   const descriptorPath = join(r.root, 'installation.json');
   const descriptor = JSON.parse(readFileSync(descriptorPath));
@@ -216,13 +216,13 @@ test('the descriptor must name the managed generation and its intact inventory',
   assert.throws(() => paths(r.root), /inventory does not match its descriptor/);
 });
 
-test('the original server’s exit status reaches the caller; a signal gives 128 + its number', async (t) => {
+test('the original server’s exit status reaches the caller; a signal gives 128 + its number', { skip: posixOnly('the managed-copy fixture stands in sh scripts for node.exe') }, async (t) => {
   const r = windowsRelease(t);
   assert.equal((await launchWindows(t, r, [], { LCU_TEST_STATUS: '7' })).status, 7);
   assert.equal((await launchWindows(t, r, [], { LCU_TEST_SIGNAL: 'SIGTERM' })).status, 128 + 15);
 });
 
-test('the owned host is disposed of when the original server cannot start', async (t) => {
+test('the owned host is disposed of when the original server cannot start', { skip: posixOnly('the managed-copy fixture stands in sh scripts for node.exe') }, async (t) => {
   const r = windowsRelease(t);
   override(t, process, 'env', { PATH: process.env.PATH, USERPROFILE: 'C:\\fixture', LCU_TEST_OUT: r.out, LCU_TEST_BREAK: '1' });
   await assert.rejects(main(r.root, []), { code: 'EACCES' });

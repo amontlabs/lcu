@@ -2,10 +2,11 @@
 import assert from 'node:assert/strict';
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
 import * as browser from '../../lcu/browser.mjs';
-import { REPO, output, override, result, temporary, write } from './fixtures.mjs';
+import { REPO, output, override, posixTests, result, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the relay launcher is an sh script with POSIX modes');
 
 const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64';
 // Stands in for the original plugin's installManifest.mjs: writes a manifest per browser under HOME.

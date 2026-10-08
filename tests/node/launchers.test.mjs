@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
-import { REPO, temporary } from './fixtures.mjs';
+import { REPO, posixTests, temporary } from './fixtures.mjs';
+
+const test = posixTests('bin/lcu, lcu-session and lcu-codex-sandbox are sh launchers');
 
 function tree(t) {
   const base = temporary(t);
@@ -69,7 +70,7 @@ test('a recorded Node that is not executable, or a directory, is refused', (t) =
   assert.match(session.stderr, /^LCU session: /);
 });
 
-test('an unreadable node-path is an error, never a fallback', { skip: process.getuid() === 0 && 'root reads every file' }, (t) => {
+test('an unreadable node-path is an error, never a fallback', { skip: process.getuid?.() === 0 && 'root reads every file' }, (t) => {
   const r = tree(t);
   writeFileSync(r.nodePath, r.node);
   chmodSync(r.nodePath, 0);

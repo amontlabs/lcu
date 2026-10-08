@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, statSync, symlinkSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
 import { FAULT_ENV, Unrecognized, decide, main, parseTomlValue, unshimmedEnv } from '../../lcu/sandbox_shim.mjs';
-import { REPO, override, temporary, write } from './fixtures.mjs';
+import { REPO, override, posixTests, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the Linux/macOS sandbox shim, with POSIX modes and sh stand-ins');
 
 const PROFILE = 'permissions.node_repl={filesystem = {":root" = "read", ":tmpdir" = "read"}, network = {enabled = false}}';
 const PREFIX = ['sandbox', '-c', 'shell_environment_policy.inherit="all"', '-c', 'default_permissions="node_repl"'];

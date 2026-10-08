@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
 import { main } from '../../lcu/status.mjs';
-import { linuxApp, output, override, temporary, write } from './fixtures.mjs';
+import { linuxApp, output, override, posixTests, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the Linux release layout, whose app is a symlink');
 
 function release(t) {
   const base = temporary(t);

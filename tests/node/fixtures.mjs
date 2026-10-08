@@ -2,11 +2,25 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { VERSION, inventory } from '../../scripts/bundle.mjs';
 
 export const REPO = join(dirname(fileURLToPath(import.meta.url)), '../..');
+
+/**
+ * The `skip` option of a test that cannot run on Windows: false elsewhere, the reason (POSIX modes, symlinks,
+ * sh stand-ins) on Windows.
+ */
+export const posixOnly = (reason) => process.platform === 'win32' && `needs POSIX: ${reason}`;
+
+/** node:test's `test` for a file whose tests all need POSIX; on Windows each is skipped with `reason`. */
+export function posixTests(reason) {
+  if (process.platform !== 'win32') return test;
+  return (name, options, fn) => test(name, { ...(typeof options === 'object' ? options : {}), skip: posixOnly(reason) },
+    typeof options === 'function' ? options : fn);
+}
 
 /** A resolved temporary directory removed after the test. */
 export function temporary(t) {

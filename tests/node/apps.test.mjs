@@ -2,10 +2,11 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
 import * as apps from '../../lcu/apps.mjs';
-import { REPO, output, temporary, write } from './fixtures.mjs';
+import { REPO, output, posixTests, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the apps helper stand-in is an sh script and the store keeps POSIX modes');
 
 const plist = (info) => `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n${Object.entries(info)
   .map(([key, value]) => `\t<key>${key}</key>\n\t<string>${value}</string>\n`).join('')}</dict>\n</plist>\n`;

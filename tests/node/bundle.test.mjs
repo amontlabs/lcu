@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { architecture, inventory, verify } from '../../scripts/bundle.mjs';
-import { override, seal, temporary, write } from './fixtures.mjs';
+import { override, posixOnly, seal, temporary, write } from './fixtures.mjs';
 
 function bundle(t) {
   const root = join(temporary(t), 'bundle');
@@ -14,7 +14,7 @@ function bundle(t) {
   return { root, binary };
 }
 
-test('a file after a symlink still records its mode', (t) => {
+test('a file after a symlink still records its mode', { skip: posixOnly('POSIX file modes') }, (t) => {
   const files = inventory(bundle(t).root);
   assert.equal(files['runtime/bin/alias'].type, 'symlink');
   assert.equal(files['runtime/bin/node'].mode, 0o755);
@@ -26,7 +26,7 @@ test('a relocated bundle verifies', (t) => {
   assert.equal(verify(`${root}-moved`, 'arm64').architecture, 'arm64');
 });
 
-test('modified, missing, injected and re-moded files are rejected', (t) => {
+test('modified, missing, injected and re-moded files are rejected', { skip: posixOnly('POSIX file modes') }, (t) => {
   for (const change of [
     ({ binary }) => writeFileSync(binary, 'corrupted'),
     ({ binary }) => unlinkSync(binary),

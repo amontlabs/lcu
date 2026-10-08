@@ -2,12 +2,13 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
 import * as approval from '../../lcu/approval.mjs';
 import * as visibility from '../../lcu/claude_visibility.mjs';
 import * as setup from '../../lcu/setup.mjs';
-import { REPO, output, override, result, temporary, write } from './fixtures.mjs';
+import { REPO, output, override, posixTests, result, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('fake launchers and harness CLIs are sh scripts, and accounts carry POSIX uid/gid');
 
 function claude(t) {
   const root = temporary(t);

@@ -1,4 +1,3 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:net';
 import {mkdtempSync, writeFileSync} from 'node:fs';
@@ -8,6 +7,9 @@ import {
   chooseCookie, clientIdPids, clientPid, inputState, parseDisplay, parseSetup, parseXauthority, releaseInput, requests,
   setupRequest, withDisplay, xServerInThisNamespace,
 } from '../../lcu/x11.mjs';
+import { posixTests } from './fixtures.mjs';
+
+const test = posixTests('X11 over Unix-domain sockets (Linux)');
 
 const hex = buffer => buffer.toString('hex');
 const u32 = (...values) => Buffer.from(new Uint32Array(values).buffer);

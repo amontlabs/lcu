@@ -3,12 +3,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 import { acquire } from '../../lcu/lock.mjs';
 import { SYSTEM_PACKAGES, checkedPrefix, deps, main, selectLinuxApp, selectRelease } from '../../scripts/install.mjs';
-import { REPO, linuxApp, override, seal, temporary, write } from './fixtures.mjs';
+import { REPO, linuxApp, override, posixTests, seal, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('install.sh and the Linux/macOS installer (POSIX accounts, modes and sh)');
 
 const ARCH = { arm64: 'arm64', x64: 'x64' }[process.arch];
 const linux = process.platform === 'linux';
@@ -145,7 +146,7 @@ test('agent setup runs from the new release with the forwarded options, and its 
   assert.ok(errors.join('').includes(join(prefix, 'current/bin/lcu')));
 });
 
-test('apt failure stops the install before any release changes', { skip: !linux || process.getuid() !== 0 }, async (t) => {
+test('apt failure stops the install before any release changes', { skip: !linux || process.getuid?.() !== 0 }, async (t) => {
   const base = temporary(t);
   stubbed(t, { base });
   const app = linuxApp(join(base, 'chatgpt'), { arch: ARCH });

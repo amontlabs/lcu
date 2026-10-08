@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
 import { AppServer, AppServerRequestError } from '../../lcu/app_server.mjs';
 import * as hooks from '../../lcu/codex_hooks.mjs';
 import * as setup from '../../lcu/setup.mjs';
-import { override, result, temporary, write } from './fixtures.mjs';
 import { parse as parseToml } from '../../lcu/toml.mjs';
+import { override, posixTests, result, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the fake Codex CLI is an sh script');
 
 test('the update-notice hooks run the stable command, quoted for each shell', () => {
   const group = hooks.noticeHook('/a b/current/bin/lcu');

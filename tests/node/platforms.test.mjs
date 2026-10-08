@@ -3,13 +3,14 @@ import childProcess from 'node:child_process';
 import { chmodSync, mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
 import {
   MAC_HELPER, MAC_REQUIRED_FILES, MAC_SOCKET_ENV, MAC_SOCKET_SUFFIX, aclWritersUntrusted, macSocketPath, readAcls,
   macSocketPathProblem, plistStrings, resolveInstalledLinuxApp, resolveInstalledMacApp, untrustedEntry,
 } from '../../lcu/platforms.mjs';
-import { linuxApp, override, temporary, write } from './fixtures.mjs';
+import { linuxApp, override, posixTests, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the Linux and macOS app checks test POSIX modes, ownership and symlinks');
 
 const VERSION = '26.924.22138';
 const RUNTIME = '0.0.24/20260924074400-f52ea85e2a98';
@@ -181,7 +182,7 @@ test('an app tree writable by other accounts is refused, including writable ance
   resolveInstalledLinuxApp(app, { arch: 'arm64' });
 });
 
-test('an app tree owned by another account is refused unless trusted', { skip: process.getuid() === 0 && 'root-owned files are always trusted' }, (t) => {
+test('an app tree owned by another account is refused unless trusted', { skip: process.getuid?.() === 0 && 'root-owned files are always trusted' }, (t) => {
   const app = linuxApp(join(temporary(t), 'chatgpt'));
   const owner = process.getuid();
   override(t, process, 'getuid', () => owner + 1);

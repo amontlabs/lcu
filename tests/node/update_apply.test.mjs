@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { deflateRawSync, gzipSync } from 'node:zlib';
 
 import * as apply from '../../lcu/update_apply.mjs';
-import { override, temporary, write } from './fixtures.mjs';
+import { override, posixOnly, temporary, write } from './fixtures.mjs';
 
 const INFO = { version: '0.9.2', tag: 'v0.9.2', release_url: 'https://example.invalid/r', severity: 'normal' };
 
@@ -133,7 +133,7 @@ test('a checksum mismatch, a path traversal or an escaping link stops before the
   assert.deepEqual(await run(t, windows.root, zip([['lcu-0.9.2-windows-x64/bundle.json', '{}'], ['../evil', 'x']])), [1, []]);
 });
 
-test('Linux runs the new Node installer for the same app, then the new release refreshes integrations', async (t) => {
+test('Linux runs the new Node installer for the same app, then the new release refreshes integrations', { skip: posixOnly('a Linux release layout with POSIX paths') }, async (t) => {
   const app = join(temporary(t), 'chatgpt');
   mkdirSync(app);
   const { root, prefix } = installed(t, { app });
@@ -174,7 +174,7 @@ test('an unwritable Linux prefix keeps the verified release and prints the sudo 
   assert.match(errors.join(''), /not writable by this account[\s\S]*sudo .*install\.mjs .*--user/);
 });
 
-test('extraction keeps files, modes and links inside the release', (t) => {
+test('extraction keeps files, modes and links inside the release', { skip: posixOnly('POSIX file modes') }, (t) => {
   const base = temporary(t);
   apply.extract(apply.tarEntries(tarGz([['r/bin/lcu', '#!/bin/sh\n'], ['r/bin/alias', { symlink: 'lcu' }], ['r/copy', { link: 'r/bin/lcu' }]])), base);
   assert.equal(readFileSync(join(base, 'r/bin/alias'), 'utf8'), '#!/bin/sh\n');

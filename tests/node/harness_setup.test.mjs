@@ -2,10 +2,11 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { test } from 'node:test';
 
 import * as setup from '../../lcu/setup.mjs';
-import { output, override, result, temporary, write } from './fixtures.mjs';
+import { output, override, posixTests, result, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the fake OMP and Hermes CLIs are sh scripts');
 
 function fixture(t) {
   const root = temporary(t);

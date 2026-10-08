@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 import * as setup from '../../lcu/setup.mjs';
-import { REPO, output, override, result, temporary, write } from './fixtures.mjs';
+import { REPO, output, override, posixTests, result, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('Linux/macOS setup (POSIX accounts with uid/gid, sh launchers)');
 
 const ALL = ['pi', 'codex', 'claude-code', 'omp', 'hermes'];
 const executable = (path) => write(path, '#!/bin/sh\nexit 0\n', 0o755);

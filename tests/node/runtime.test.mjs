@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 import { environment, leaveUnusableWorkingDirectory, main, paths } from '../../lcu/runtime.mjs';
-import { REPO, linuxApp, override, temporary, write } from './fixtures.mjs';
+import { REPO, linuxApp, override, posixTests, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the Linux launch path (process.execve, sh stand-ins, POSIX modes)');
 
 const NODE_SCRIPT = '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$LCU_TEST_OUT.argv"\nenv > "$LCU_TEST_OUT.env"\ncat > "$LCU_TEST_OUT.stdin"\n';
 

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 
 import * as origins from '../../lcu/origins.mjs';
 import { defaultCodexHome } from '../../lcu/runtime.mjs';
-import { output, override, temporary, write } from './fixtures.mjs';
+import { output, override, posixOnly, temporary, write } from './fixtures.mjs';
 import { parse as parseToml } from '../../lcu/toml.mjs';
 
 const SAMPLE = '[origins]\nallowed = ["https://ok.example"]\ndenied = ["https://bad.example", "http://localhost:3000"]\n';
@@ -124,7 +124,7 @@ test('forget covers every session by default and one with --session', async (t) 
   assert.equal((await f.run('forget')).code, 2);
 });
 
-test('forget keeps other keys, special characters and the file mode', async (t) => {
+test('forget keeps other keys, special characters and the file mode', { skip: posixOnly('POSIX file modes') }, async (t) => {
   const f = fixture(t);
   const path = f.session('abc', 'version = 2\nname = "agent"\n\n[origins]\nallowed = ["https://ok.example"]\n' +
     'denied = ["https://bad.example"]\nnote = "kept"\nflag = true\n"odd key" = "caf\\u00e9 \\"quoted\\" \\\\"\n\n[other]\nitems = ["a", "b"]\n');

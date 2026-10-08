@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
 import { discover, main, which } from '../../lcu/session.mjs';
-import { override, temporary, write } from './fixtures.mjs';
+import { override, posixTests, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('Linux desktop sessions (POSIX accounts and sh stand-ins)');
 
 function session(proc, pid, display = ':1') {
   write(join(proc, String(pid), 'comm'), 'xfce4-session\n');

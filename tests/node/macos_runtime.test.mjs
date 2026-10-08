@@ -3,11 +3,12 @@ import childProcess from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
 
 import { MAC_HELPER, MAC_REQUIRED_FILES } from '../../lcu/platforms.mjs';
 import { configureMacosLifecycle, environment, main, paths } from '../../lcu/runtime.mjs';
-import { override, temporary, write } from './fixtures.mjs';
+import { override, posixTests, temporary, write } from './fixtures.mjs';
+
+const test = posixTests('the macOS launch path, with sh stand-ins and POSIX modes');
 
 const VERSION = '26.924.22138';
 const RUNTIME = '0.0.24/20260924074400-f52ea85e2a98';
