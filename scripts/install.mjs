@@ -294,7 +294,9 @@ export async function main(argv) {
     throw new Error('--reconcile runs after installation: use `lcu setup --reconcile` from the installed release.');
   }
   // Setup checks its own options (account, scope, agents, export, profile overrides) before anything is written.
-  await (await setup()).main([...setupArguments(values, values.user), ...(values['browser-host'] ? ['--browser-host'] : []), '--validate-only']);
+  const refused = await (await setup()).main([...setupArguments(values, values.user),
+    ...(values['browser-host'] ? ['--browser-host'] : []), '--validate-only']);
+  if (refused) return refused;
   const owner = account(values.user);
   if (mac && values.session !== 'direct') throw new Error('macOS uses --session direct; XFCE session discovery is Linux-only');
   const runtimeOnly = values['runtime-only'];
