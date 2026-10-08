@@ -1,6 +1,7 @@
 // A small JSON-RPC client for the original Codex app-server over stdio.
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { batchCommand } from './capture.mjs';
 
 /** An error the app-server returned for a request, as opposed to losing the connection. */
 export class AppServerRequestError extends Error {}
@@ -86,16 +87,27 @@ export class AppServer {
     return this;
   }
 
-  /** End the connection and wait for the server to exit, killing it if it does not. */
+  /**
+   * End the connection and wait for the server to exit, killing it if it does not. A server that never started
+   * (a failed spawn emits `error` and `close`, never `exit`) is not waited for, and the wait is bounded.
+   */
   async close() {
     const { child } = this;
-    this.child.stdin.end();
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    const exited = new Promise((resolve) => child.once('exit', resolve));
-    child.kill('SIGTERM');
-    const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
-    await exited;
-    clearTimeout(timer);
+    child.stdin.end();
+    if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
+    await new Promise((resolve) => {
+      const events = ['exit', 'close', 'error'];
+      const kill = setTimeout(() => child.kill('SIGKILL'), 10_000);
+      const giveUp = setTimeout(() => done(), 15_000);
+      function done() {
+        clearTimeout(kill);
+        clearTimeout(giveUp);
+        for (const event of events) child.off(event, done);
+        resolve();
+      }
+      for (const event of events) child.once(event, done);
+      child.kill('SIGTERM');
+    });
   }
 }
 
@@ -104,7 +116,7 @@ export class AppServer {
  * model turn is executed and no policy is changed.
  */
 export async function withAppServer(cli, cwd, env, fn, options) {
-  const child = spawn(cli, ['--strict-config', 'app-server', '--listen', 'stdio://'], { cwd, env, stdio: ['pipe', 'pipe', 'ignore'] });
+  const child = spawn(...batchCommand(cli, ['--strict-config', 'app-server', '--listen', 'stdio://'], { cwd, env, stdio: ['pipe', 'pipe', 'ignore'] }));
   const server = new AppServer(child, options);
   try {
     await server.initialize();

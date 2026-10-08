@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { AppServer, AppServerRequestError } from '../../lcu/app_server.mjs';
+import { AppServer, AppServerRequestError, withAppServer } from '../../lcu/app_server.mjs';
 import * as hooks from '../../lcu/codex_hooks.mjs';
 import * as setup from '../../lcu/setup.mjs';
 import { parse as parseToml } from '../../lcu/toml.mjs';
@@ -145,4 +145,16 @@ test('the app-server client matches replies, answers server requests, and tells 
   server.send({ method: 'exit' });
   await assert.rejects(pending, /exited unexpectedly/);
   await server.close();
+});
+
+test('an app-server that cannot start fails initialize, and cleanup returns at once', async (t) => {
+  const missing = join(temporary(t), 'no-such-codex');
+  const started = Date.now();
+  await assert.rejects(withAppServer(missing, temporary(t), process.env, () => assert.fail('ran without a server')), /ENOENT/);
+  // Closed before the failed start is even reported: no `exit` event ever comes.
+  const server = new AppServer(spawn(missing, [], { stdio: ['pipe', 'pipe', 'ignore'] }));
+  const initializing = assert.rejects(server.initialize(), /ENOENT/);
+  await server.close();
+  await initializing;
+  assert.ok(Date.now() - started < 2000, `cleanup took ${Date.now() - started} ms`);
 });
