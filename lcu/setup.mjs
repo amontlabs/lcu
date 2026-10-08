@@ -104,7 +104,7 @@ export const seams = {
   /** Run a child with its output captured: `{status, stdout, stderr, error}`. */
   run: (command, args, options) => capture.run(command, args, options),
   /** Run a child on this terminal: `{status, signal, error}`. */
-  spawn: (command, args, options) => spawnSync(command, args, { stdio: 'inherit', ...options }),
+  spawn: (command, args, options) => spawnSync(...capture.batchCommand(command, args, { stdio: 'inherit', ...options })),
   which,
   account: lookupAccount,
   interactive: () => process.stdin.isTTY === true,

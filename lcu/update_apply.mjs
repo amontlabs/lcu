@@ -12,6 +12,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join, posix, relative, resolve, sep, win32 } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 
+import { batchCommand } from './capture.mjs';
 import { isRegular } from './fsutil.mjs';
 import { downloadTo, getText } from './update.mjs';
 
@@ -22,11 +23,7 @@ const TIMEOUT = 60;
 export const deps = {
   run(command) {
     // A .cmd launcher runs through cmd.exe: Node does not start batch files directly.
-    const result = command[0].endsWith('.cmd')
-      ? spawnSync('cmd.exe', ['/d', '/s', '/c', `"${command.map((part) => `"${part}"`).join(' ')}"`],
-        { stdio: 'inherit', windowsVerbatimArguments: true })
-      : spawnSync(command[0], command.slice(1), { stdio: 'inherit' });
-    return result.status ?? 1;
+    return spawnSync(...batchCommand(command[0], command.slice(1), { stdio: 'inherit' })).status ?? 1;
   },
   /** Download `url` into `file`; returns its SHA-256. */
   download: (url, file) => downloadTo(url, file, { timeout: TIMEOUT * 30 }),
