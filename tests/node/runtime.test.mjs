@@ -8,7 +8,6 @@ import { pathToFileURL } from 'node:url';
 import { environment, leaveUnusableWorkingDirectory, main, paths } from '../../lcu/runtime.mjs';
 import { REPO, linuxApp, override, temporary, write } from './fixtures.mjs';
 
-const TESTED = existsSync(join(REPO, 'lcu/tested.mjs'));
 const NODE_SCRIPT = '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$LCU_TEST_OUT.argv"\nenv > "$LCU_TEST_OUT.env"\ncat > "$LCU_TEST_OUT.stdin"\n';
 
 function release(t) {
@@ -193,7 +192,7 @@ test('caller-supplied service maps are kept verbatim; an explicit original Sky e
   assert.ok('LCU_LINUX_SKY_SERVICE_PATH' in e);
 });
 
-test('a tested pair that handles a toolkit natively is not translated for it', { skip: !TESTED && 'lcu/tested.mjs is ported in another phase' }, (t) => {
+test('a tested pair that handles a toolkit natively is not translated for it', (t) => {
   const r = release(t);
   inputWrapper(r, pair({ native_input: ['gtk4'] }));
   assert.equal(env(r).LCU_LINUX_INPUT_TOOLKITS, 'qt-scroll');
