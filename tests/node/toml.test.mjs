@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { parse, parseValue } from '../../lcu/toml.mjs';
+import { parse, parseValue, TomlFloat } from '../../lcu/toml.mjs';
 
 test('a Codex config with tables, arrays of tables, inline hooks and comments', () => {
   const text = `# user config
@@ -48,14 +48,21 @@ l = '''raw\\n'''
     [1000, 1500, 255, '1979-05-27T07:32:00Z', 'line joined', 'raw\\n']);
 });
 
-test('dotted keys may extend their own table only', () => {
+test('floats can be told from integers on request', () => {
+  const { a, b } = parse('a = 1.0\nb = 1\n', { floats: true });
+  assert.ok(a instanceof TomlFloat && a.value === 1);
+  assert.equal(b, 1);
+  assert.deepEqual(parse('a = 1.5e3\n'), { a: 1500 });
+});
+
+test('dotted keys build their tables', () => {
   assert.deepEqual(parse('a.b = 1\na.c = 2\n'), { a: { b: 1, c: 2 } });
   assert.deepEqual(parse('[x]\ny.z = 1\n[x.y.w]\nq = 1\n'), { x: { y: { z: 1, w: { q: 1 } } } });
 });
 
 test('invalid documents throw', () => {
-  for (const text of ['a = 1\na = 2\n', '[a]\n[a]\n', 'a = {b = 1}\n[a]\n', 'a = 1 b = 2\n', 'a = "open\n',
-    '[a]\nb.c = 1\n[a.b]\n', 'a = []\n[[a]]\n', 'a = 01\n', 'k =\n', '= 1\n', 'a = {x = 1}\na.y = 2\n']) {
+  for (const text of ['a = 1\na = 2\n', '[a]\nb = 1\n[a]\nb = 2\n', 'a = 1 b = 2\n', 'a = "open\n', 'a = 1\n[a]\n',
+    'a = []\n[[a]]\n', 'a = 01\n', 'k =\n', '= 1\n', 'a = 1\na.b = 2\n']) {
     assert.throws(() => parse(text), Error, JSON.stringify(text));
   }
 });

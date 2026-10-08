@@ -109,7 +109,6 @@ export const seams = {
   account: lookupAccount,
   interactive: () => process.stdin.isTTY === true,
   ask,
-  configure: (...args) => configure(...args),
   installBrowser: async (root) => (await import('./browser.mjs')).install(root),
 };
 
@@ -637,7 +636,7 @@ function registerPi(home, command, releaseRoot, { scope, project, env, cwd, setu
 }
 
 /** Write a portable plugin for custom clients to a new directory. */
-export async function exportBundle(destination, command, releaseRoot, { chrome = false, audio = false } = {}) {
+export async function exportBundle(destination, command, releaseRoot, { chrome = false, audio = false, codexFiles = exportFiles } = {}) {
   destination = regularPath(destination);
   if (existsSync(destination)) throw new Error('Export destination already exists; choose a new directory.');
   const policy = await hostPolicy(releaseRoot);
@@ -684,12 +683,11 @@ export async function exportBundle(destination, command, releaseRoot, { chrome =
     change(join(destination, 'host-contract.json'), null, json(policy)),
     change(join(destination, 'lcu-bootstrap.json'), null, json(bootstrap)),
     change(join(destination, 'codex.mcp.json'), null, json({ mcpServers: { lcu: { ...policy, command: portableCodex[0], args: portableCodex.slice(1) } } })),
-    ...Object.entries(seams.exportFiles(portableCodex, join(resources, 'plugins/openai-bundled')))
+    ...Object.entries(codexFiles(portableCodex, join(resources, 'plugins/openai-bundled')))
       .map(([name, data]) => change(join(destination, name), null, data)),
   ];
   applyChanges(changes);
 }
-seams.exportFiles = exportFiles;
 
 // Command line -------------------------------------------------------------------------------------------
 
@@ -935,7 +933,7 @@ function checkRuntime(directRuntime) {
 const runtimeFlags = (chrome, audio) => [...(chrome ? ['--chrome'] : []), ...(audio ? ['--audio'] : [])];
 
 /** Register pending harnesses that have appeared since setup; quiet and cheap when there are none. */
-async function reconcile(args, account, home) {
+async function reconcile(args, account, home, register) {
   const path = harnessSearchPath(home);
   const ready = (state) => state.pending.filter((name) => harnessInstalled(name, home, path));
   // Unlocked first look: the common login-time run reads one small file and exits.
@@ -959,7 +957,7 @@ async function reconcile(args, account, home) {
     installerEnvironment(home, names, environment);
     await installerPaths(toolsRoot);
     say(`LCU: registering ${names.map((name) => CLIENTS[name].label).join(', ')} (installed since setup) with the saved settings.`);
-    const failures = await seams.configure(names, home, [...desktopCommand, ...runtimeFlags(state.chrome, state.audio)], toolsRoot,
+    const failures = await register(names, home, [...desktopCommand, ...runtimeFlags(state.chrome, state.audio)], toolsRoot,
       releaseRoot, { scope: context.scope, project, setupCommand: runtime, environ: environment,
         approval: state.approval === 'auto' ? 'auto' : null });
     const failed = new Set(failures.map(([name]) => name));
@@ -985,8 +983,8 @@ function becomeAccount(account) {
   process.chdir(account.home);
 }
 
-/** `lcu setup ARGV`; returns the exit status. */
-export async function main(argv) {
+/** `lcu setup ARGV`; `configure` registers the selected harnesses (another one only in tests). Returns the exit status. */
+export async function main(argv, { configure: register = configure } = {}) {
   let args;
   try {
     args = parse(argv);
@@ -1016,20 +1014,20 @@ export async function main(argv) {
     const home = account.home;
     if (args.reconcile) {
       try {
-        return await reconcile(args, account, home);
+        return await reconcile(args, account, home, register);
       } catch (error) {
         warn(`Reconcile failed: ${error.message}`);
         return 1;
       }
     }
-    return await setup(args, account, home, names);
+    return await setup(args, account, home, names, register);
   } catch (error) {
     warn(`Setup failed: ${describe(error)}`);
     return 1;
   }
 }
 
-async function setup(args, account, home, names) {
+async function setup(args, account, home, names, register) {
   const { releaseRoot, runtime, launcher, desktopCommand, directRuntime } = runtimePaths(args, account);
   requireLaunchers(runtime, launcher);
   if (names.length === 1 && names[0] === 'auto') {
@@ -1060,13 +1058,13 @@ async function setup(args, account, home, names) {
     await installerPaths(toolsRoot);
   }
   const setupCommand = runtime;
-  const outcome = await setupLock(home, () => registerLocked(args, account, home, names, missing,
+  const outcome = await setupLock(home, () => registerLocked(args, account, home, names, missing, register,
     { releaseRoot, desktopCommand, directRuntime, toolsRoot, setupCommand, setupEnvironment }));
   if (outcome === 'cancelled') return 0;
   return finish(args, outcome, { desktopCommand, directRuntime, setupCommand });
 }
 
-async function registerLocked(args, account, home, names, missing, paths) {
+async function registerLocked(args, account, home, names, missing, register, paths) {
   const { releaseRoot, desktopCommand, directRuntime, toolsRoot, setupCommand, setupEnvironment } = paths;
   const state = loadSetupState(home);
   // A saved choice, including a declined prompt, suppresses the prompt.
@@ -1143,7 +1141,7 @@ async function registerLocked(args, account, home, names, missing, paths) {
   let failures = [];
   if (args.export) await exportBundle(args.export, command, releaseRoot, { chrome, audio });
   else if (names.length) {
-    failures = await seams.configure(names, home, command, toolsRoot, releaseRoot, { scope: args.scope,
+    failures = await register(names, home, command, toolsRoot, releaseRoot, { scope: args.scope,
       project: args.project ?? null, setupCommand, approval: approvalAction, environ: setupEnvironment });
   }
   // Remember opt-ins even when registration failed, so a retry or `--reconcile` keeps them. Harnesses registered

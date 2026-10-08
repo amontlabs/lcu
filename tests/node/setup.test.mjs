@@ -30,19 +30,19 @@ function fixture(t) {
   });
   override(t, setup.seams, 'run', () => result(0));
   override(t, setup.seams, 'installBrowser', async () => {});
-  override(t, setup.seams, 'configure', async (names, _home, command, _tools, _release, options) => {
+  state.configure = async (names, _home, command, _tools, _release, options) => {
     state.registered.push({ names: [...names], command, ...options });
     return names.filter((name) => state.failing.has(name)).map((name) => [name, 'plugin', 'boom']);
-  });
+  };
   state.raw = async (...argv) => {
     const seen = await output(t);
-    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--session', 'direct', ...argv]);
+    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--session', 'direct', ...argv], { configure: state.configure });
     return { code, out: seen.out, err: seen.err };
   };
   state.main = (...argv) => state.raw('--yes', '--no-chrome', ...argv);
   state.reconcile = async (...argv) => {
     const seen = await output(t);
-    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--reconcile', ...argv]);
+    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--reconcile', ...argv], { configure: state.configure });
     return { code, out: seen.out, err: seen.err };
   };
   state.agents = (...names) => names.flatMap((name) => ['--agent', name]);
@@ -150,7 +150,7 @@ test('the runtime is probed and the registered command is the direct launcher wi
   assert.equal(code, 0);
   assert.deepEqual(f.spawned[0], [join(f.prefix, 'current/bin/lcu'), '--version']);
   assert.deepEqual(f.registered[0].command, [join(f.prefix, 'current/bin/lcu'), '--audio']);
-  await setup.main(['--prefix', f.prefix, '--user', 'fixture', '--session', 'discover', '--yes', '--agent', 'codex']);
+  await setup.main(['--prefix', f.prefix, '--user', 'fixture', '--session', 'discover', '--yes', '--agent', 'codex'], { configure: f.configure });
   assert.deepEqual(f.registered[1].command, [join(f.prefix, 'current/bin/lcu-session'), '--user', 'fixture', '--', join(f.prefix, 'current/bin/lcu'), '--audio']);
 });
 
@@ -458,9 +458,8 @@ test('the skill earlier versions generated is removed', (t) => {
 
 test('an export carries no skill or producer path and resolves the destination prefix and session', async (t) => {
   const r = release(t);
-  override(t, setup.seams, 'exportFiles', () => ({}));
   const destination = join(r.root, 'export');
-  await setup.exportBundle(destination, ['/producer/private/lcu'], r.release);
+  await setup.exportBundle(destination, ['/producer/private/lcu'], r.release, { codexFiles: () => ({}) });
   const files = ['plugin.json', 'mcp.json', 'host-contract.json', 'lcu-bootstrap.json', 'codex.mcp.json'];
   const text = files.map((name) => readFileSync(join(destination, name), 'utf8')).join('\n');
   assert.ok(!text.includes('/producer/private/lcu') && !text.includes(r.root));
@@ -475,7 +474,7 @@ test('an export carries no skill or producer path and resolves the destination p
   const codex = JSON.parse(readFileSync(join(destination, 'codex.mcp.json'), 'utf8')).mcpServers.lcu;
   assert.match(codex.args[1], /current\/agent-tools\/node\/bin\/node/);
   assert.match(codex.args[1], /current\/adapters\/codex\.mjs/);
-  await setup.exportBundle(join(r.root, 'chrome-export'), ['/usr/bin/lcu', '--chrome'], r.release, { chrome: true });
+  await setup.exportBundle(join(r.root, 'chrome-export'), ['/usr/bin/lcu', '--chrome'], r.release, { chrome: true, codexFiles: () => ({}) });
   assert.equal(JSON.parse(readFileSync(join(r.root, 'chrome-export/mcp.json'), 'utf8')).mcpServers.lcu.args.at(-1), '--chrome');
   assert.match(JSON.parse(readFileSync(join(r.root, 'chrome-export/lcu-bootstrap.json'), 'utf8')).destinationSetup, /--chrome/);
   assert.ok(!command.args.includes('--chrome'));

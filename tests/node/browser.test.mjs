@@ -193,6 +193,8 @@ test('removed and unknown subcommands are usage errors', async (t) => {
   assert.equal(await browser.main(f.root, ['x']), 2);
   assert.equal(await browser.main(f.root, []), 2);
   assert.equal(await browser.main(f.root, ['status', '--browser', 'firefox']), 2);
+  assert.equal(await browser.main(f.root, ['install', '--help']), 0);
+  assert.equal(await browser.main(f.root, ['status', '-h']), 0);
   assert.equal(await browser.main(f.root, ['install']), 0);
   assert.match(seen.out, /LCU browser native host configured/);
 });

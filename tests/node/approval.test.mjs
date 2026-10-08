@@ -285,13 +285,13 @@ test('setup remembers the approval mode: default ask leaves harnesses alone, aut
   override(t, setup.seams, 'run', () => result(0));
   const configured = [];
   let failures = [];
-  override(t, setup.seams, 'configure', async (names, h, command, tools, release, options) => {
+  const configure = async (names, h, command, tools, release, options) => {
     configured.push(options.approval);
     return failures;
-  });
+  };
   const drive = async (...argv) => {
     const seen = await output(t);
-    await setup.main(['--prefix', prefix, '--user', 'fixture', '--session', 'direct', '--yes', '--no-chrome', ...argv]);
+    await setup.main(['--prefix', prefix, '--user', 'fixture', '--session', 'direct', '--yes', '--no-chrome', ...argv], { configure });
     return seen;
   };
   const saved = () => setup.loadSetupState(home).approval;
