@@ -6,12 +6,14 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
-import { lockFile } from '../../lcu/lock.mjs';
+import { acquire } from '../../lcu/lock.mjs';
 import { SYSTEM_PACKAGES, checkedPrefix, deps, main, selectLinuxApp, selectRelease } from '../../scripts/install.mjs';
 import { REPO, linuxApp, override, seal, temporary, write } from './fixtures.mjs';
 
 const ARCH = { arm64: 'arm64', x64: 'x64' }[process.arch];
 const linux = process.platform === 'linux';
+// Root must name the account setup is for.
+const USER = ['--user', userInfo().username];
 
 /** A sealed release source for this machine: what an extracted archive holds. */
 function source(base, payload = 'new version') {
@@ -35,7 +37,7 @@ function existing(base) {
 function stubbed(t, { setupStatus = 0, base } = {}) {
   const calls = [];
   override(t, deps, 'module', async (root, name) => ({
-    main: async (argv) => { calls.push([name, root, argv]); return argv.includes('--validate-only') ? undefined : setupStatus; },
+    main: async (argv) => { calls.push([name, root, argv]); return setupStatus; },
     report: (root) => calls.push(['report', root]),
   }));
   override(t, deps, 'validateRelease', (release) => calls.push(['validate', release]));
@@ -65,9 +67,9 @@ test('usage errors exit 2 and --help exits 0 before anything else', { skip: !lin
   const calls = stubbed(t);
   t.mock.method(process.stderr, 'write', () => true);
   t.mock.method(process.stdout, 'write', () => true);
-  assert.equal(await main(['--bogus']), 2);
-  assert.equal(await main(['--scope', 'x']), 2);
-  assert.equal(await main(['--help']), 0);
+  assert.equal(await main([...USER, '--bogus']), 2);
+  assert.equal(await main([...USER, '--scope', 'x']), 2);
+  assert.equal(await main([...USER, '--help']), 0);
   assert.deepEqual(calls, []);
 });
 
@@ -76,26 +78,25 @@ test('refusals come before setup, apt or any prefix write', { skip: !linux }, as
   const calls = stubbed(t);
   override(t, deps, 'spawn', () => assert.fail('apt or a command ran'));
   const prefix = join(base, 'lcu');
-  await assert.rejects(main(['--offline', '--runtime-only', '--prefix', prefix]), /--offline requires --skip-system/);
-  await assert.rejects(main(['--prefix', prefix, '--runtime-only', '--existing-app', join(base, 'missing')]),
+  await assert.rejects(main([...USER, '--offline', '--runtime-only', '--prefix', prefix]), /--offline requires --skip-system/);
+  await assert.rejects(main([...USER, '--prefix', prefix, '--runtime-only', '--existing-app', join(base, 'missing')]),
     /chatgpt\.com\/download\/.*--existing-app PATH/);
-  await assert.rejects(main(['--prefix', prefix, '--runtime-only', '--app-package', join(base, 'x.deb')]),
+  await assert.rejects(main([...USER, '--prefix', prefix, '--runtime-only', '--app-package', join(base, 'x.deb')]),
     /--app-package cannot install.*--existing-app PATH/);
   mkdirSync(join(base, 'app'));
-  await assert.rejects(main(['--prefix', prefix, '--existing-app', join(base, 'app'), '--reconcile']), /lcu setup --reconcile/);
+  await assert.rejects(main([...USER, '--prefix', prefix, '--existing-app', join(base, 'app'), '--reconcile']), /lcu setup --reconcile/);
   assert.deepEqual(calls, []);
   assert.equal(existsSync(prefix), false);
 });
 
-test('agent options are refused with --runtime-only, after setup validated them', { skip: !linux }, async (t) => {
+test('agent options are refused with --runtime-only, and an agent or export is required', { skip: !linux }, async (t) => {
   const base = temporary(t);
   const calls = stubbed(t);
   const app = linuxApp(join(base, 'chatgpt'), { arch: ARCH });
-  await assert.rejects(main(['--prefix', join(base, 'lcu'), '--existing-app', app, '--skip-system', '--runtime-only', '--agent', 'codex']),
+  await assert.rejects(main([...USER, '--prefix', join(base, 'lcu'), '--existing-app', app, '--skip-system', '--runtime-only', '--agent', 'codex']),
     /--runtime-only cannot include agent setup options/);
-  assert.equal(calls[0][0], 'setup');
-  assert.ok(calls[0][2].includes('--validate-only'));
-  await assert.rejects(main(['--prefix', join(base, 'lcu'), '--existing-app', app, '--skip-system', '--yes']), /Select --agent NAME/);
+  assert.deepEqual(calls, []);
+  await assert.rejects(main([...USER, '--prefix', join(base, 'lcu'), '--existing-app', app, '--skip-system', '--yes']), /Select --agent NAME/);
 });
 
 test('an installed app is selected in place with its own version and runtime', { skip: !linux }, (t) => {
@@ -112,7 +113,7 @@ test('a runtime-only install links the app, records its Node and reports the tes
   const app = linuxApp(join(base, 'chatgpt'), { arch: ARCH });
   t.mock.method(process.stdout, 'write', () => true);
   const prefix = join(base, 'lcu');
-  assert.equal(await main(['--prefix', prefix, '--existing-app', app, '--skip-system', '--offline', '--runtime-only']), 0);
+  assert.equal(await main([...USER, '--prefix', prefix, '--existing-app', app, '--skip-system', '--offline', '--runtime-only']), 0);
   const release = realpathSync(join(prefix, 'current'));
   assert.equal(readlinkSync(join(release, 'app')), app);
   assert.deepEqual(JSON.parse(readFileSync(join(release, 'installation.json'), 'utf8')),
@@ -120,15 +121,15 @@ test('a runtime-only install links the app, records its Node and reports the tes
   assert.equal(readFileSync(join(release, 'node-path'), 'utf8'), `${join(app, 'resources/cua_node/bin/node')}\n`);
   assert.equal(readFileSync(join(release, 'payload'), 'utf8'), 'new version');
   assert.ok(!existsSync(join(prefix, 'apps')));
-  assert.deepEqual(calls.map(([name]) => name), ['setup', 'validate', 'report']);
-  assert.equal(calls[2][1], join(prefix, 'current'));
+  assert.deepEqual(calls.map(([name]) => name), ['validate', 'report']);
+  assert.equal(calls[1][1], join(prefix, 'current'));
 });
 
 test('agent setup runs from the new release with the forwarded options, and its failure is reported', { skip: !linux }, async (t) => {
   const base = temporary(t);
   const app = linuxApp(join(base, 'chatgpt'), { arch: ARCH });
   const prefix = join(base, 'lcu');
-  const argv = ['--prefix', prefix, '--existing-app', app, '--agent', 'pi', '--audio', '--yes', '--skip-system'];
+  const argv = [...USER, '--prefix', prefix, '--existing-app', app, '--agent', 'pi', '--audio', '--yes', '--skip-system'];
   let calls = stubbed(t, { base });
   t.mock.method(process.stdout, 'write', () => true);
   assert.equal(await main(argv), 0);
@@ -155,23 +156,23 @@ test('apt failure stops the install before any release changes', { skip: !linux 
   process.env.PATH = `${join(base, 'bin')}:${path}`;
   t.after(() => { process.env.PATH = path; });
   write(join(base, 'bin/apt-get'), '', 0o755);
-  await assert.rejects(main(['--prefix', prefix, '--existing-app', app, '--runtime-only']), /apt-get install failed/);
+  await assert.rejects(main([...USER, '--prefix', prefix, '--existing-app', app, '--runtime-only']), /apt-get install failed/);
   assert.deepEqual(commands.map((command) => command.slice(0, 3)), [['apt-get', 'update'], ['apt-get', 'install', '-y']]);
   assert.deepEqual(readdirSync(join(prefix, 'releases')), ['old']);
 });
 
-test('a failed validation or an unexpected .next keeps the active release', (t) => {
+test('a failed validation or an unexpected .next keeps the active release', async (t) => {
   const base = temporary(t);
   const prefix = existing(base);
   const bundle = source(base);
   const app = join(base, 'chatgpt');
   mkdirSync(app);
   override(t, deps, 'validateRelease', () => { throw new Error('runtime validation failed'); });
-  assert.throws(() => selectRelease(prefix, ARCH, app, {}, '/node', { source: bundle }), /runtime validation failed/);
+  await assert.rejects(selectRelease(prefix, ARCH, app, {}, '/node', { source: bundle }), /runtime validation failed/);
   assert.deepEqual(readdirSync(join(prefix, 'releases')), ['old']);
   override(t, deps, 'validateRelease', () => {});
   symlinkSync(base, join(prefix, '.next'));
-  assert.throws(() => selectRelease(prefix, ARCH, app, {}, '/node', { source: bundle }), /Unexpected \.next path/);
+  await assert.rejects(selectRelease(prefix, ARCH, app, {}, '/node', { source: bundle }), /Unexpected \.next path/);
   assert.equal(readFileSync(join(prefix, 'current/data'), 'utf8'), 'previous version');
   assert.deepEqual(readdirSync(join(prefix, 'releases')), ['old']);
 });
@@ -180,16 +181,16 @@ test('installs into one prefix wait for each other', { skip: !linux }, async (t)
   const base = temporary(t);
   const prefix = existing(base);
   const bundle = source(base);
-  const held = lockFile(join(prefix, '.lcu-install'));
+  const release = await acquire(join(prefix, '.lcu-install.lock'));
   const script = `import { deps, selectRelease } from ${JSON.stringify(pathToFileURL(join(REPO, 'scripts/install.mjs')).href)};
 deps.validateRelease = () => {};
-selectRelease(${JSON.stringify(prefix)}, ${JSON.stringify(ARCH)}, ${JSON.stringify(base)}, {}, '/node', { source: ${JSON.stringify(bundle)} });`;
+await selectRelease(${JSON.stringify(prefix)}, ${JSON.stringify(ARCH)}, ${JSON.stringify(base)}, {}, '/node', { source: ${JSON.stringify(bundle)} });`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'inherit' });
   const exited = new Promise((resolve) => child.on('exit', resolve));
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.equal(child.exitCode, null, 'the second install did not wait for the lock');
   assert.equal(readFileSync(join(prefix, 'current/data'), 'utf8'), 'previous version');
-  held.release();
+  release();
   assert.equal(await exited, 0);
   assert.equal(readFileSync(join(prefix, 'current/payload'), 'utf8'), 'new version');
 });
@@ -224,9 +225,10 @@ test('macOS: direct sessions only, and a missing app is reported before the pref
   override(t, deps, 'source', bundle);
   override(t, process, 'platform', 'darwin');
   const prefix = join(base, 'lcu');
-  await assert.rejects(main(['--prefix', prefix, '--runtime-only', '--session', 'discover']), /macOS uses --session direct/);
-  await assert.rejects(main(['--prefix', prefix, '--runtime-only', '--existing-app', join(base, 'ChatGPT.app')]),
+  await assert.rejects(main([...USER, '--prefix', prefix, '--runtime-only', '--session', 'discover']), /macOS uses --session direct/);
+  // (setup's default session follows the real platform, so the test names it)
+  await assert.rejects(main([...USER, '--prefix', prefix, '--runtime-only', '--session', 'direct', '--existing-app', join(base, 'ChatGPT.app')]),
     /chatgpt\.com\/download\/.*--existing-app PATH/);
   assert.equal(existsSync(prefix), false);
-  assert.ok(calls.every(([name, , argv]) => name === 'setup' && argv.includes('--validate-only')));
+  assert.deepEqual(calls, []);
 });

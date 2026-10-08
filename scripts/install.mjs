@@ -6,14 +6,16 @@ import {
   closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync,
   renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
+import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { parseArgs } from 'node:util';
 
 import { isMain, run } from '../lcu/entry.mjs';
-import { lockFile } from '../lcu/lock.mjs';
+import { installLockPath, withLock } from '../lcu/lock.mjs';
 import { LINUX_APP_PATH, resolveInstalledLinuxApp, resolveInstalledMacApp } from '../lcu/platforms.mjs';
+import {
+  UsageError, appPrerequisiteMessage as prerequisite, installerEnvironment, main as setupMain, parse, regularPath, validate,
+} from '../lcu/setup.mjs';
 import { VERSION, architecture, verify } from './bundle.mjs';
 
 export const SOURCE = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -50,27 +52,7 @@ const real = (path) => { try { return realpathSync(path); } catch { return resol
 const touch = (path) => closeSync(openSync(path, 'a'));
 const expandHome = (path) => (path === '~' || path?.startsWith('~/') ? homedir() + path.slice(1) : path);
 
-export const appPrerequisiteMessage = (location, alternateLocation = true) =>
-  'LCU requires the official ChatGPT desktop app, which includes Codex, to be installed first. ' +
-  `LCU does not download or install the app.${location ? ` No app was found at ${location}.` : ''} ` +
-  'Install it from https://chatgpt.com/download/ and rerun LCU.' +
-  (alternateLocation ? ' If it is installed elsewhere, pass --existing-app PATH.' : '');
-
-/** The account setup will write for: `{name, uid, gid, home}`. */
-export function account(name) {
-  const self = userInfo();
-  if (!name || name === self.username) return { name: self.username, uid: self.uid, gid: self.gid, home: self.homedir };
-  if (process.platform === 'darwin') {
-    const result = spawnSync('/usr/bin/dscacheutil', ['-q', 'user', '-a', 'name', name], { encoding: 'utf8' });
-    const fields = Object.fromEntries(`${result.stdout ?? ''}`.split('\n').map((line) => line.split(': ')));
-    if (!fields.uid) throw new Error('The selected account does not exist. Create it before setup.');
-    return { name, uid: Number(fields.uid), gid: Number(fields.gid), home: fields.dir };
-  }
-  const result = spawnSync('getent', ['passwd', name], { encoding: 'utf8' });
-  const fields = `${result.stdout ?? ''}`.split('\n')[0].split(':');
-  if (result.status !== 0 || fields.length < 7) throw new Error('The selected account does not exist. Create it before setup.');
-  return { name, uid: Number(fields[2]), gid: Number(fields[3]), home: fields[5] };
-}
+const appPrerequisiteMessage = (location) => prerequisite(location, { alternateLocation: true });
 
 // Root drops to the account in a child Node, with its supplementary groups, before running `command`.
 const DROP = 'const [uid, gid, name, ...command] = process.argv.slice(1); process.initgroups(name, +gid); ' +
@@ -99,14 +81,7 @@ export function runAs(command, owner, { quiet = false, env = {} } = {}) {
 /** A dedicated absolute prefix outside the release, empty or already LCU's, with no linked components. */
 export function checkedPrefix(path, source = deps.source) {
   if (typeof path !== 'string' || !isAbsolute(path)) throw new Error('The installation prefix must be absolute');
-  if (path.split(/[\\/]/).includes('..') || /[\x00-\x1f]/.test(path)) {
-    throw new Error(`Use a path without parent traversal or control characters: ${path}`);
-  }
-  const prefix = resolve(path);
-  for (let item = prefix; ; item = dirname(item)) {
-    if (isLink(item)) throw new Error(`Refusing a symlink in setup destination: ${item}. Use manual configuration instead.`);
-    if (item === dirname(item)) break;
-  }
+  const prefix = regularPath(path);
   if (inside(real(prefix), real(source))) throw new Error('Choose an installation prefix outside the extracted release bundle.');
   if (prefix.split(sep).filter(Boolean).length < 2 || prefix === '/usr/local') {
     throw new Error('Choose a dedicated absolute prefix, such as /opt/lcu.');
@@ -149,8 +124,8 @@ export function validateRelease(release, owner) {
 
 /** Publish one validated thin release under `prefix` and point `current` at it; installed app files stay put. */
 export function selectRelease(prefix, arch, app, descriptor, node, { owner, target = 'linux', source = deps.source } = {}) {
-  const lock = lockFile(join(prefix, '.lcu-install'));
-  try {
+  // The lock installs, updates and `lcu prune` share for one prefix.
+  return withLock(installLockPath(prefix), async () => {
     const releases = join(prefix, 'releases');
     mkdirSync(releases, { recursive: true });
     const release = join(releases, `${VERSION}-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`);
@@ -162,7 +137,7 @@ export function selectRelease(prefix, arch, app, descriptor, node, { owner, targ
       symlinkSync(app, join(release, 'app'), 'dir');
       writeFileSync(join(release, 'installation.json'), `${JSON.stringify({ ...descriptor, app }, null, 2)}\n`);
       writeFileSync(join(release, 'node-path'), `${node}\n`);
-      deps.validateRelease(release, owner);
+      await deps.validateRelease(release, owner);
       const current = join(prefix, 'current');
       if (existsSync(current) && !isLink(current)) throw new Error('Refusing to replace a non-symlink current path');
       const next = join(prefix, '.next');
@@ -174,9 +149,7 @@ export function selectRelease(prefix, arch, app, descriptor, node, { owner, targ
       throw error;
     }
     return release;
-  } finally {
-    lock.release();
-  }
+  });
 }
 
 /** Linux: check the source and the app, then publish a release that links to it. */
@@ -208,18 +181,11 @@ export function installMac(prefixPath, appPath, { owner } = {}) {
   }, join(selected.runtime, 'bin/node'), { owner, target: 'darwin' });
 }
 
+// The installer's own options, beside every `lcu setup` option.
 const OPTIONS = {
-  prefix: { type: 'string' }, user: { type: 'string' }, agent: { type: 'string', multiple: true, default: [] },
-  scope: { type: 'string', default: 'user' }, project: { type: 'string' }, yes: { type: 'boolean' },
-  'list-agents': { type: 'boolean' }, export: { type: 'string' }, chrome: { type: 'boolean' },
-  'no-chrome': { type: 'boolean' }, audio: { type: 'boolean' }, 'no-audio': { type: 'boolean' },
-  approval: { type: 'string' }, session: { type: 'string' }, 'allow-missing': { type: 'boolean' },
-  reconcile: { type: 'boolean' }, 'browser-host': { type: 'boolean' }, 'check-desktop': { type: 'boolean' },
-  'runtime-only': { type: 'boolean' }, 'skip-system': { type: 'boolean' }, 'app-package': { type: 'string' },
-  'existing-app': { type: 'string' }, offline: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
+  'runtime-only': { type: 'boolean', default: false }, 'skip-system': { type: 'boolean', default: false },
+  'app-package': { type: 'string' }, 'existing-app': { type: 'string' }, offline: { type: 'boolean', default: false },
 };
-
-const CHOICES = { scope: ['user', 'project'], approval: ['ask', 'auto'], session: ['discover', 'direct'] };
 
 const USAGE = `usage: scripts/install.sh [--prefix PREFIX] [--runtime-only | --agent AGENT ... | --export PATH] [options]
 
@@ -262,13 +228,9 @@ export async function main(argv) {
   if (legacy) argv = ['--prefix', ...argv];
   let values;
   try {
-    ({ values } = parseArgs({ args: argv, options: OPTIONS, strict: true }));
-    for (const [name, choices] of Object.entries(CHOICES)) {
-      if (values[name] !== undefined && !choices.includes(values[name])) {
-        throw new Error(`option --${name}: invalid choice ${JSON.stringify(values[name])} (choose from ${choices.join(', ')})`);
-      }
-    }
+    values = parse(argv, OPTIONS);
   } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
     // A usage error, as with every LCU command: exit status 2.
     process.stderr.write(`${USAGE}LCU installer: ${error.message}\n`);
     return 2;
@@ -277,10 +239,7 @@ export async function main(argv) {
     process.stdout.write(USAGE);
     return 0;
   }
-  values.prefix ??= mac ? join(homedir(), '.local/share/lcu') : '/opt/lcu';
-  values.session ??= mac ? 'direct' : 'discover';
-  const setup = () => deps.module(deps.source, 'setup');
-  if (values['list-agents']) return (await setup()).main(['--list-agents']);
+  if (values['list-agents']) return setupMain(['--list-agents']);
   if (values['app-package'] !== undefined) {
     throw new Error(`--app-package cannot install an app for you. ${appPrerequisiteMessage()}`);
   }
@@ -293,11 +252,8 @@ export async function main(argv) {
   if (values.reconcile) {
     throw new Error('--reconcile runs after installation: use `lcu setup --reconcile` from the installed release.');
   }
-  // Setup checks its own options (account, scope, agents, export, profile overrides) before anything is written.
-  const refused = await (await setup()).main([...setupArguments(values, values.user),
-    ...(values['browser-host'] ? ['--browser-host'] : []), '--validate-only']);
-  if (refused) return refused;
-  const owner = account(values.user);
+  // Setup's own checks (account, scope, agents, export) run before anything is written.
+  const { account: owner, names } = validate(values);
   if (mac && values.session !== 'direct') throw new Error('macOS uses --session direct; XFCE session discovery is Linux-only');
   const runtimeOnly = values['runtime-only'];
   if (runtimeOnly) {
@@ -307,13 +263,16 @@ export async function main(argv) {
         (!mac && values.session !== 'discover')) {
       throw new Error('--runtime-only cannot include agent setup options');
     }
-  } else if (!values.agent.length && !values.export && (values.yes || !process.stdin.isTTY)) {
+  } else if (!names.length && !values.export && (values.yes || !process.stdin.isTTY)) {
     throw new Error(mac ? 'Select --agent NAME, --export PATH, or --runtime-only'
       : 'Select --agent NAME, --agent all, --agent auto, --export PATH, or --runtime-only');
+  } else if (!values.export) {
+    // Another account must never inherit the caller's profile overrides.
+    installerEnvironment(owner.home, names, process.getuid() === 0 && owner.uid !== 0 ? {} : process.env);
   }
   const prefix = checkedPrefix(values.prefix);
   if (mac) {
-    installMac(prefix, existingApp, { owner });
+    await installMac(prefix, existingApp, { owner });
   } else {
     // Refuse absent, corrupt or wrong-architecture payloads and apps before apt or any writes.
     const arch = architecture();
@@ -328,7 +287,7 @@ export async function main(argv) {
         if (result.status !== 0) throw new Error(`apt-get ${args[0]} failed (${result.error?.message ?? `exit status ${result.status}`})`);
       }
     }
-    installLinux(prefix, { existingApp, owner });
+    await installLinux(prefix, { existingApp, owner });
   }
   const current = join(prefix, 'current');
   const lcu = join(current, 'bin/lcu');
@@ -336,7 +295,7 @@ export async function main(argv) {
   if (mac) process.stdout.write('The signed application is reused in place. Compatible updates are detected automatically.\n');
   if (runtimeOnly) {
     // Agent setup reports this itself, before applying anything.
-    (await deps.module(current, 'tested')).report(current);
+    await (await deps.module(current, 'tested')).report(current);
     if (mac) {
       process.stdout.write('When you configure an agent interactively, LCU guides you through macOS privacy settings.\n' +
         `You can review the guidance now with: ${lcu} doctor\n`);

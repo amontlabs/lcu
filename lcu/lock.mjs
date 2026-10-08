@@ -1,58 +1,84 @@
-// Exclusive advisory lock on a file, held until `release()` or until this process exits.
+// An exclusive lock between LCU processes: a lock file created with O_EXCL that names its holder.
 //
-// Node has no flock(2). On Linux and macOS a short-lived helper takes a flock(2) lock on a descriptor this
-// process opened and passed to it as fd 3. The lock belongs to the open file description, which this process
-// keeps open, so it stays held after the helper exits and is released when the descriptor closes. It is the
-// same lock Python's fcntl.flock took, so an older release's `lcu prune` and this installer exclude each other.
-// On Windows the file is opened with an exclusive sharing mode (libuv's UV_FS_O_EXLOCK), which fails while
-// another process holds it.
-const { closeSync, constants, openSync } = process.getBuiltinModule('node:fs');
+// Node has no flock(2). A lock file left by a holder that died (same host, process gone) is taken over, so a
+// crash never blocks later runs. Only LCU's own processes take these locks.
+import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { hostname } from 'node:os';
+import { join } from 'node:path';
 
-const HELPERS = {
-  // util-linux flock(1); `-n` fails at once instead of waiting.
-  linux: (wait) => ['/usr/bin/flock', [...(wait ? [] : ['-n']), '-x', '3']],
-  // macOS ships no flock(1); its Perl calls flock(2) on the inherited descriptor.
-  darwin: (wait) => ['/usr/bin/perl', ['-MFcntl=:flock', '-e',
-    `open(my $f, ">&=", 3) or exit 2; flock($f, LOCK_EX${wait ? '' : ' | LOCK_NB'}) or exit 1`]],
-};
-const UV_FS_O_EXLOCK = constants.UV_FS_O_EXLOCK ?? 0x10000000;
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function stale(path) {
+  let holder;
+  try {
+    holder = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
+    // Created but not yet written, or damaged: give a live holder a moment to write its name.
+    try {
+      return Date.now() - statSync(path).mtimeMs > 10_000;
+    } catch {
+      return true;
+    }
+  }
+  if (holder?.host !== hostname() || !Number.isInteger(holder?.pid)) return false;
+  try {
+    process.kill(holder.pid, 0);
+    return false;
+  } catch (error) {
+    return error.code === 'ESRCH';
+  }
+}
 
 /**
- * Lock `path` (created if missing). With `wait` false, throws an Error with `code === 'ELOCKED'` when another
- * process holds it. Returns `{ release() }`.
+ * Take the lock at `path`, waiting up to `wait` milliseconds (forever by default); `busy` builds the error
+ * thrown when it stays held. Resolves with a function that releases it.
  */
-export function lockFile(path, { wait = true } = {}) {
-  const { O_APPEND, O_CREAT, O_NOFOLLOW = 0, O_WRONLY } = constants;
-  if (process.platform === 'win32') {
-    for (;;) {
-      try {
-        const fd = openSync(path, O_WRONLY | O_CREAT | O_APPEND | UV_FS_O_EXLOCK);
-        return { release: () => closeSync(fd) };
-      } catch (error) {
-        if (!['EBUSY', 'EACCES', 'EPERM'].includes(error.code)) throw error;
-        if (!wait) throw Object.assign(new Error(`${path} is locked by another process`), { code: 'ELOCKED' });
+export async function acquire(path, { wait = Infinity, busy = () => new Error(`${path} is locked by another LCU process`) } = {}) {
+  const token = JSON.stringify({ pid: process.pid, host: hostname(), at: Date.now() });
+  const deadline = Date.now() + wait;
+  for (;;) {
+    let fd;
+    try {
+      fd = openSync(path, 'wx', 0o600);
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (stale(path)) {
+        try {
+          unlinkSync(path);
+        } catch (removed) {
+          if (removed.code !== 'ENOENT') throw removed;
+        }
+        continue;
       }
-      sleep(250);
+      if (Date.now() >= deadline) throw busy();
+      await sleep(50);
+      continue;
     }
+    try {
+      writeSync(fd, token);
+    } finally {
+      closeSync(fd);
+    }
+    return () => {
+      try {
+        if (readFileSync(path, 'utf8') === token) unlinkSync(path);
+      } catch {
+        // already gone
+      }
+    };
   }
-  const helper = HELPERS[process.platform];
-  if (!helper) throw new Error(`File locks are not supported on ${process.platform}`);
-  const fd = openSync(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o644);
-  try {
-    const [command, args] = helper(wait);
-    const result = process.getBuiltinModule('node:child_process').spawnSync(command, args,
-      { stdio: ['ignore', 'ignore', 'pipe', fd], env: { PATH: '/usr/bin:/bin' } });
-    if (result.status === 1 && !wait) {
-      throw Object.assign(new Error(`${path} is locked by another process`), { code: 'ELOCKED' });
-    }
-    if (result.status !== 0) {
-      const detail = `${result.stderr ?? ''}`.trim() || result.error?.message || `exit ${result.status ?? result.signal}`;
-      throw new Error(`Cannot lock ${path} with ${command}: ${detail}`);
-    }
-  } catch (error) {
-    closeSync(fd);
-    throw error;
-  }
-  return { release: () => closeSync(fd) };
 }
+
+/** Run `fn` while holding the lock at `path`. */
+export async function withLock(path, fn, options) {
+  const release = await acquire(path, options);
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+/** The lock installs, updates and `lcu prune` take on one prefix. */
+export const installLockPath = (prefix) => join(prefix, '.lcu-install.lock');

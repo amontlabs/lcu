@@ -10,13 +10,8 @@ import { locateCodexTools } from './app_layout.mjs';
 import { isMain, run } from './entry.mjs';
 import { MAC_SOCKET_ENV, macSocketPath, resolveInstalledLinuxApp, resolveInstalledMacApp } from './platforms.mjs';
 import { configuration as shimConfiguration, CONFIG_ENV as SHIM_CONFIG_ENV, FAULT_ENV as SHIM_FAULT_ENV, SKY_SERVICE } from './sandbox_shim.mjs';
+import { nativeInput } from './tested.mjs';
 import { component, inventorySha256, isRedirected, validateWindowsAppTree } from './windows.mjs';
-
-// Without lcu/tested.mjs (a tree that does not ship it yet) the Linux input translation simply stays on.
-const tested = await import('./tested.mjs').catch((error) => {
-  if (error.code === 'ERR_MODULE_NOT_FOUND' && error.url?.endsWith('/tested.mjs')) return null;
-  throw error;
-});
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // One help text for runtime.mjs and for the launcher, which prints it when the recorded Node is missing.
@@ -111,16 +106,17 @@ export function environment(root, resolved, { chrome = false, audio = false, pla
   const node = join(runtime, windows ? 'bin/node.exe' : 'bin/node');
   const nodeRepl = join(runtime, windows ? 'bin/node_repl.exe' : 'bin/node_repl');
   const codex = locateCodexTools(resources, { windows }).cli;
-  // Windows variable names are case-insensitive; keep one spelling of each, as the original host sees them.
-  const env = windows ? Object.fromEntries(Object.entries(source).map(([key, value]) => [key.toUpperCase(), value]))
-    : { ...source };
+  const env = { ...source };
+  // Windows variable names are case-insensitive: PATH may arrive as `Path`; keep one spelling of it.
+  const existingPath = windows ? Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? ''
+    : env.PATH ?? '/usr/bin:/bin';
+  if (windows) for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];
   // The original selects and trusts CODEX_HOME verbatim, including an explicitly empty value.
   if (!('CODEX_HOME' in env)) env.CODEX_HOME = defaultCodexHome(env, windows);
   // Select our verified executables, while retaining upstream caller options, metadata, services, policy
   // flags, and additional module/trust roots.
   const prepend = (key, ...first) => unique([...first.filter(Boolean),
     ...(env[key] ?? '').split(separator).filter(Boolean)]).join(separator);
-  const existingPath = windows ? env.PATH ?? '' : env.PATH ?? '/usr/bin:/bin';
   Object.assign(env, {
     PATH: join(runtime, 'bin') + separator + existingPath,
     CUA_REPL_NODE_REPL_PATH: nodeRepl,
@@ -193,7 +189,7 @@ function configureLinuxInput(root, runtime, env, metadata) {
   let toolkits = LINUX_INPUT_TOOLKITS;
   try {
     const { architecture } = readJson(join(root, 'installation.json'));
-    const native = tested.nativeInput(root, { platform: 'linux', architecture, appVersion: metadata.version, runtime: metadata.runtime });
+    const native = nativeInput(root, { platform: 'linux', architecture, appVersion: metadata.version, runtime: metadata.runtime });
     toolkits = toolkits.filter((toolkit) => !native.includes(toolkit));
   } catch {
     // an unreadable record keeps the translation on
@@ -354,12 +350,12 @@ export function configureMacosLifecycle(root, runtime, env) {
   return join(env.SKY_CUA_SERVICE_PATH, 'Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient');
 }
 
-/** Run the original server as a child with inherited stdio and resolve with its exit status. */
+/** Run the original server as a child with inherited stdio; its status, or 128 + N when signal N ended it. */
 function runChild(command, env) {
   return new Promise((resolveStatus, reject) => {
     const child = process.getBuiltinModule('node:child_process').spawn(command[0], command.slice(1), { env, stdio: 'inherit' });
     child.once('error', reject);
-    child.once('close', (status, signal) => resolveStatus(status ?? (signal ? 128 : 1)));
+    child.once('close', (status, signal) => resolveStatus(status ?? 128 + (process.getBuiltinModule('node:os').constants.signals[signal] ?? 0)));
   });
 }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
-import { cpSync, mkdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -124,7 +124,9 @@ function windowsRelease(t) {
   const runtime = 'app/resources/cua_node';
   write(join(source, runtime, 'bin/node.exe'), `#!/bin/sh\nexec "${process.execPath}" "$@"\n`, 0o755);
   write(join(source, runtime, 'bin/node_modules/@oai/cua-repl/bin/cua-repl.mjs'),
-    "import { writeFileSync } from 'node:fs'; writeFileSync(process.env.LCU_TEST_OUT, JSON.stringify({ argv: process.argv, env: process.env }));\n");
+    "import { writeFileSync } from 'node:fs'; writeFileSync(process.env.LCU_TEST_OUT, JSON.stringify({ argv: process.argv, env: process.env }));\n" +
+    "if (process.env.LCU_TEST_SIGNAL) process.kill(process.pid, process.env.LCU_TEST_SIGNAL);\n" +
+    'process.exitCode = Number(process.env.LCU_TEST_STATUS ?? 0);\n');
   const inventory = applicationInventory(source);
   const digest = inventorySha256(inventory);
   const generation = join(prefix, 'apps', digest);
@@ -134,10 +136,13 @@ function windowsRelease(t) {
   write(join(generation, 'inventory.json'), JSON.stringify(inventory));
   write(join(root, 'runtime.lock.json'), JSON.stringify({ platforms: { windows: { version: VERSION, runtime: RUNTIME, architectures: { x64: { sha256: '0'.repeat(64) } } } } }));
   write(join(root, 'installation.json'), JSON.stringify({ platform: 'windows', app, architecture: 'x64', package_version: VERSION, runtime: RUNTIME, sha256: digest }));
-  write(join(root, 'lcu-host/windows-pipe-host.cjs'), `process.stdout.write(JSON.stringify({ ready: true,
+  write(join(root, 'lcu-host/windows-pipe-host.cjs'), `const fs = require('node:fs');
+    // The fault hook: the original server's Node cannot start once the host is up.
+    if (process.env.LCU_TEST_BREAK) fs.chmodSync(process.env.NODE_REPL_NODE_PATH, 0o644);
+    process.stdout.write(JSON.stringify({ ready: true,
     pipePath: '\\\\\\\\.\\\\pipe\\\\lcu-wre-fixture', lifetimePath: '\\\\\\\\.\\\\pipe\\\\lcu-lifetime-fixture' }) + '\\n');
-    require('node:fs').writeFileSync(process.env.LCU_TEST_OUT + '.host', JSON.stringify({ helper: process.env.LCU_WRE_HELPER_PATH, transport: process.env.LCU_WRE_TRANSPORT_PATH }));
-    process.stdin.resume(); process.stdin.on('end', () => process.exit(0));\n`);
+    fs.writeFileSync(process.env.LCU_TEST_OUT + '.host', JSON.stringify({ helper: process.env.LCU_WRE_HELPER_PATH, transport: process.env.LCU_WRE_TRANSPORT_PATH }));
+    process.stdin.resume(); process.stdin.on('end', () => { fs.writeFileSync(process.env.LCU_TEST_OUT + '.stopped', ''); process.exit(0); });\n`);
   override(t, process, 'platform', 'win32');
   override(t, process, 'arch', 'x64');
   return { base, prefix, root, app, runtime: join(app, runtime), resources: join(app, 'app/resources'), digest, out: join(base, 'child.json') };
@@ -209,4 +214,17 @@ test('the descriptor must name the managed generation and its intact inventory',
   assert.throws(() => paths(r.root), /not the managed private generation/);
   writeFileSync(inventoryPath, JSON.stringify({ '.': { type: 'directory' } }));
   assert.throws(() => paths(r.root), /inventory does not match its descriptor/);
+});
+
+test('the original server’s exit status reaches the caller; a signal gives 128 + its number', async (t) => {
+  const r = windowsRelease(t);
+  assert.equal((await launchWindows(t, r, [], { LCU_TEST_STATUS: '7' })).status, 7);
+  assert.equal((await launchWindows(t, r, [], { LCU_TEST_SIGNAL: 'SIGTERM' })).status, 128 + 15);
+});
+
+test('the owned host is disposed of when the original server cannot start', async (t) => {
+  const r = windowsRelease(t);
+  override(t, process, 'env', { PATH: process.env.PATH, USERPROFILE: 'C:\\fixture', LCU_TEST_OUT: r.out, LCU_TEST_BREAK: '1' });
+  await assert.rejects(main(r.root, []), { code: 'EACCES' });
+  assert.ok(existsSync(`${r.out}.stopped`), 'the host saw its stdin close and exited');
 });

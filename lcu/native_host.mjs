@@ -4,10 +4,11 @@
 // service use Chrome without a Codex account while the extension still labels requests from agent-controlled
 // tabs. All other native messages pass through unchanged to the installed application's original host.
 // `lcu browser install` copies this file beside the private plugin copy, so it imports nothing from LCU.
-import { spawn } from 'node:child_process';
-import { realpathSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// Builtins come from process.getBuiltinModule, like the rest of the launch path.
+const { spawn } = process.getBuiltinModule('node:child_process');
+const { realpathSync, statSync } = process.getBuiltinModule('node:fs');
+const { dirname, join } = process.getBuiltinModule('node:path');
+const { fileURLToPath } = process.getBuiltinModule('node:url');
 
 export const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 

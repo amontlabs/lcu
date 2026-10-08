@@ -12,14 +12,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { isMain, run } from '../lcu/entry.mjs';
-import { lockFile } from '../lcu/lock.mjs';
+import { acquire, installLockPath } from '../lcu/lock.mjs';
+import { ALIASES, CLIENTS } from '../lcu/setup.mjs';
 import { canonicalJson, component, inventorySha256, isRedirected, resolveInstalledWindowsApp, validateWindowsAppTree } from '../lcu/windows.mjs';
 import { materializeOriginalHost, planOriginalHost } from '../lcu/windows_host.mjs';
 import { VERSION, architecture, verify } from './bundle.mjs';
 
 const NODE_MEMBER = 'app/resources/cua_node/bin/node.exe';
-// `lcu setup`'s agent IDs and aliases.
-const AGENTS = ['codex', 'claude-code', 'pi', 'omp', 'hermes', 'claude', 'oh-my-pi', 'hermes-agent'];
+const AGENTS = [...Object.keys(CLIENTS), ...Object.keys(ALIASES)];
 
 /** What tests replace. */
 export const deps = {
@@ -158,19 +158,14 @@ export async function install(prefixPath) {
   mkdirSync(prefix, { recursive: true });
   writeFileSync(join(prefix, '.lcu-install'), '', { flag: 'a' });
   // One install at a time per prefix: a generation another run creates or reuses is never removed by this one.
-  const lockPath = join(prefix, '.lcu-install.lock');
+  const lockPath = installLockPath(prefix);
   if (redirected(lockPath)) throw new Error(`Refusing a redirected Windows install lock: ${lockPath}`);
-  let held;
-  try {
-    held = lockFile(lockPath, { wait: false });
-  } catch (error) {
-    if (error.code !== 'ELOCKED') throw error;
-    throw new Error('Another LCU install is already running for this prefix; wait for it to finish and run this install again.');
-  }
+  const release = await acquire(lockPath, { wait: 0, busy: () => new Error('Another LCU install is already running for this ' +
+    'prefix; wait for it to finish and run this install again.') });
   try {
     return await publish(prefix, arch, selected, inventory, digest);
   } finally {
-    held.release();
+    release();
   }
 }
 

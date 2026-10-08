@@ -298,11 +298,18 @@ test('the stable command per platform', (t) => {
 /** postInstall with stubbed harness modules; returns `[stdout, stderr, calls]`. */
 async function postInstall(t, root, home, { refresh = async () => ['absent', null, []], needsSetup = false } = {}) {
   const calls = [];
+  const real = update.deps.module;
   override(t, update.deps, 'module', async (name) => ({
-    claude_mod: { destination: (dir) => join(dir, '.claude/skills/lcu-approve'), install: async (...args) => calls.push(['install', ...args]) },
-    browser: { refresh: async (release) => { calls.push(['refresh', release]); return refresh(); } },
-    codex_hooks: { codexNeedsSetup: async () => needsSetup },
-  })[name]);
+    claude_mod: { ...(await real('claude_mod')), install: async (...args) => calls.push(['install', ...args]) },
+    browser: { refresh: async (release) => {
+      calls.push(['refresh', release]);
+      const [status, destination, displaced] = await refresh();
+      return { status, destination, displaced };
+    } },
+  })[name] ?? real(name));
+  if (needsSetup) {
+    write(join(home, '.codex/config.toml'), '[mcp_servers.lcu]\ncommand = "/p/current/bin/lcu"\n');
+  }
   const out = [];
   const err = [];
   const stdout = t.mock.method(process.stdout, 'write', (text) => { out.push(text); return true; });
@@ -347,4 +354,19 @@ test('post-install reports the Chrome relay refresh and never fails on it', asyn
   assert.match(err, /could not refresh the Chrome relay.*installer failed.*browser install/);
   [out] = await postInstall(t, root, home, { needsSetup: true });
   assert.match(out, /setup --agent codex/);
+});
+
+test('the Codex hint appears only while LCU is registered without both notice hooks', async (t) => {
+  const { home } = setup(t);
+  const codex = join(home, '.codex');
+  const env = { CODEX_HOME: codex };
+  assert.equal(await update.codexNeedsSetup(home, env), false);
+  write(join(codex, 'config.toml'), '[mcp_servers.lcu]\ncommand = "/p/current/bin/lcu"\n');
+  assert.equal(await update.codexNeedsSetup(home, env), true);
+  const hook = (event) => `[[hooks.${event}]]\n[[hooks.${event}.hooks]]\ntype = "command"\n` +
+    `command = "/p/current/bin/lcu update --notice --hook ${event}"\n`;
+  writeFileSync(join(codex, 'config.toml'), `[mcp_servers.lcu]\ncommand = "/p/current/bin/lcu"\n${hook('SessionStart')}`);
+  assert.equal(await update.codexNeedsSetup(home, env), true);
+  writeFileSync(join(codex, 'config.toml'), `[mcp_servers.lcu]\ncommand = "/p/current/bin/lcu"\n${hook('SessionStart')}${hook('UserPromptSubmit')}`);
+  assert.equal(await update.codexNeedsSetup(home, env), false);
 });

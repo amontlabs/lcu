@@ -4,10 +4,11 @@
 // come unchanged from the installed application's app.asar. The host factory is located by structure (a
 // parsed top-level function whose options are the native-pipe settings), never by a minified name, and the
 // declarations it needs are copied verbatim into one generated module.
-import { spawn, spawnSync } from 'node:child_process';
-import { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, posix } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// Builtins come from process.getBuiltinModule, like the rest of the launch path.
+const { spawn, spawnSync } = process.getBuiltinModule('node:child_process');
+const { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } = process.getBuiltinModule('node:fs');
+const { dirname, join, posix } = process.getBuiltinModule('node:path');
+const { fileURLToPath } = process.getBuiltinModule('node:url');
 
 import { listAsarMembers, readAsarMembers } from './asar.mjs';
 import { component } from './windows.mjs';

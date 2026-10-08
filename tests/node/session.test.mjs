@@ -3,8 +3,7 @@ import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { main } from '../../lcu/session.mjs';
-import { discover } from '../../lcu/session.mjs';
+import { discover, main, which } from '../../lcu/session.mjs';
 import { override, temporary, write } from './fixtures.mjs';
 
 function session(proc, pid, display = ':1') {
@@ -31,8 +30,20 @@ test('an ambiguous desktop or another account’s desktop is refused', (t) => {
 test('the launcher runs the command in the discovered session as the calling account only', (t) => {
   const calls = [];
   override(t, process, 'execve', (...args) => calls.push(args));
-  assert.throws(() => main(['--user', `${userInfo().username}-other`, '--', 'true']), /selected desktop account/);
+  assert.throws(() => main(['--user', 'lcu-no-such-account', '--', 'true']), /Unknown account: lcu-no-such-account/);
+  const other = process.getuid() === 0 ? 'daemon' : 'root';
+  assert.throws(() => main(['--user', other, '--', 'true']), /selected desktop account/);
   assert.equal(calls.length, 0);
   t.mock.method(process.stderr, 'write', () => true);
   assert.equal(main(['--user', userInfo().username]), 2);
+});
+
+test('the command is found like execvp: past files that are not executable, on a default path without PATH', (t) => {
+  const base = temporary(t);
+  write(join(base, 'first/tool'), 'not executable', 0o644);
+  const second = write(join(base, 'second/tool'), '#!/bin/sh\n', 0o755);
+  assert.equal(which('tool', `${join(base, 'first')}:${join(base, 'second')}`), second);
+  assert.equal(which('sh'), '/bin/sh');
+  assert.equal(which('./relative'), './relative');
+  assert.throws(() => which('tool', join(base, 'first')), /Command not found/);
 });

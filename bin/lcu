@@ -3,23 +3,31 @@
 self=$0
 while [ -L "$self" ]; do
   link=$(readlink -- "$self") || break
-  case $link in /*) self=$link ;; *) self=${self%/*}/$link ;; esac
+  case $link in
+    /*) self=$link ;;
+    *) case $self in */*) self=${self%/*}/$link ;; *) self=$link ;; esac ;;
+  esac
 done
 case $self in */*) root=${self%/*}/.. ;; *) root=.. ;; esac
-node=${LCU_NODE-}
-[ -f "$root/node-path" ] && { IFS= read -r node < "$root/node-path" || :; }
-if [ -z "$node" ] || [ ! -x "$node" ]; then
-  # `lcu --help` works without Node; the text is the one runtime.mjs prints.
-  case ${1-} in --help|-h) help=1 ;; *) help= ;; esac
-  [ -n "$help" ] || for arg do
-    case $arg in --chrome|--audio) ;; --help|-h) [ -z "$help" ] && help=1 || help=2 ;; *) help=2 ;; esac
-  done
-  if [ "$help" = 1 ]; then
+# A release's recorded Node always wins; LCU_NODE is only for a tree without node-path (a source checkout).
+if [ -f "$root/node-path" ]; then
+  node=
+  [ -r "$root/node-path" ] && { IFS= read -r node < "$root/node-path" || :; }
+else
+  node=${LCU_NODE-}
+fi
+if [ -z "$node" ] || [ ! -f "$node" ] || [ ! -x "$node" ]; then
+  # Plain `lcu --help` works without Node; the text is the one runtime.mjs prints.
+  if [ $# -eq 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
     while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$root/lcu/usage.txt"
     exit 0
   fi
-  if [ -f "$root/node-path" ]; then
+  if [ -f "$root/node-path" ] && [ ! -r "$root/node-path" ]; then
+    printf 'LCU: cannot read %s. Reinstall LCU.\n' "$root/node-path" >&2
+  elif [ -f "$root/node-path" ]; then
     printf 'LCU: the ChatGPT app'\''s Node (%s) is missing or not executable. Repair or update the ChatGPT app, then reinstall LCU.\n' "$node" >&2
+  elif [ -n "$node" ]; then
+    printf 'LCU: LCU_NODE (%s) is not an executable file.\n' "$node" >&2
   else
     printf 'LCU: this LCU tree records no Node (node-path) and LCU_NODE is not set. Reinstall LCU, or set LCU_NODE in a source checkout.\n' >&2
   fi

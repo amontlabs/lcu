@@ -6,14 +6,16 @@ const { parseArgs } = process.getBuiltinModule('node:util');
 
 import * as diagnosticLog from './diagnostic_log.mjs';
 import { paths } from './runtime.mjs';
+import { loadSetupState, setupStatePath } from './setup.mjs';
+import { say, warn } from './terminal.mjs';
+import * as tested from './tested.mjs';
 import * as update from './update.mjs';
 
 const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 /** The signed-in account's remembered opt-ins, or null when none are saved or readable. */
-async function savedSetup() {
+function savedSetup() {
   try {
-    const { loadSetupState, setupStatePath } = await import('./setup.mjs');
     return existsSync(setupStatePath(homedir())) ? loadSetupState(homedir()) : null;
   } catch {
     return null;
@@ -27,10 +29,9 @@ export async function collect(root) {
   const descriptor = readJson(descriptorPath);
   const bundle = join(root, 'bundle.json');
   const version = existsSync(bundle) ? readJson(bundle).version : 'source-checkout';
-  const tested = await import('./tested.mjs');
   const resolved = paths(root, descriptor);
-  const observed = tested.observe(root, descriptor, resolved.metadata);
-  const saved = await savedSetup();
+  const observed = await tested.observe(root, descriptor, resolved.metadata);
+  const saved = savedSetup();
   return {
     lcu_version: version,
     release: root,
@@ -55,26 +56,25 @@ export async function main(root, argv = []) {
   try {
     ({ values } = parseArgs({ args: argv, options: { json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } }));
   } catch (error) {
-    process.stderr.write(`${USAGE}lcu status: ${error.message}\n`);
+    warn(`${USAGE}lcu status: error: ${error.message}`);
     return 2;
   }
   if (values.help) {
-    process.stdout.write(USAGE);
+    say(USAGE.trimEnd());
     return 0;
   }
   let status;
   try {
     status = await collect(root);
   } catch (error) {
-    if (values.json) process.stdout.write(`${JSON.stringify({ error: error.message })}\n`);
-    else process.stderr.write(`lcu status: ${error.message}\n`);
+    if (values.json) say(JSON.stringify({ error: error.message }));
+    else warn(`lcu status: ${error.message}`);
     return 1;
   }
   if (values.json) {
-    process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+    say(JSON.stringify(status, null, 2));
     return 0;
   }
-  const tested = await import('./tested.mjs');
   const { app, setup: saved } = status;
   const lines = [`LCU ${status.lcu_version} (${status.platform} ${status.architecture}).`,
     `Original app: ChatGPT ${app.version} (CUA ${app.runtime}) at ${app.path}.`, ...tested.statusLines(status.compatibility)];
@@ -87,6 +87,6 @@ export async function main(root, argv = []) {
   }
   if (status.update) lines.push(update.statusLine(root));
   lines.push(diagnosticLog.summary());
-  process.stdout.write(`${lines.join('\n')}\n`);
+  say(...lines);
   return 0;
 }

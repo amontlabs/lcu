@@ -202,11 +202,13 @@ test('the environment helper restores the real Codex', (t) => {
   assert.equal(unshimmedEnv({ CODEX_CLI_PATH: '/x' }).CODEX_CLI_PATH, '/x');
 });
 
-test('inline TOML values read like tomllib', () => {
-  assert.deepEqual(parseTomlValue('{filesystem = {":root" = "read", \'b\' = "x\\u00e9"}, network = {enabled = false, a.b = 1_000}}'),
-    { filesystem: { ':root': 'read', b: 'xé' }, network: { enabled: false, a: { b: 1000 } } });
-  assert.deepEqual(parseTomlValue('[1, "two", [3.5],]  # comment'), [1, 'two', [3.5]]);
-  for (const text of ['{', '{a = 1,}', '{a = 1, a = 2}', '"open', '01', '{a = 1} x']) assert.throws(() => parseTomlValue(text), Error, text);
+test('the inline profile reader takes what node_repl sends and refuses anything else', () => {
+  assert.deepEqual(parseTomlValue('{filesystem = {":root" = "read", \':tmpdir\' = "x\\u00e9"}, network = {enabled = false}}'),
+    { filesystem: { ':root': 'read', ':tmpdir': 'x\u00e9' }, network: { enabled: false } });
+  assert.deepEqual(parseTomlValue('[1, "two", [true],]'), [1, 'two', [true]]);
+  for (const text of ['{', '{a = 1,}', '{a = 1, a = 2}', '"open', '01', '1.5', '{a.b = 1}', '{a = 1} # comment', '{a = 1} x']) {
+    assert.throws(() => parseTomlValue(text), Error, text);
+  }
 });
 
 test('the launcher is executable', () => {

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSy
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { lockFile } from '../../lcu/lock.mjs';
+import { acquire } from '../../lcu/lock.mjs';
 import { WINDOWS_REQUIRED_FILES, applicationInventory, canonicalJson, inventorySha256 } from '../../lcu/windows.mjs';
 import { checkedPrefix, deps, generationInUse, install, main, preflightHost } from '../../scripts/install_windows.mjs';
 import { override, temporary, write } from './fixtures.mjs';
@@ -132,10 +132,10 @@ test('a failed pointer switch or a tampered generation keeps the current release
 test('a second install for the same prefix is refused while one runs', async (t) => {
   const f = fixture(t);
   write(join(f.prefix, '.lcu-install'), '');
-  const held = lockFile(join(f.prefix, '.lcu-install.lock'));
+  const release = await acquire(join(f.prefix, '.lcu-install.lock'));
   await assert.rejects(install(f.prefix), /Another LCU install is already running/);
   assert.equal(existsSync(join(f.prefix, 'apps')), false);
-  held.release();
+  release();
   await install(f.prefix);
 });
 

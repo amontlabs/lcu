@@ -25,7 +25,8 @@ function macRelease(t) {
   write(join(contents, 'Resources/cua_node/manifest.json'), JSON.stringify({ platform: 'darwin', arch: 'arm64', runtime_archive_version: RUNTIME }));
   for (const relative of MAC_REQUIRED_FILES) write(join(contents, relative), relative, 0o755);
   // The original server stands in as a script that records how it was started.
-  write(join(contents, 'Resources/cua_node/bin/node'), '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$LCU_TEST_OUT.argv"\nenv > "$LCU_TEST_OUT.env"\n', 0o755);
+  write(join(contents, 'Resources/cua_node/bin/node'), '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$LCU_TEST_OUT.argv"\nenv > "$LCU_TEST_OUT.env"\n' +
+    '[ -n "$LCU_TEST_SIGNAL" ] && kill -"$LCU_TEST_SIGNAL" $$\nexit "${LCU_TEST_STATUS:-0}"\n', 0o755);
   const codex = write(join(contents, 'Resources/codex-cli/bin/codex'), 'original codex', 0o755);
   write(join(contents, 'Resources/codex-cli/bin/codex-code-mode-host'), 'original host', 0o755);
   mkdirSync(root);
@@ -83,6 +84,12 @@ test('macOS supervises the lifecycle host around the original server', async (t)
   assert.ok(!existsSync(env.LCU_MAC_LIFETIME_SOCKET), 'the host is gone once the server exits');
   assert.ok(env.LCU_MAC_SERVICE_LOCK.endsWith('/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/IPC/computeruse.sock.lock'));
   assert.equal(JSON.parse(env.NODE_REPL_TRUSTED_SERVICES).sky, join(r.root, 'lcu/macos_sky_service.mjs'));
+});
+
+test('the original server’s exit status reaches the caller; a signal gives 128 + its number', async (t) => {
+  const r = macRelease(t);
+  assert.equal((await supervised(t, r, { HOME: userInfo().homedir, LCU_TEST_STATUS: '7' })).status, 7);
+  assert.equal((await supervised(t, r, { HOME: userInfo().homedir, LCU_TEST_SIGNAL: 'TERM' })).status, 128 + 15);
 });
 
 test('a custom socket path or a HOME that is not the account’s leaves the service lock unknown', async (t) => {

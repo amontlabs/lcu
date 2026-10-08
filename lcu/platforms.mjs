@@ -233,10 +233,8 @@ function linuxVersion(app, arch) {
   throw new Error(VERSION_UNKNOWN);
 }
 
-/** Account lookups, replaceable in tests. */
-export const accounts = {
-  /** Every uid holding `gid` as primary or supplementary group (local account databases), or null when unknown. */
-  groupMembers(gid) {
+/** Every uid holding `gid` as primary or supplementary group (the account databases getent reads), or null when unknown. */
+export function groupMembers(gid) {
     const run = (...args) => childProcess().spawnSync('getent', args, { encoding: 'utf8', timeout: 20_000 });
     const group = run('group', String(gid));
     const passwd = run('passwd');
@@ -245,27 +243,37 @@ export const accounts = {
     const names = new Set((group.stdout.split('\n')[0].split(':')[3] ?? '').split(',').filter(Boolean));
     return new Set(users.filter(([name, , , primary]) => names.has(name) || Number(primary) === gid)
       .map(([, , uid]) => Number(uid)));
-  },
-  /** POSIX access ACL entries `{tag, id, perm}` per path, through one getfacl run; null when it cannot run. */
-  readAcls(paths) {
-    const result = childProcess().spawnSync('getfacl', ['--absolute-names', '--numeric', '--skip-base', '--access', '--', ...paths],
-      { encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
-    if (result.status !== 0) return null;
-    const acls = new Map();
-    let entries;
-    for (const line of result.stdout.split('\n')) {
-      const file = /^# file: (.*)$/.exec(line);
-      if (file) {
-        entries = [];
-        acls.set(file[1].replace(/\\(\\|[0-7]{3})/g, (_, code) => (code === '\\' ? '\\' : String.fromCharCode(parseInt(code, 8)))), entries);
-        continue;
-      }
-      const entry = /^(user|group|mask)::?(\d*):([rwx-]{3})/.exec(line);
-      if (entries && entry) entries.push({ tag: entry[1], id: entry[2] === '' ? null : Number(entry[2]), perm: entry[3] });
+}
+
+/**
+ * The POSIX access ACL of each path: its named entries `{tag, id, perm}` (one getfacl run), `[]` when it has
+ * none, or null when it has one LCU cannot read. Without getfacl, `ls -ld` shows whether an ACL exists (the `+`
+ * after the mode; `.` is an SELinux context); an entry without one has no named entries and is safe.
+ */
+export function readAcls(paths) {
+  const run = (command, args) => childProcess().spawnSync(command, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+  const result = run('getfacl', ['--absolute-names', '--numeric', '--skip-base', '--access', '--', ...paths]);
+  if (result.error?.code === 'ENOENT') {
+    return new Map(paths.map((path) => {
+      const listed = run('ls', ['-ld', '--', path]);
+      return [path, listed.status === 0 && /^\S{10}[.\s]/.test(listed.stdout) ? [] : null];
+    }));
+  }
+  const acls = new Map(paths.map((path) => [path, result.status === 0 ? [] : null]));
+  if (result.status !== 0) return acls;
+  let entries;
+  for (const line of result.stdout.split('\n')) {
+    const file = /^# file: (.*)$/.exec(line);
+    if (file) {
+      entries = [];
+      acls.set(file[1].replace(/\\(\\|[0-7]{3})/g, (_, code) => (code === '\\' ? '\\' : String.fromCharCode(parseInt(code, 8)))), entries);
+      continue;
     }
-    return acls;
-  },
-};
+    const entry = /^(user|group|mask)::?(\d*):([rwx-]{3})/.exec(line);
+    if (entries && entry) entries.push({ tag: entry[1], id: entry[2] === '' ? null : Number(entry[2]), perm: entry[3] });
+  }
+  return acls;
+}
 
 /** Why named-user or named-group ACL entries let an untrusted account write, or null. Only the mask-limited write counts. */
 export function aclWritersUntrusted(entries, trusted, groupMembers) {
@@ -308,12 +316,12 @@ export function untrustedEntry(info, trusted, groupMembers) {
  * linked directory is walked once. Read-only mounts are checked like any other. Limits: group membership
  * comes from the account databases getent reads, and ACLs are read with getfacl.
  */
-function checkTrustedTree(app, files, trees, trusted) {
+function checkTrustedTree(app, files, trees, trusted, { groupMembers: lookup, readAcls: aclsOf }) {
   const problems = [];
   const aclCandidates = [];
   const groups = new Map();
   const members = (gid) => {
-    if (!groups.has(gid)) groups.set(gid, accounts.groupMembers(gid));
+    if (!groups.has(gid)) groups.set(gid, lookup(gid));
     return groups.get(gid);
   };
   const inspected = new Map();
@@ -389,10 +397,10 @@ function checkTrustedTree(app, files, trees, trusted) {
     if (!inspected.get(path)?.isSymbolicLink()) ancestors(path);
   }
   if (aclCandidates.length) {
-    const acls = accounts.readAcls(aclCandidates);
+    const acls = aclsOf(aclCandidates);
     for (const path of aclCandidates) {
-      const entries = acls?.get(path);
-      if (!acls) problems.push(`${path} is group-writable and its POSIX ACL cannot be read (install getfacl, or remove group write)`);
+      const entries = acls.get(path);
+      if (entries === null) problems.push(`${path} is group-writable and its POSIX ACL cannot be read (install getfacl, or remove group write)`);
       else if (entries) {
         const reason = aclWritersUntrusted(entries, trusted, members);
         if (reason) problems.push(`${path} is ${reason}`);
@@ -406,8 +414,11 @@ function checkTrustedTree(app, files, trees, trusted) {
   }
 }
 
-/** Validate an installed ChatGPT Linux app in place, without copying or modifying it. */
-export function resolveInstalledLinuxApp(appPath, { arch, trustedUids = [] }) {
+/**
+ * Validate an installed ChatGPT Linux app in place, without copying or modifying it. `accounts` supplies the
+ * group-membership and ACL lookups (`{groupMembers, readAcls}`).
+ */
+export function resolveInstalledLinuxApp(appPath, { arch, trustedUids = [], accounts = { groupMembers, readAcls } }) {
   if (!isDirectory(appPath)) throw new Error(`Expected an installed ChatGPT application directory: ${appPath}`);
   const app = realpathSync(appPath);
   const resources = join(app, 'resources');
@@ -434,7 +445,7 @@ export function resolveInstalledLinuxApp(appPath, { arch, trustedUids = [] }) {
   const trusted = new Set([0, process.getuid(), process.geteuid(), ...trustedUids]);
   const modules = join(runtime, 'lib/node_modules');
   checkTrustedTree(app, [...required, ...(existsSync(modules) ? [modules] : [])],
-    [runtime, join(plugins, 'chrome'), browserPlugin, join(plugins, 'unified-computer-use')], trusted);
+    [runtime, join(plugins, 'chrome'), browserPlugin, join(plugins, 'unified-computer-use')], trusted, accounts);
   return { app, resources, runtime, backend: 'linux', version: linuxVersion(app, arch), arch,
     codexCli: tools.cli, codeModeHost: tools.codeModeHost, runtimeVersion };
 }

@@ -353,7 +353,7 @@ async function refreshChromeRelay(root) {
   const command = `${stableCommand(root)} browser install`;
   const out = (line) => process.stdout.write(`${line}\n`);
   try {
-    const [state, destination, displaced = []] = await (await deps.module('browser')).refresh(root);
+    const { status: state, destination, displaced = [] } = await (await deps.module('browser')).refresh(root);
     if (state === 'absent') return;
     if (state === 'elsewhere') {
       out(`Chrome: the native-host manifest no longer points at the LCU relay, so it was left alone. To use Chrome through LCU again, run \`${command}\`.`);
@@ -378,25 +378,32 @@ async function refreshChromeRelay(root) {
 export async function postInstall(root, home = homedir()) {
   const claudeMod = await deps.module('claude_mod');
   const target = claudeMod.destination(home);
-  let owned = false;
-  try {
-    owned = JSON.parse(readFileSync(join(target, '.claude-plugin/plugin.json'), 'utf8')).name === 'lcu-approve';
-  } catch {
-    // absent or not LCU's mod: leave it alone
-  }
-  if (owned) {
+  // An absent mod, or a plugin of that name that is not LCU's, is left alone.
+  if (claudeMod.owned(target)) {
     await claudeMod.install(home, root);
     process.stdout.write(`Refreshed the Claude Code lcu-approve mod at ${target}.\n`);
   }
   await refreshChromeRelay(root);
-  try {
-    if (await (await deps.module('codex_hooks')).codexNeedsSetup(home)) {
-      process.stdout.write(`Codex: run \`${stableCommand(root)} setup --agent codex\` to add the LCU update-notice hook.\n`);
-    }
-  } catch {
-    // the hint is optional
+  if (await codexNeedsSetup(home)) {
+    process.stdout.write(`Codex: run \`${stableCommand(root)} setup --agent codex\` to add the LCU update-notice hook.\n`);
   }
   return 0;
+}
+
+/** True when Codex has LCU registered but not the update-notice hooks (`lcu setup --agent codex` adds them). */
+export async function codexNeedsSetup(home = homedir(), env = process.env) {
+  let config;
+  try {
+    const { parse } = await deps.module('toml');
+    config = parse(readFileSync(join(env.CODEX_HOME || join(home, '.codex'), 'config.toml'), 'utf8'));
+  } catch {
+    return false;
+  }
+  if (!config.mcp_servers || !Object.hasOwn(config.mcp_servers, 'lcu')) return false;
+  const { isNoticeGroup } = await deps.module('codex_hooks');
+  const hooks = config.hooks ?? {};
+  return !['SessionStart', 'UserPromptSubmit'].every((event) => (Array.isArray(hooks[event]) ? hooks[event] : [])
+    .some((group) => group && typeof group === 'object' && isNoticeGroup(group)));
 }
 
 const OPTIONS = {
