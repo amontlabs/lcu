@@ -123,13 +123,32 @@ order inside it:
 
 ### Launcher contract (Linux and macOS)
 
-- `bin/lcu`, `bin/lcu-session` and `bin/lcu-codex-sandbox` are short `/bin/sh` scripts. They read the absolute path
-  of the app's Node that the installer recorded in the release, check that it is executable, and `exec` it on the
-  matching `.mjs` entry with all arguments. They spawn nothing else.
+- `bin/lcu`, `bin/lcu-session` and `bin/lcu-codex-sandbox` are short `/bin/sh` scripts. They run
+  `lcu/runtime.mjs`, `lcu/session.mjs` and `lcu/sandbox_shim.mjs` respectively, with all arguments, through
+  `exec`, and spawn nothing else (only a launcher invoked through a symlink to the script file itself runs
+  `readlink` to find its release).
+- **Recorded Node.** The installer writes `<release root>/node-path`: one line, the absolute path of the app's
+  Node (`…/Resources/cua_node/bin/node` on macOS, `…/resources/cua_node/bin/node` on Linux, the managed private
+  copy's `…\cua_node\bin\node.exe` on Windows), with or without a trailing newline. The launcher reads it with
+  the shell's `read` builtin and checks that it is executable.
+- **No `node-path`** (a source checkout, tests): the launcher uses `LCU_NODE` from the environment. A release
+  with `node-path` ignores `LCU_NODE`.
+- **Neither usable:** the launcher prints `LCU: …` (`LCU session: …` for `lcu-session`) naming the problem —
+  the recorded Node is missing or not executable (repair the app, reinstall LCU), or no Node is recorded and
+  `LCU_NODE` is unset — and exits 1. `lcu --help` and `lcu -h` (also after `--chrome`/`--audio`) still print
+  the usage, which lives in `lcu/usage.txt`: the single source both the launcher and `runtime.mjs` print.
+- Inside Node, an entry module runs only when it is the script Node was started on (`lcu/entry.mjs`); a thrown
+  `Error` prints `LCU: <message>` and exits 1, and a returned number is the exit status.
+- The launch path takes builtins from `process.getBuiltinModule` and loads `child_process`, `crypto` and `tty`
+  only where they are used: an ESM `import` of a builtin costs milliseconds on every launch.
 - Identity checks on the app (signature, ownership) run inside Node, as the Python runtime ran them, and each runs
   once per launch.
-- `lcu --help` must still work when the recorded Node is missing, and every other command must say clearly that the
-  app needs repairing or LCU needs reinstalling.
+- On Windows, `bin\lcu.cmd` reads the same `node-path` (or `LCU_NODE`) and runs `lcu\runtime.mjs`. The
+  account-local `<prefix>\lcu.cmd` the installer writes runs the recorded Node on
+  `<prefix>\windows_launcher.mjs` (copied from `scripts/windows_launcher.mjs`), which selects the release from
+  `current.json` and runs its `lcu/runtime.mjs` in the same process.
+- Tests: Node 22 does not take a directory for `node --test`; name the files, as in
+  `node --test tests/node/*.test.mjs`.
 
 ### Windows bootstrap
 
