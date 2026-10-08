@@ -10,13 +10,8 @@ import { locateCodexTools } from './app_layout.mjs';
 import { isMain, run } from './entry.mjs';
 import { MAC_SOCKET_ENV, macSocketPath, resolveInstalledLinuxApp, resolveInstalledMacApp } from './platforms.mjs';
 import { configuration as shimConfiguration, CONFIG_ENV as SHIM_CONFIG_ENV, FAULT_ENV as SHIM_FAULT_ENV, SKY_SERVICE } from './sandbox_shim.mjs';
+import { nativeInput } from './tested.mjs';
 import { component, inventorySha256, isRedirected, validateWindowsAppTree } from './windows.mjs';
-
-// Without lcu/tested.mjs (a tree that does not ship it yet) the Linux input translation simply stays on.
-const tested = await import('./tested.mjs').catch((error) => {
-  if (error.code === 'ERR_MODULE_NOT_FOUND' && error.url?.endsWith('/tested.mjs')) return null;
-  throw error;
-});
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // One help text for runtime.mjs and for the launcher, which prints it when the recorded Node is missing.
@@ -194,7 +189,7 @@ function configureLinuxInput(root, runtime, env, metadata) {
   let toolkits = LINUX_INPUT_TOOLKITS;
   try {
     const { architecture } = readJson(join(root, 'installation.json'));
-    const native = tested.nativeInput(root, { platform: 'linux', architecture, appVersion: metadata.version, runtime: metadata.runtime });
+    const native = nativeInput(root, { platform: 'linux', architecture, appVersion: metadata.version, runtime: metadata.runtime });
     toolkits = toolkits.filter((toolkit) => !native.includes(toolkit));
   } catch {
     // an unreadable record keeps the translation on
