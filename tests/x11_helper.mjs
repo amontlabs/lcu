@@ -9,7 +9,7 @@ const numbers = text => (text ?? '').split(',').filter(Boolean).map(Number);
 const pid = async proof => String(await clientPid(Number(args[0]), {proof}).catch(() => null) ?? '');
 
 if (mode === 'socket') {
-  console.log(xServerInThisNamespace() ? 1 : 0);
+  console.log(await xServerInThisNamespace() ? 1 : 0);
 } else if (mode === 'pid' || mode === 'xres') {
   const answer = await pid(mode === 'pid');
   if (answer) console.log(answer);
@@ -20,7 +20,7 @@ if (mode === 'socket') {
 } else if (mode === 'release') {
   if (await releaseInput(numbers(args[0]), numbers(args[1])).catch(() => false)) console.log(1);
 } else if (mode === 'all') {
-  console.log(JSON.stringify({getpid: String(process.pid), socket: xServerInThisNamespace() ? '1' : '0',
+  console.log(JSON.stringify({getpid: String(process.pid), socket: await xServerInThisNamespace() ? '1' : '0',
     xres: await pid(false), pid: await pid(true)}));
 } else {
   process.exitCode = 2;

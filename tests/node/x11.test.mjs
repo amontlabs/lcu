@@ -112,11 +112,13 @@ test('the cookie is chosen as libXau chooses it', () => {
   assert.equal(pick(256, host, 9), null);
 });
 
-test('only a local display can prove the X server shares this PID namespace', () => {
+test('only a local display can prove the X server shares this PID namespace', async () => {
   for (const DISPLAY of ['localhost:0', '127.0.0.1:0.0', 'someone:0', '', 'unix', ':', ':x', ':٣']) {
-    assert.equal(xServerInThisNamespace({DISPLAY}), false, DISPLAY);
+    assert.equal(await xServerInThisNamespace({DISPLAY}), false, DISPLAY);
   }
 });
+
+const LINUX_ONLY = process.platform !== 'linux' && 'the fake X server listens on an abstract Unix socket, which only Linux has';
 
 // A scripted X server on an abstract socket (@/tmp/.X11-unix/X<n>), which libxcb and LCU try first. This process
 // holds the listening socket, so the PID namespace proof holds for it.
@@ -216,7 +218,7 @@ function desktop({pids = {}, grab = 0, version = [1, 2], keys = [38, 50], button
   };
 }
 
-test('clientPid trusts the window owner only after the own-client check', async t => {
+test('clientPid trusts the window owner only after the own-client check', {skip: LINUX_ONLY}, async t => {
   const own = 0x400000;
   const server = await fakeServer(desktop({pids: {[own]: process.pid, 0x500002: 4242}}));
   t.after(server.close);
@@ -226,7 +228,7 @@ test('clientPid trusts the window owner only after the own-client check', async 
   assert.deepEqual(server.seen.cookies, [null, null]);
 });
 
-test('clientPid refuses a server that numbers this process differently, an old X-Resource or a TCP display', async t => {
+test('clientPid refuses a server that numbers this process differently, an old X-Resource or a TCP display', {skip: LINUX_ONLY}, async t => {
   const lying = await fakeServer(desktop({pids: {0x400000: process.pid + 1, 0x500002: 4242}}));
   t.after(lying.close);
   assert.equal(await clientPid(0x500002, {env: lying.env}), null);
@@ -240,7 +242,7 @@ test('clientPid refuses a server that numbers this process differently, an old X
   assert.equal(fine.seen.requests.length, 0); // refused before connecting
 });
 
-test('the cookie for this host and display is sent', async t => {
+test('the cookie for this host and display is sent', {skip: LINUX_ONLY}, async t => {
   const server = await fakeServer(desktop());
   t.after(server.close);
   const file = join(mkdtempSync(join(tmpdir(), 'lcu-x11-')), 'Xauthority');
@@ -253,7 +255,7 @@ test('the cookie for this host and display is sent', async t => {
   assert.deepEqual(server.seen.cookies, ['07'.repeat(16)]);
 });
 
-test('inputState reports pressed buttons, keys, modifiers, the grab and the owner chain', async t => {
+test('inputState reports pressed buttons, keys, modifiers, the grab and the owner chain', {skip: LINUX_ONLY}, async t => {
   const server = await fakeServer(desktop());
   t.after(server.close);
   assert.deepEqual(await inputState(0, null, {env: server.env}),
@@ -267,7 +269,7 @@ test('inputState reports pressed buttons, keys, modifiers, the grab and the owne
   assert.equal((await inputState(0x700000, {x: 1, y: 1}, {env: server.env})).owner, false); // another window
 });
 
-test('an active grab by another client is reported and not undone', async t => {
+test('an active grab by another client is reported and not undone', {skip: LINUX_ONLY}, async t => {
   const server = await fakeServer(desktop({grab: 1}));
   t.after(server.close);
   const state = await inputState(0x500002, {x: 1, y: 1}, {env: server.env});
@@ -275,7 +277,7 @@ test('an active grab by another client is reported and not undone', async t => {
   assert.ok(!server.seen.requests.some(([opcode]) => opcode === 27));
 });
 
-test('an endless window chain, an X error, a refused connection or a silent server is unknown', async t => {
+test('an endless window chain, an X error, a refused connection or a silent server is unknown', {skip: LINUX_ONLY}, async t => {
   const deep = await fakeServer(desktop({chainAt: window => window + 1}));
   t.after(deep.close);
   await assert.rejects(inputState(1, {x: 0, y: 0}, {env: deep.env}), /too deep/);
@@ -291,7 +293,7 @@ test('an endless window chain, an X error, a refused connection or a silent serv
   await assert.rejects(inputState(1, null, {env: {DISPLAY: ':59999'}}));
 });
 
-test('releaseInput sends XTEST releases and confirms them with a round trip', async t => {
+test('releaseInput sends XTEST releases and confirms them with a round trip', {skip: LINUX_ONLY}, async t => {
   const server = await fakeServer(desktop());
   t.after(server.close);
   assert.equal(await releaseInput([1, 3], [50], {env: server.env}), true);
@@ -305,4 +307,16 @@ test('releaseInput sends XTEST releases and confirms them with a round trip', as
   const bare = await fakeServer((opcode, data, body) => opcode === 98 ? reply() : desktop()(opcode, data, body));
   t.after(bare.close);
   assert.equal(await releaseInput([1], [], {env: bare.env}), false);
+});
+
+test('the namespace proof and the X round trips share one deadline; past it the owner is unknown', {skip: LINUX_ONLY}, async t => {
+  const server = await fakeServer(desktop({pids: {0x400000: process.pid, 0x500002: 4242}}));
+  t.after(server.close);
+  assert.equal(await xServerInThisNamespace(server.env), true);
+  assert.equal(await xServerInThisNamespace(server.env, {deadline: 0}), false);
+  const silent = await fakeServer(() => 'hang');
+  t.after(silent.close);
+  const started = Date.now();
+  assert.equal(await clientPid(0x500002, {env: silent.env, timeoutMs: 200}).catch(() => null), null); // as the guard asks
+  assert.ok(Date.now() - started < 1000);
 });

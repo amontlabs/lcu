@@ -5,7 +5,8 @@
 // short reply, closed socket or timeout fails the whole question (libX11's default error handler ended that
 // helper on any X error).
 import {createConnection} from 'node:net';
-import {readFileSync, readdirSync, readlinkSync} from 'node:fs';
+import {readFileSync} from 'node:fs';
+import {readFile, readdir, readlink} from 'node:fs/promises';
 import {hostname} from 'node:os';
 
 const TIMEOUT_MS = 3000;
@@ -41,8 +42,9 @@ export function parseDisplay(name) {
 // file /tmp/.X11-unix/XN), every process holding it is found through /proc/*/fd (only processes this one can
 // read), and each must have the same /proc/<pid>/ns/pid link as this process. A TCP or remote display, an
 // unreadable holder or no holder at all is false. A process listed in this /proc is in this PID namespace or
-// one below it, so a server in another namespace is never found.
-export function xServerInThisNamespace(env = process.env) {
+// one below it, so a server in another namespace is never found. The scan reads /proc asynchronously, so the
+// Sky worker's event loop keeps running; past `deadline` (a Date.now() value) it stops and answers false.
+export async function xServerInThisNamespace(env = process.env, {deadline = Infinity} = {}) {
   try {
     let name = env.DISPLAY ?? '';
     if (name.startsWith('unix:')) name = name.slice(4);
@@ -51,27 +53,27 @@ export function xServerInThisNamespace(env = process.env) {
     if (!/^[0-9]+$/.test(number)) return false;
     const names = new Set([X_SOCKET_DIR + number, '@' + X_SOCKET_DIR + number]);
     const inodes = new Set();
-    for (const line of readFileSync('/proc/net/unix', 'utf8').split('\n').slice(1)) {
+    for (const line of (await readFile('/proc/net/unix', 'utf8')).split('\n').slice(1)) {
       const fields = line.trim().split(/\s+/);
       if (fields.length >= 8 && names.has(fields[7]) && parseInt(fields[3], 16) & 0x10000) inodes.add(fields[6]); // __SO_ACCEPTCON
     }
     if (!inodes.size) return false;
-    const mine = readlinkSync('/proc/self/ns/pid');
+    const mine = await readlink('/proc/self/ns/pid');
     const holders = new Map();
-    for (const entry of readdirSync('/proc')) {
+    for (const entry of await readdir('/proc')) {
       if (!/^\d+$/.test(entry)) continue;
+      if (Date.now() > deadline) return false;
       let descriptors;
-      try { descriptors = readdirSync(`/proc/${entry}/fd`); } catch { continue; }
-      for (const descriptor of descriptors) {
-        let target;
-        try { target = readlinkSync(`/proc/${entry}/fd/${descriptor}`); } catch { continue; }
+      try { descriptors = await readdir(`/proc/${entry}/fd`); } catch { continue; }
+      const targets = await Promise.all(descriptors.map(descriptor => readlink(`/proc/${entry}/fd/${descriptor}`).catch(() => '')));
+      for (const target of targets) {
         const inode = /^socket:\[(\d+)\]$/.exec(target)?.[1];
         if (inode && inodes.has(inode)) holders.set(inode, (holders.get(inode) ?? new Set()).add(entry));
       }
     }
     if (holders.size !== inodes.size) return false; // a listener whose process cannot be identified
     for (const pids of holders.values()) {
-      for (const pid of pids) if (readlinkSync(`/proc/${pid}/ns/pid`) !== mine) return false;
+      for (const pid of pids) if (await readlink(`/proc/${pid}/ns/pid`) !== mine) return false;
     }
     return true;
   } catch {
@@ -367,9 +369,24 @@ export async function withDisplay(question, {env = process.env, timeoutMs = TIME
 // Asked only when the X server is proven to share this PID namespace (skipped by `proof: false`, which tests
 // use for what LCU trusted before 0.8.7), and then only when the server's record of this connection's own
 // client (a 1x1 window it creates and never maps) equals this process's id: an additional condition, because
-// equal numbers in distinct PID namespaces prove nothing. null when unknown.
-export async function clientPid(windowId, {env = process.env, proof = true} = {}) {
-  if (proof && !xServerInThisNamespace(env)) return null;
+// equal numbers in distinct PID namespaces prove nothing. null when unknown, also when the namespace proof and
+// the X round trips together take longer than `timeoutMs` (the single-shot helper's budget).
+export async function clientPid(windowId, {env = process.env, proof = true, timeoutMs = TIMEOUT_MS} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let timer;
+  const expired = new Promise(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); });
+  try {
+    const answer = askClientPid(windowId, {env, proof, deadline});
+    answer.catch(() => {}); // a failure after the deadline has nobody left to tell
+    return await Promise.race([expired, answer]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function askClientPid(windowId, {env, proof, deadline}) {
+  if (proof && !(await xServerInThisNamespace(env, {deadline}))) return null;
+  if (Date.now() >= deadline) return null;
   return withDisplay(async (x, {root, resourceBase}) => {
     const major = await x.extension('X-Resource');
     if (major === null) return null;
@@ -385,7 +402,7 @@ export async function clientPid(windowId, {env = process.env, proof = true} = {}
     await x.send(requests.createWindow(own, root));
     if (await owner(own) !== process.pid) return null; // the server numbers processes differently (or lies)
     return await owner(windowId) || null;
-  }, {env});
+  }, {env, timeoutMs: Math.max(1, deadline - Date.now())});
 }
 
 // The X input state: the pointer buttons (1-5) and key codes the X server reports pressed now and the modifier
