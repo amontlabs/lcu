@@ -381,7 +381,7 @@ No temporary file was left behind, and a clean rerun exited 0.
 These pass after rebasing the fix onto `2e6f094`:
 - `node --test tests/node/*.test.mjs`: 369 pass, 29 skipped (Linux-only fakes).
 - `npm test` in `adapters`: 129 pass, 8 skipped.
-- `python3 -m unittest discover -b -s tests -p 'test_*.py'`: 37 OK.
+- `python3 -m unittest discover -b -s tests -p 'test_*.py'`: 38 OK.
 
 ### Guard and the 0.9.7 window
 
