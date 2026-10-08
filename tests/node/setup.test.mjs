@@ -183,7 +183,10 @@ test('failed registration still saves choices and prints a retry without a defau
   assert.match((await other.main('--agent', 'codex', '--approval', 'ask')).err, /--approval ask/);
 });
 
-test('without --user, setup targets $HOME when it is usable, else the user database home', (t) => {
+// Root must name --user and ignores $HOME by design; these two run as the invoking account (CI runners are not root).
+const NON_ROOT = { skip: process.getuid?.() === 0 && 'running as root, which ignores $HOME and requires --user by design' };
+
+test('without --user, setup targets $HOME when it is usable, else the user database home', NON_ROOT, (t) => {
   const own = userInfo();
   const home = temporary(t);
   const saved = process.env.HOME;
@@ -203,7 +206,7 @@ test('without --user, setup targets $HOME when it is usable, else the user datab
   assert.throws(() => check('--agent', 'codex'), /Root must specify --user ACCOUNT/);
 });
 
-test('a retry names --user only when the caller did', async (t) => {
+test('a retry names --user only when the caller did', NON_ROOT, async (t) => {
   const f = fixture(t);
   f.failing = new Set(['codex']);
   assert.match((await f.main('--agent', 'codex')).err, /--user fixture/);

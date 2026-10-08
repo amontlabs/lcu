@@ -3,13 +3,14 @@ import { mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { accountHome } from '../../lcu/fsutil.mjs';
-import { override, posixTests, temporary } from './fixtures.mjs';
+import { asNonRoot, override, posixTests, temporary } from './fixtures.mjs';
 
 const test = posixTests('POSIX homes, owners and symlinks');
 const database = () => ({ homedir: '/database/home' });
 
 test('accountHome uses $HOME when it is an owned directory without links', (t) => {
   const home = temporary(t);
+  asNonRoot(t, home);
   assert.equal(accountHome({ HOME: home }, database), home);
   assert.equal(accountHome({ HOME: `${home}/` }, database), home);
 });

@@ -378,8 +378,18 @@ def parse_file(path):
     return {'lines': text.splitlines()}
 
 
-def snapshot(root, label):
-    """Every file, link and empty directory under root as parsed data, keyed by path."""
+def adapter_copies(release):
+    """sha256 -> path of every file in the installed release's adapters/, for files setup copies verbatim."""
+    base = Path(release) / 'adapters'
+    return {hashlib.sha256(path.read_bytes()).hexdigest(): str(path.relative_to(base))
+            for path in sorted(base.rglob('*')) if path.is_file() and not path.is_symlink()}
+
+
+def snapshot(root, label, copies=None):
+    """Every file, link and empty directory under root as parsed data, keyed by path. A file that is a byte-for-byte
+    copy of one of the release's own adapter files is recorded by that source path: each release ships its own
+    adapters, and they change independently of the port (a newer Hermes plugin on main is not a setup difference)."""
+    copies = copies or {}
     found = {}
     if not root.exists():
         return found
@@ -390,7 +400,9 @@ def snapshot(root, label):
         elif path.name.startswith('lcu-native-host') or path.name == '.lcu-browser-plugin':
             found[key] = {'mode': oct(path.stat().st_mode & 0o777)}  # LCU's own relay code and cache key
         elif path.is_file():
-            found[key] = {'mode': oct(path.stat().st_mode & 0o777), **parse_file(path)}
+            source = copies.get(hashlib.sha256(path.read_bytes()).hexdigest())
+            found[key] = {'mode': oct(path.stat().st_mode & 0o777),
+                          **({'copy-of-adapter': source} if source else parse_file(path))}
         elif path.is_dir() and not any(path.iterdir()):
             found[key] = {'empty-dir': True}
     return found
@@ -501,8 +513,9 @@ def check_setup(sandbox, impl):
             args = [a.format(project=sandbox.project, home=sandbox.home) for a in args]
             exits.append(sandbox.lcu('setup', *args, '--yes')[0])
         _, commands = sandbox.take_records()
+        copies = adapter_copies((sandbox.prefix / 'current').resolve())
         data[name] = {'exit': exits, 'commands': commands,
-                      'files': {**snapshot(sandbox.home, 'HOME'), **snapshot(sandbox.project, 'PROJECT')}}
+                      'files': {**snapshot(sandbox.home, 'HOME', copies), **snapshot(sandbox.project, 'PROJECT', copies)}}
     return data
 
 

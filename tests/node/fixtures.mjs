@@ -1,5 +1,5 @@
 // Shared fixtures for the Node unit tests: disposable directories and hand-made app layouts (no OpenAI code).
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -128,4 +128,15 @@ export function mockWrite(t, stream, fn) {
     fn(chunk);
     return true;
   });
+}
+
+/**
+ * Run the rest of a test as a non-root account when the suite runs as root (containers): `dirs` are handed to that
+ * uid and process.getuid reports it, so code that treats root specially (root ignores $HOME) takes its normal path.
+ */
+export function asNonRoot(t, ...dirs) {
+  if (process.getuid?.() !== 0) return;
+  const uid = 4242;
+  for (const dir of dirs) chownSync(dir, uid, uid);
+  override(t, process, 'getuid', () => uid);
 }
