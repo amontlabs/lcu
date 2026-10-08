@@ -5,7 +5,7 @@ import { basename, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 import { withAppServer } from './app_server.mjs';
-import { applyChanges, change, readFile, regularPath, seams, shellQuote, spacedJson, windowsCommandLine } from './setup.mjs';
+import { applyChanges, change, member, readFile, regularPath, seams, shellQuote, spacedJson, windowsCommandLine } from './setup.mjs';
 import { parse as parseToml } from './toml.mjs';
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -176,9 +176,7 @@ export async function installHooks(cli, configPath, cwd, env, hostRoot, noticeCo
   const hooks = structuredClone(current.hooks ?? {});
   const expected = originalHooks(hostRoot);
   for (const [event, original] of Object.entries(expected)) {
-    hooks[event] ??= [];
-    const groups = hooks[event];
-    if (!Array.isArray(groups)) throw new Error(`Invalid existing Codex hook list: ${event}`);
+    const groups = member(hooks, event, [], `Invalid existing Codex hook list: ${event}`);
     for (const group of groups) {
       const ours = (group.hooks ?? []).some((hook) => hook.server === 'lcu' && hook.tool === 'turn_ended');
       if (ours && !original.some((item) => isDeepStrictEqual(item, group))) {

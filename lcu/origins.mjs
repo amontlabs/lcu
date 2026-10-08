@@ -32,11 +32,12 @@ export class OriginsError extends Error {}
 export class UnsupportedShape extends OriginsError {}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+// A table: plain objects only, so a float or a date read from the file is a value, not a table.
+const isObject = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
 const reason = (error) => error.message.replace(/^[A-Z]+: /, '').replace(/, \w+ '.*'$/, '');
 
-/** The file operations a forget performs, replaceable in tests that race the original runtime. */
-export const files = {
+/** The file operations a forget performs (`forgetIn` takes others, to race the original runtime in tests). */
+const FILES = {
   read: (path) => readFileSync(path),
   /** Write `text` next to `path` and return the temporary file, ready to replace it. */
   writeTemporary(path, text, mode) {
@@ -70,8 +71,10 @@ export function codexHome(env = process.env, { windows = process.platform === 'w
   if (!('CODEX_HOME' in env)) return (windows ? win32 : posix).normalize(defaultCodexHome(env, windows));
   const value = env.CODEX_HOME;
   if (!value) throw new OriginsError('CODEX_HOME is set but empty; unset it or set an absolute path.');
-  if (!(windows ? win32 : posix).isAbsolute(value)) throw new OriginsError(`CODEX_HOME must be an absolute path, not ${JSON.stringify(value)}.`);
-  return value;
+  const path = windows ? win32 : posix;
+  if (!path.isAbsolute(value)) throw new OriginsError(`CODEX_HOME must be an absolute path, not ${JSON.stringify(value)}.`);
+  const normal = path.normalize(value);
+  return normal.length > path.parse(normal).root.length ? normal.replace(/[\\/]+$/, '') : normal;
 }
 
 export const sessionsDirectory = (home) => join(home, 'browser', 'sessions');
@@ -172,7 +175,7 @@ function sameOrigin(stored, origin) {
 export function parse(raw, path) {
   let document;
   try {
-    document = parseToml(new TextDecoder('utf-8', { fatal: true }).decode(raw));
+    document = parseToml(new TextDecoder('utf-8', { fatal: true }).decode(raw), { floats: true });
   } catch (error) {
     throw new OriginsError(`${path} is not valid TOML (${error.message}); leaving it untouched.`);
   }
@@ -194,7 +197,7 @@ export function parse(raw, path) {
   return { document, origins };
 }
 
-export function read(path) {
+export function read(path, files = FILES) {
   let raw;
   try {
     raw = files.read(path);
@@ -235,7 +238,7 @@ export function rewritableText(raw, document, path) {
   const rendered = render(document, path);
   let same = false;
   try {
-    same = isDeepStrictEqual(parseToml(rendered), document);
+    same = isDeepStrictEqual(parseToml(rendered, { floats: true }), document);
   } catch {
     // not faithful
   }
@@ -274,10 +277,10 @@ export async function locked(directory, fn, { wait = LOCK_WAIT } = {}) {
  * microseconds wide. What is lost then is a saved answer, so the runtime asks about that site again; a lost entry
  * never grants access.
  */
-export function forgetIn(path, origin, kinds, { attempts = WRITE_ATTEMPTS } = {}) {
+export function forgetIn(path, origin, kinds, { attempts = WRITE_ATTEMPTS, files = {} } = {}) {
   return locked(dirname(path), async () => {
     try {
-      return await forget(path, origin, kinds, attempts);
+      return await forget(path, origin, kinds, attempts, { ...FILES, ...files });
     } catch (error) {
       if (error instanceof OriginsError) throw error;
       throw new OriginsError(`cannot update ${path}: ${reason(error)}`);
@@ -285,10 +288,10 @@ export function forgetIn(path, origin, kinds, { attempts = WRITE_ATTEMPTS } = {}
   });
 }
 
-async function forget(path, origin, kinds, attempts) {
+async function forget(path, origin, kinds, attempts, files) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (lstatSync(path).isSymbolicLink()) throw new OriginsError(`${path} is a symbolic link; leaving it untouched.`);
-    const { raw, document, origins } = read(path);
+    const { raw, document, origins } = read(path, files);
     const removed = {};
     for (const kind of kinds) {
       const kept = origins[kind].filter((entry) => !sameOrigin(entry, origin));

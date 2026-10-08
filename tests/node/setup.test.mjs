@@ -31,19 +31,19 @@ function fixture(t) {
   });
   override(t, setup.seams, 'run', () => result(0));
   override(t, setup.seams, 'installBrowser', async () => {});
-  override(t, setup.seams, 'configure', async (names, _home, command, _tools, _release, options) => {
+  state.configure = async (names, _home, command, _tools, _release, options) => {
     state.registered.push({ names: [...names], command, ...options });
     return names.filter((name) => state.failing.has(name)).map((name) => [name, 'plugin', 'boom']);
-  });
+  };
   state.raw = async (...argv) => {
     const seen = await output(t);
-    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--session', 'direct', ...argv]);
+    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--session', 'direct', ...argv], { configure: state.configure });
     return { code, out: seen.out, err: seen.err };
   };
   state.main = (...argv) => state.raw('--yes', '--no-chrome', ...argv);
   state.reconcile = async (...argv) => {
     const seen = await output(t);
-    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--reconcile', ...argv]);
+    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--reconcile', ...argv], { configure: state.configure });
     return { code, out: seen.out, err: seen.err };
   };
   state.agents = (...names) => names.flatMap((name) => ['--agent', name]);
@@ -151,7 +151,7 @@ test('the runtime is probed and the registered command is the direct launcher wi
   assert.equal(code, 0);
   assert.deepEqual(f.spawned[0], [join(f.prefix, 'current/bin/lcu'), '--version']);
   assert.deepEqual(f.registered[0].command, [join(f.prefix, 'current/bin/lcu'), '--audio']);
-  await setup.main(['--prefix', f.prefix, '--user', 'fixture', '--session', 'discover', '--yes', '--agent', 'codex']);
+  await setup.main(['--prefix', f.prefix, '--user', 'fixture', '--session', 'discover', '--yes', '--agent', 'codex'], { configure: f.configure });
   assert.deepEqual(f.registered[1].command, [join(f.prefix, 'current/bin/lcu-session'), '--user', 'fixture', '--', join(f.prefix, 'current/bin/lcu'), '--audio']);
 });
 
@@ -459,9 +459,8 @@ test('the skill earlier versions generated is removed', (t) => {
 
 test('an export carries no skill or producer path and resolves the destination prefix and session', async (t) => {
   const r = release(t);
-  override(t, setup.seams, 'exportFiles', () => ({}));
   const destination = join(r.root, 'export');
-  await setup.exportBundle(destination, ['/producer/private/lcu'], r.release);
+  await setup.exportBundle(destination, ['/producer/private/lcu'], r.release, { codexFiles: () => ({}) });
   const files = ['plugin.json', 'mcp.json', 'host-contract.json', 'lcu-bootstrap.json', 'codex.mcp.json'];
   const text = files.map((name) => readFileSync(join(destination, name), 'utf8')).join('\n');
   assert.ok(!text.includes('/producer/private/lcu') && !text.includes(r.root));
@@ -476,7 +475,7 @@ test('an export carries no skill or producer path and resolves the destination p
   const codex = JSON.parse(readFileSync(join(destination, 'codex.mcp.json'), 'utf8')).mcpServers.lcu;
   assert.match(codex.args[1], /current\/agent-tools\/node\/bin\/node/);
   assert.match(codex.args[1], /current\/adapters\/codex\.mjs/);
-  await setup.exportBundle(join(r.root, 'chrome-export'), ['/usr/bin/lcu', '--chrome'], r.release, { chrome: true });
+  await setup.exportBundle(join(r.root, 'chrome-export'), ['/usr/bin/lcu', '--chrome'], r.release, { chrome: true, codexFiles: () => ({}) });
   assert.equal(JSON.parse(readFileSync(join(r.root, 'chrome-export/mcp.json'), 'utf8')).mcpServers.lcu.args.at(-1), '--chrome');
   assert.match(JSON.parse(readFileSync(join(r.root, 'chrome-export/lcu-bootstrap.json'), 'utf8')).destinationSetup, /--chrome/);
   assert.ok(!command.args.includes('--chrome'));
@@ -509,4 +508,60 @@ test('a too-long macOS socket path is a warning at the end of setup', async (t) 
   const { code, out } = await f.main('--agent', 'codex');
   assert.equal(code, 0);
   assert.ok(out.indexOf('Warning: Computer Use cannot start for this macOS account') > out.indexOf('Configuration prepared.'));
+});
+
+test('Windows setup configures only the signed-in account, in a direct session, without export', (t) => {
+  const home = temporary(t);
+  override(t, process, 'platform', 'win32');
+  override(t, setup.seams, 'account', () => ({ name: 'Alice', uid: null, gid: null, home }));
+  const check = (...argv) => setup.validate(setup.parse(['--prefix', '/Users/alice/AppData/Local/LCU', ...argv]));
+  assert.equal(setup.parse([]).session, 'direct');
+  assert.deepEqual(check('--agent', 'codex', '--user', 'alice').names, ['codex']);
+  assert.throws(() => check('--agent', 'codex', '--user', 'bob'), /only configures the current signed-in account/);
+  assert.throws(() => check('--agent', 'codex', '--session', 'discover'), /requires --session direct/);
+  assert.throws(() => check('--export', join(home, 'x')), /portable export is not implemented/);
+});
+
+test('Windows registrations name the stable lcu.cmd; setup itself starts the launcher on the current Node', (t) => {
+  override(t, process, 'platform', 'win32');
+  const prefix = '/Users/alice/AppData/Local/LCU';
+  const paths = setup.runtimePaths({ prefix, session: 'direct' }, { name: 'alice' });
+  assert.deepEqual(paths.desktopCommand, [join(prefix, 'lcu.cmd')]);
+  assert.deepEqual(paths.directRuntime, [process.execPath, join(prefix, 'windows_launcher.mjs')]);
+  assert.equal(paths.runtime, join(prefix, 'lcu.cmd'));
+});
+
+test('an export cannot carry an approval mode', (t) => {
+  override(t, setup.seams, 'account', () => ({ name: 'fixture', uid: process.getuid(), gid: process.getgid(), home: temporary(t) }));
+  assert.throws(() => setup.validate(setup.parse(['--user', 'fixture', '--export', '/tmp/new-export', '--approval', 'auto'])),
+    /cannot be combined with --export/);
+});
+
+test('the old skill listing survives a Node exit right after a large output', (t) => {
+  const root = temporary(t);
+  const skills = write(join(root, 'skills.mjs'), "console.log(JSON.stringify(Array.from({length: 2000}, (_, i) => " +
+    "({name: 'other-' + i, path: '/x/' + 'p'.repeat(60)}))));\nprocess.exit(0);\n");
+  assert.equal(setup.removeOldSkill(process.execPath, skills, root, process.env, ['--global']), 'none');
+});
+
+test('JSON settings: an empty file is {} and a byte order mark is ignored', () => {
+  assert.deepEqual(setup.parseJson(Buffer.alloc(0)), {});
+  assert.deepEqual(setup.parseJson(null), {});
+  assert.deepEqual(setup.parseJson(Buffer.from('﻿{"a": 1}')), { a: 1 });
+});
+
+test('a terminal question reads one line without spinning, and is empty at the end of input', async () => {
+  const script = `import { ask } from ${JSON.stringify(pathToFileURL(join(REPO, 'lcu/terminal.mjs')).href)};
+    const started = process.cpuUsage(); const answer = await ask('Q? '); const end = await ask('again? ');
+    const used = process.cpuUsage(started); console.log(JSON.stringify({ answer, end, cpu: (used.user + used.system) / 1000 }));`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['pipe', 'pipe', 'inherit'] });
+  let out = '';
+  child.stdout.on('data', (chunk) => { out += chunk; });
+  await new Promise((done) => setTimeout(done, 400));
+  child.stdin.end('yes\n');
+  await new Promise((done) => child.once('close', done));
+  const answer = JSON.parse(out.slice(out.indexOf('{')));
+  assert.equal(answer.answer, 'yes');
+  assert.equal(answer.end, '');
+  assert.ok(answer.cpu < 300, `${answer.cpu} ms of CPU while waiting`);
 });

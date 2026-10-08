@@ -31,6 +31,11 @@ export const host = {
   environment: (root, selected, env) => environment(root, selected, { env }),
   /** The account home of `name`, for `sudo lcu update`. */
   home(name) {
+    if (process.platform === 'darwin') {
+      const result = spawnSync('/usr/bin/dscl', ['.', '-read', `/Users/${name}`, 'NFSHomeDirectory'], { encoding: 'utf8', timeout: 20_000 });
+      const match = /^NFSHomeDirectory:\s*(\S.*)$/m.exec(result.status === 0 ? result.stdout : '');
+      return match ? match[1].trim() : null;
+    }
     const result = spawnSync('getent', ['passwd', name], { encoding: 'utf8', timeout: 20_000 });
     return result.status === 0 ? result.stdout.split(':')[5] ?? null : null;
   },
@@ -555,7 +560,7 @@ export async function main(root, argv) {
       'installed app browser. For external Chrome, run `lcu browser install` and enable the official ChatGPT extension.');
     return 2;
   }
-  if (action === '-h' || action === '--help') {
+  if (action === '-h' || action === '--help' || (['install', 'status'].includes(action) && rest.some((arg) => arg === '-h' || arg === '--help'))) {
     say(USAGE, '', 'Connect installed Chromium browsers using OpenAI\'s original native host.', '',
       '  install [--directory DIR]           Install the original native host for the current desktop account',
       '  status [--browser chrome|edge]      Check extension and connector setup without changing the browser');

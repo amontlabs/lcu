@@ -11,7 +11,7 @@
 import { dirname, join } from 'node:path';
 
 import { selectedCodexHome } from './codex_hooks.mjs';
-import { applyChanges, atomicWrite, change, checked, json, readFile, seams, setupStatePath, spacedJson } from './setup.mjs';
+import { applyChanges, atomicWrite, change, checked, json, member, parseJson, readFile, seams, setupStatePath, spacedJson } from './setup.mjs';
 import { parse as parseToml } from './toml.mjs';
 
 export const MODES = ['ask', 'auto'];
@@ -166,12 +166,10 @@ function applyClaude(mode, home, project) {
     commit(home, key, null);
     return 'unchanged (no settings file)';
   }
-  const settings = before ? JSON.parse(before) : {};
+  const settings = parseJson(before);
   if (!isObject(settings)) throw new Error(`Claude settings must be an object: ${path}`);
-  settings.permissions ??= {};
-  const { permissions } = settings;
-  if (!isObject(permissions)) throw new Error(`Claude permissions must be an object: ${path}`);
-  const allow = permissions.allow ?? [];
+  const permissions = member(settings, 'permissions', {}, `Claude permissions must be an object: ${path}`);
+  const allow = Object.hasOwn(permissions, 'allow') ? permissions.allow : [];
   if (!Array.isArray(allow) || allow.some((rule) => typeof rule !== 'string')) throw new Error(`Claude allow rules must be a string array: ${path}`);
   const ours = [...CLAUDE_RULES, LEGACY_CLAUDE_RULE];
   // Only an entry LCU recorded adding is LCU's to remove.

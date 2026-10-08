@@ -1,12 +1,19 @@
 // A TOML 1.0 reader for the files LCU inspects: Codex's config.toml, the original browser service's session
 // files, and the inline permission profile `codex sandbox` receives. LCU never writes TOML through this module;
 // Codex's own writer and add-mcp do. Values come back as plain objects, arrays, strings, numbers and booleans;
-// a date or time stays its text (TomlDateTime). Invalid input throws.
+// a date or time stays its text (TomlDateTime), and with `{floats: true}` a float is a TomlFloat, for callers
+// that must tell 1.0 from 1. Invalid input throws. Codex validates its own config, so only what LCU needs to
+// stay safe is checked here: syntax and duplicate keys.
 
 export class TomlDateTime {
   constructor(text) { this.text = text; }
   toJSON() { return this.text; }
   toString() { return this.text; }
+}
+
+export class TomlFloat {
+  constructor(value) { this.value = value; }
+  toJSON() { return this.value; }
 }
 
 const isTable = (value) => value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof TomlDateTime);
@@ -15,7 +22,7 @@ const NUMBER = /^(?:[+-]?(?:inf|nan)|0x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*|0o[0-7](?:_
 const DATE = /^(?:\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:\d{2})?)?|\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?=[\s,\]}#]|$)/;
 
 /** A cursor over `text` with the value grammar shared by documents and lone inline values. */
-function reader(text) {
+function reader(text, { floats = false } = {}) {
   const state = { at: 0 };
   const fail = (what = 'invalid TOML') => {
     const line = text.slice(0, state.at).split('\n').length;
@@ -154,9 +161,11 @@ function reader(text) {
     if (!number) fail('invalid value');
     state.at += number[0].length;
     const word = number[0].replaceAll('_', '');
-    if (/^[+-]?(inf|nan)$/.test(word)) return word.endsWith('nan') ? NaN : (word[0] === '-' ? -Infinity : Infinity);
     if (/^0[xob]/.test(word)) return parseInt(word.slice(2), { x: 16, o: 8, b: 2 }[word[1]]);
-    return Number(word);
+    const float = /^[+-]?(inf|nan)$/.test(word) ? (word.endsWith('nan') ? NaN : (word[0] === '-' ? -Infinity : Infinity))
+      : /[.eE]/.test(word) ? Number(word) : null;
+    if (float === null) return Number(word);
+    return floats ? new TomlFloat(float) : float;
   };
   // The rest of the line holds only a comment.
   const end = () => {
@@ -169,43 +178,25 @@ function reader(text) {
   return { state, fail, space, key, value, end, isTable };
 }
 
-/**
- * Assign `path` = `value` under `table`, creating dotted tables. `sealed` holds inline tables and arrays, which
- * cannot grow; `explicit` holds tables a [header] defined; `dotted` maps a table a dotted key defined to the
- * table it was defined in, which alone may extend it.
- */
-function assigner(sealed, explicit, dotted) {
-  return function assign(table, path, value) {
-    let target = table;
-    for (const part of path.slice(0, -1)) {
-      if (!Object.hasOwn(target, part)) {
-        target[part] = {};
-        dotted.set(target[part], table);
-      } else {
-        const next = target[part];
-        if (!isTable(next) || sealed.has(next) || explicit.has(next) || (dotted.has(next) && dotted.get(next) !== table)) {
-          throw new Error(`key ${path.join('.')} conflicts with an existing table`);
-        }
-      }
-      target = target[part];
-    }
-    const last = path.at(-1);
-    if (Object.hasOwn(target, last)) throw new Error(`duplicate key ${path.join('.')}`);
-    target[last] = value;
-    if (isTable(value) || Array.isArray(value)) sealed.add(value);
-  };
+/** Assign `path` = `value` under `table`, creating the tables a dotted key names. */
+function assign(table, path, value) {
+  let target = table;
+  for (const part of path.slice(0, -1)) {
+    if (!Object.hasOwn(target, part)) target[part] = {};
+    else if (!isTable(target[part])) throw new Error(`key ${path.join('.')} conflicts with an existing value`);
+    target = target[part];
+  }
+  const last = path.at(-1);
+  if (Object.hasOwn(target, last)) throw new Error(`duplicate key ${path.join('.')}`);
+  target[last] = value;
 }
 
 /** Parse a whole TOML document. */
-export function parse(text) {
+export function parse(text, options) {
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  const read = reader(text);
+  const read = reader(text, options);
   const root = {};
-  const sealed = new WeakSet();
-  const explicit = new WeakSet();
-  const dotted = new WeakMap();
   const arrays = new WeakSet();
-  const assign = assigner(sealed, explicit, dotted);
   let current = root;
   const descend = (path) => {
     let target = root;
@@ -213,7 +204,7 @@ export function parse(text) {
       if (!Object.hasOwn(target, part)) target[part] = {};
       let next = target[part];
       if (Array.isArray(next) && arrays.has(next)) next = next.at(-1);
-      if (!isTable(next) || sealed.has(next)) read.fail(`key ${path.join('.')} is not a table`);
+      if (!isTable(next)) read.fail(`key ${path.join('.')} is not a table`);
       target = next;
     }
     return target;
@@ -240,9 +231,8 @@ export function parse(text) {
       } else {
         if (!Object.hasOwn(parent, name)) parent[name] = {};
         current = parent[name];
-        if (!isTable(current) || sealed.has(current) || explicit.has(current) || dotted.has(current)) read.fail(`table ${path.join('.')} is defined twice`);
+        if (!isTable(current)) read.fail(`key ${path.join('.')} is not a table`);
       }
-      explicit.add(current);
     } else {
       const path = read.key();
       if (text[state.at] !== '=') read.fail();
@@ -261,8 +251,7 @@ export function parse(text) {
 /** The value of one inline TOML value (`key = <text>` without the key), with an optional trailing comment. */
 export function parseValue(text) {
   const read = reader(text);
-  const sealed = new WeakSet();
-  const result = read.value(assigner(sealed, new WeakSet(), new WeakMap()));
+  const result = read.value(assign);
   read.end();
   return result;
 }

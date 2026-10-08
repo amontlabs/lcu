@@ -2,7 +2,7 @@
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
-import { applyChanges, change, json, readFile } from './setup.mjs';
+import { applyChanges, change, json, member, parseJson, readFile } from './setup.mjs';
 
 export const HOST_ONLY = ['mcp__lcu__turn_ended', 'mcp__lcu__js_add_node_module_dir', 'mcp__lcu__set_turn_context'];
 // The approval tools the lcu-approve mod calls. They cannot be in `permissions.deny` (a denied MCP tool leaves the
@@ -22,13 +22,9 @@ const LIFECYCLE = {
 };
 
 function installLifecycleHooks(settings) {
-  settings.hooks ??= {};
-  const { hooks } = settings;
-  if (!isObject(hooks)) throw new Error('Claude hooks must be an object');
+  const hooks = member(settings, 'hooks', {}, 'Claude hooks must be an object');
   for (const [event, group] of Object.entries(LIFECYCLE)) {
-    hooks[event] ??= [];
-    const groups = hooks[event];
-    if (!Array.isArray(groups)) throw new Error(`Claude ${event} hooks must be an array of objects`);
+    const groups = member(hooks, event, [], `Claude ${event} hooks must be an array of objects`);
     for (const existing of groups) {
       if (!isObject(existing)) throw new Error(`Claude ${event} hooks must be an array of objects`);
       if ('matcher' in existing && typeof existing.matcher !== 'string') throw new Error(`Claude ${event} hook matcher must be a string`);
@@ -44,16 +40,13 @@ function installLifecycleHooks(settings) {
 export function install(home, { project = null } = {}) {
   const path = project ? join(project, '.claude/settings.local.json') : join(home, '.claude/settings.json');
   const before = readFile(path);
-  const settings = before ? JSON.parse(before) : {};
+  const settings = parseJson(before);
   if (!isObject(settings)) throw new Error(`Claude settings must be an object: ${path}`);
-  settings.permissions ??= {};
-  const { permissions } = settings;
-  if (!isObject(permissions)) throw new Error(`Claude permissions must be an object: ${path}`);
-  permissions.deny ??= [];
-  const { deny } = permissions;
-  if (!Array.isArray(deny) || deny.some((rule) => typeof rule !== 'string')) throw new Error(`Claude deny rules must be a string array: ${path}`);
+  const permissions = member(settings, 'permissions', {}, `Claude permissions must be an object: ${path}`);
+  const deny = member(permissions, 'deny', [], `Claude deny rules must be a string array: ${path}`);
+  if (deny.some((rule) => typeof rule !== 'string')) throw new Error(`Claude deny rules must be a string array: ${path}`);
   for (const rule of HOST_ONLY) if (!deny.includes(rule)) deny.push(rule);
   installLifecycleHooks(settings);
-  if (before === null || !isDeepStrictEqual(JSON.parse(before), settings)) applyChanges([change(path, before, json(settings))]);
+  if (before === null || !isDeepStrictEqual(parseJson(before), settings)) applyChanges([change(path, before, json(settings))]);
   return path;
 }

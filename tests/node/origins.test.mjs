@@ -1,6 +1,6 @@
 // `lcu origins`: list and forget saved Chrome site decisions, against a temporary CODEX_HOME.
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readdirSync, renameSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -173,69 +173,62 @@ test('a bad file does not block the others but fails the run; symbolic links are
   assert.equal(readFileSync(real, 'utf8'), SAMPLE);
 });
 
+/** A temporary-file writer for forgetIn that lets the test act as the original runtime writing meanwhile. */
+const writer = (during) => (target, text) => {
+  const temporary = `${target}.next`;
+  writeFileSync(temporary, text);
+  during?.(target);
+  return temporary;
+};
+const BAD = ['https://bad.example', ['denied']];
+
 test('forget recomputes after a runtime write, reports a write after the replace, and gives up when the file never settles', async (t) => {
   const f = fixture(t);
   const path = f.session('abc');
-  const write0 = origins.files.writeTemporary;
   let raced = false;
-  override(t, origins.files, 'writeTemporary', (target, text, mode) => {
-    const temporary = write0(target, text, mode);
-    if (!raced) {
-      raced = true;
-      writeFileSync(target, '[origins]\nallowed = ["https://new.example"]\ndenied = ["https://bad.example", "https://late.example"]\n');
-    }
-    return temporary;
-  });
-  assert.equal((await f.run('forget', 'https://bad.example')).code, 0);
+  await origins.forgetIn(path, ...BAD, { files: { writeTemporary: writer((target) => {
+    if (!raced) writeFileSync(target, '[origins]\nallowed = ["https://new.example"]\ndenied = ["https://bad.example", "https://late.example"]\n');
+    raced = true;
+  }) } });
   assert.deepEqual(f.state('abc'), { allowed: ['https://new.example'], denied: ['https://late.example'] });
   assert.deepEqual(f.files(), ['abc.toml']);
   f.session('abc');
   let count = 0;
-  override(t, origins.files, 'writeTemporary', (target, text, mode) => {
-    const temporary = write0(target, text, mode);
+  await assert.rejects(origins.forgetIn(path, ...BAD, { files: { writeTemporary: writer((target) => {
     count += 1;
     writeFileSync(target, `[origins]\ndenied = ["https://bad.example", "https://n${count}.example"]\n`);
-    return temporary;
-  });
-  assert.match((await f.run('forget', 'https://bad.example', '--session', 'abc')).err, /kept changing/);
+  }) } }), /kept changing/);
   assert.ok(readFileSync(path, 'utf8').includes('bad.example'));
   assert.deepEqual(f.files(), ['abc.toml']);
-  override(t, origins.files, 'writeTemporary', write0);
   f.session('abc');
-  const replace = origins.files.replace;
-  override(t, origins.files, 'replace', (source, target) => {
-    replace(source, target);
+  await assert.rejects(origins.forgetIn(path, ...BAD, { files: { replace: (source, target) => {
+    renameSync(source, target);
     writeFileSync(target, '[origins]\ndenied = ["https://late.example"]\n');
-  });
-  const late = await f.run('forget', 'https://bad.example', '--session', 'abc');
-  assert.equal(late.code, 1);
-  assert.match(late.err, /original runtime changed/);
+  } } }), /original runtime changed/);
 });
 
-test('file system errors become messages and do not stop the other sessions; a vanished file is reported', async (t) => {
+test('file system errors become messages; a vanished file is reported', async (t) => {
   const f = fixture(t);
-  f.session('one');
-  f.session('two');
-  const write0 = origins.files.writeTemporary;
-  override(t, origins.files, 'writeTemporary', (target, text, mode) => {
-    if (target.endsWith('one.toml')) throw Object.assign(new Error("EACCES: permission denied, open 'x'"), { code: 'EACCES' });
-    return write0(target, text, mode);
-  });
-  const { code, err } = await f.run('forget', 'https://bad.example');
-  assert.equal(code, 1);
-  assert.ok(err.includes('cannot update') && err.includes('permission denied'));
-  assert.deepEqual([f.state('two').denied, f.state('one').denied], [['http://localhost:3000'], ['https://bad.example', 'http://localhost:3000']]);
-  const read0 = origins.files.read;
-  override(t, origins.files, 'writeTemporary', write0);
-  f.session('two');
-  override(t, origins.files, 'read', (path) => {
-    const data = read0(path);
-    unlinkSync(path);
+  const path = f.session('one');
+  await assert.rejects(origins.forgetIn(path, ...BAD, { files: { writeTemporary: () => {
+    throw Object.assign(new Error("EACCES: permission denied, open 'x'"), { code: 'EACCES' });
+  } } }), (error) => error instanceof origins.OriginsError && /cannot update .*permission denied/.test(error.message));
+  assert.deepEqual(f.state('one').denied, ['https://bad.example', 'http://localhost:3000']);
+  await assert.rejects(origins.forgetIn(path, ...BAD, { files: { read: (target) => {
+    const data = readFileSync(target);
+    unlinkSync(target);
     return data;
-  });
-  const vanished = await f.run('forget', 'https://bad.example', '--session', 'two');
-  assert.equal(vanished.code, 1);
-  assert.match(vanished.err, /cannot update/);
+  } } }), /cannot update/);
+});
+
+test('a float in a session file is not rewritten as an integer; CODEX_HOME is normalized', async (t) => {
+  const f = fixture(t);
+  const text = 'ratio = 1.0\n[origins]\ndenied = ["https://bad.example"]\n';
+  const path = f.session('abc', text);
+  assert.equal((await f.run('forget', 'https://bad.example')).code, 1);
+  assert.equal(readFileSync(path, 'utf8'), text);
+  assert.equal(origins.codexHome({ CODEX_HOME: '/c/x/' }, { windows: false }), '/c/x');
+  assert.equal(origins.codexHome({ CODEX_HOME: '/' }, { windows: false }), '/');
 });
 
 test('concurrent forgets are serialized; a lock that stays held is reported', async (t) => {
@@ -256,7 +249,7 @@ test('concurrent forgets are serialized; a lock that stays held is reported', as
   await second;
   await origins.forgetIn(path, 'https://a.example', ['allowed']);
   assert.deepEqual(f.state('abc').allowed, []);
-  assert.equal(existsSync(join(f.sessions, origins.LOCK_NAME)), false);
+  assert.equal(existsSync(join(f.sessions, origins.LOCK_NAME)), true, 'the lock file stays, as earlier releases left it');
 });
 
 test('session ids, missing sessions and invalid origins are refused before any change', async (t) => {
