@@ -50,8 +50,11 @@ node=$node_dir/node
 # verifies the app bundle and its helper).
 # (A function, so `set --` leaves the installer's arguments alone.)
 trusted() {
+  # Split the listing into fields without globbing a name in it.
+  set -f
   # shellcheck disable=SC2046
   set -- $(ls -ldn -- "$1")
+  set +f
   case $3 in
     0|"$uid") ;;
     *)
