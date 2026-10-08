@@ -7,7 +7,7 @@ import {
   rmSync, writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -107,10 +107,21 @@ function atomicWrite(path, data) {
   }
 }
 
+/**
+ * `<prefix>\lcu.cmd`. cmd.exe reads a running batch file by byte offset, so when an update rewrites the lcu.cmd
+ * that started it (LCU 0.9.7's `lcu update`), cmd resumes in the new file at the old file's offset. The first line
+ * jumps over a line of colons at least as long as the old file: resuming anywhere in it reads a label, which does
+ * nothing, and the next line exits with the status of the command that was running.
+ */
+export function launcherCommand(node, previousLength = 0) {
+  return `@echo off & goto run\r\n${':'.repeat(Math.max(previousLength, 512))}\r\nexit /b %ERRORLEVEL%\r\n` +
+    `:run\r\n"${node}" "%~dp0windows_launcher.mjs" %*\r\nexit /b %ERRORLEVEL%\r\n`;
+}
+
 /** A dedicated absolute directory with no linked component, outside the archive, empty or already LCU's. */
 export function checkedPrefix(path) {
   if (typeof path !== 'string' || !isAbsolute(path) || path.split(/[\\/]/).includes('..') ||
-      resolve(path).split(/[\\/]/).filter(Boolean).length < 2) {
+      1 + relative(parse(resolve(path)).root, resolve(path)).split(/[\\/]/).filter(Boolean).length < 3) {
     throw new Error('Choose a dedicated absolute Windows installation directory.');
   }
   for (let item = resolve(path); ; item = dirname(item)) {
@@ -233,7 +244,7 @@ async function publish(prefix, arch, selected, inventory, digest) {
     for (const path of [stable, command]) previous.set(path, existsSync(path) ? readFileSync(path) : null);
     deps.write(stable, readFileSync(join(release, 'scripts/windows_launcher.mjs')));
     replaced.push(stable);
-    deps.write(command, Buffer.from(`@echo off\r\n"${node}" "%~dp0windows_launcher.mjs" %*\r\nexit /b %ERRORLEVEL%\r\n`));
+    deps.write(command, Buffer.from(launcherCommand(node, previous.get(command)?.length ?? 0)));
     replaced.push(command);
     pointer = join(prefix, `.current-${newId(32)}.json`);
     writeFileSync(pointer, `${JSON.stringify({ release: release.split(/[\\/]/).at(-1) })}\n`);

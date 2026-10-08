@@ -68,11 +68,11 @@ PLATFORM_MODULES = {
     'windows_lifetime_host.cjs': 'windows', 'windows_sky_service.mjs': 'windows',
 }
 POSIX_MODULES = {'session.mjs'}
-# The installers. install.py, install_macos.py and install_windows.py are logic-free stubs that LCU 0.9.7's
-# `lcu update` runs with its own Python; they hand over to the Node installer.
+# The installers. install.py (Linux), install_macos.py and install_windows.py are logic-free stubs that LCU
+# 0.9.7's `lcu update` runs with its own Python on that platform; they hand over to the Node installer.
 SHIPPED_SCRIPTS = {
     'linux': ('install.sh', 'install.mjs', 'install-usage.txt', 'bundle.mjs', 'install.py'),
-    'darwin': ('install.sh', 'install.mjs', 'install-usage.txt', 'bundle.mjs', 'install.py', 'install_macos.py'),
+    'darwin': ('install.sh', 'install.mjs', 'install-usage.txt', 'bundle.mjs', 'install_macos.py'),
     'windows': ('install.ps1', 'install_windows.mjs', 'bundle.mjs', 'windows_launcher.mjs', 'install_windows.py'),
 }
 
@@ -134,7 +134,7 @@ def build(output, package=None, *, target='linux', app=None):
         shutil.copytree(SOURCE / 'bin', release / 'bin', ignore=shutil.ignore_patterns(*ignored))
         (release / 'lcu').mkdir()
         for path in sorted((SOURCE / 'lcu').iterdir()):
-            if path.is_file() and path.suffix in ('.mjs', '.cjs', '.txt', '.py') and \
+            if path.is_file() and path.suffix in ('.mjs', '.cjs', '.txt') and \
                     PLATFORM_MODULES.get(path.name, target) == target and \
                     not (target == 'windows' and path.name in POSIX_MODULES):
                 shutil.copy2(path, release / 'lcu' / path.name)
@@ -164,9 +164,10 @@ def build(output, package=None, *, target='linux', app=None):
                          mac_node=selected_node, adapters_source=SOURCE / 'adapters')
         # Every shipped module must at least parse; the Node that checks it is the build host's own.
         node = shutil.which('node')
-        if node:
-            for module in sorted([*release.glob('lcu/*.mjs'), *release.glob('scripts/*.mjs')]):
-                subprocess.run([node, '--check', str(module)], check=True, timeout=20)
+        if node is None:
+            raise ValueError('The build needs node on PATH to check the shipped modules.')
+        for module in sorted([*release.glob('lcu/*.mjs'), *release.glob('scripts/*.mjs')]):
+            subprocess.run([node, '--check', str(module)], check=True, timeout=20)
         seal(release, arch, target)
         verify(release, arch, target)
         fd, temporary_archive = tempfile.mkstemp(prefix='.lcu-', suffix=destination.suffix, dir=output)

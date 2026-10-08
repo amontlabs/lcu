@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 import { acquire } from '../../lcu/lock.mjs';
 import { WINDOWS_REQUIRED_FILES, applicationInventory, canonicalJson, inventorySha256 } from '../../lcu/windows.mjs';
-import { checkedPrefix, deps, generationInUse, install, main, preflightHost } from '../../scripts/install_windows.mjs';
+import { checkedPrefix, deps, generationInUse, install, launcherCommand, main, preflightHost } from '../../scripts/install_windows.mjs';
 import { override, temporary, write } from './fixtures.mjs';
 
 const NODE_MEMBER = 'app/resources/cua_node/bin/node.exe';
@@ -66,7 +66,8 @@ test('an install copies the app once, records its inventory, Node and launcher, 
   const node = join(generation, 'app', NODE_MEMBER);
   assert.equal(readFileSync(join(release, 'node-path'), 'utf8').trim(), node);
   const command = readFileSync(join(f.prefix, 'lcu.cmd'), 'utf8');
-  assert.equal(command, `@echo off\r\n"${node}" "%~dp0windows_launcher.mjs" %*\r\nexit /b %ERRORLEVEL%\r\n`);
+  assert.equal(command, launcherCommand(node));
+  assert.ok(command.includes(`:run\r\n"${node}" "%~dp0windows_launcher.mjs" %*\r\nexit /b %ERRORLEVEL%\r\n`));
   assert.equal(readFileSync(join(f.prefix, 'windows_launcher.mjs'), 'utf8'), 'launcher');
   assert.equal(current(f.prefix).release, release.split('/').at(-1));
   // A second install reuses the generation.
@@ -190,6 +191,7 @@ test('the prefix must be dedicated and free of links', (t) => {
   symlinkSync(join(f.base, 'other'), join(f.base, 'junction'));
   assert.throws(() => checkedPrefix(join(f.base, 'junction/lcu')), /linked Windows installation path/);
   assert.throws(() => checkedPrefix('relative'), /dedicated absolute/);
+  assert.throws(() => checkedPrefix('/lcu'), /dedicated absolute/);
   assert.throws(() => checkedPrefix(f.base), /outside the extracted release archive/);
   write(join(f.base, 'busy/file'), 'x');
   assert.throws(() => checkedPrefix(join(f.base, 'busy')), /occupied/);
@@ -204,4 +206,24 @@ test('agent setup gets the shared options from the new release', async (t) => {
   assert.deepEqual(seen[1], ['--prefix', f.prefix, '--session', 'direct', '--scope', 'user', '--agent', 'codex', '--audio', '--yes']);
   await assert.rejects(main(['--prefix', f.prefix, '--runtime-only', '--agent', 'codex']), /--runtime-only cannot include/);
   await assert.rejects(main(['--prefix', f.prefix]), /Choose --agent NAME or --runtime-only/);
+});
+
+test('a rewritten lcu.cmd is harmless wherever cmd.exe resumes the old one (0.9.7 updating itself)', () => {
+  // LCU 0.9.7's launcher, with a long Python path; cmd.exe resumes after its second line.
+  const old = '@echo off\r\n"C:\\Users\\someone\\AppData\\Local\\Programs\\Python\\Python313\\python.exe" -B ' +
+    '"%~dp0windows_launcher.py" %*\r\nexit /b %ERRORLEVEL%\r\n';
+  const node = 'C:\\Users\\someone\\AppData\\Local\\LCU\\apps\\digest\\app\\app\\resources\\cua_node\\bin\\node.exe';
+  const text = launcherCommand(node, Buffer.byteLength(old));
+  const lines = text.split('\r\n');
+  assert.equal(lines[0], '@echo off & goto run');
+  assert.match(lines[1], /^:+$/);
+  assert.ok(lines[1].length >= Buffer.byteLength(old));
+  assert.deepEqual(lines.slice(2), ['exit /b %ERRORLEVEL%', ':run', `"${node}" "%~dp0windows_launcher.mjs" %*`, 'exit /b %ERRORLEVEL%', '']);
+  // Wherever the old file stops after its running second line, cmd lands in the label line, then exits.
+  for (let offset = old.indexOf('\r\n', 11) + 2; offset <= old.length; offset += 1) {
+    const rest = text.slice(offset).split('\r\n');
+    assert.match(rest[0], /^:*$/, `offset ${offset}`);
+    assert.equal(rest[1], 'exit /b %ERRORLEVEL%');
+  }
+  assert.ok(launcherCommand(node).split('\r\n')[1].length >= 512);
 });

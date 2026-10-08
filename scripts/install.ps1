@@ -49,9 +49,12 @@ if (-not $usable) {
   $node = Join-Path $scratch 'node.exe'
 }
 try {
+  # Windows PowerShell 5.1 turns a native command's stderr into errors; with 'Stop' the first one would abort.
+  $ErrorActionPreference = 'Continue'
   & $node $installer @args
   $status = $LASTEXITCODE
 } finally {
+  $ErrorActionPreference = 'Stop'
   if ($scratch) { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }
 exit $status

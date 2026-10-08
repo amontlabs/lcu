@@ -43,9 +43,11 @@ export const deps = {
   module: (root, name) => import(pathToFileURL(join(root, 'lcu', `${name}.mjs`)).href),
   spawn: (command, args, options) => spawnSync(command, args, options),
   validateRelease: (release, account) => validateRelease(release, account),
+  resolveMacApp: (app, options) => resolveInstalledMacApp(app, options),
 };
 
 const isDirectory = (path) => { try { return statSync(path).isDirectory(); } catch { return false; } };
+const isRegular = (path) => { try { return lstatSync(path).isFile(); } catch { return false; } };
 const isLink = (path) => { try { return lstatSync(path).isSymbolicLink(); } catch { return false; } };
 const inside = (path, root) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 const real = (path) => { try { return realpathSync(path); } catch { return resolve(path); } };
@@ -86,7 +88,9 @@ export function checkedPrefix(path, source = deps.source) {
   if (prefix.split(sep).filter(Boolean).length < 2 || prefix === '/usr/local') {
     throw new Error('Choose a dedicated absolute prefix, such as /opt/lcu.');
   }
-  if (isDirectory(prefix) && readdirSync(prefix).length && !existsSync(join(prefix, '.lcu-install'))) {
+  const marker = join(prefix, '.lcu-install');
+  if (existsSync(marker) && !isRegular(marker)) throw new Error(`Refusing a non-regular file at ${marker}`);
+  if (isDirectory(prefix) && readdirSync(prefix).length && !isRegular(marker)) {
     throw new Error('Installation prefix is not an existing LCU installation or an empty directory.');
   }
   for (const name of ['.lcu-install', 'releases']) {
@@ -172,7 +176,7 @@ export function installMac(prefixPath, appPath, { owner } = {}) {
   if (!policy.architectures?.[arch]) throw new Error(`This LCU release does not support macOS ${arch}`);
   const location = expandHome(appPath);
   if (!isDirectory(location)) throw new Error(appPrerequisiteMessage(location));
-  const selected = resolveInstalledMacApp(location, { arch });
+  const selected = deps.resolveMacApp(location, { arch });
   // Validated before creating the prefix or changing the selected release.
   mkdirSync(prefix, { recursive: true });
   touch(join(prefix, '.lcu-install'));

@@ -81,8 +81,6 @@ python3 -m unittest discover -b -s tests -p 'test_*.py'
 npm test --prefix adapters
 ~~~
 
-`lcu update` can be exercised offline. **Test only:** `LCU_UPDATE_SOURCE` set to a local directory (or `file://` URL) replaces GitHub: `latest` holds the latest tag, `<tag>/<archive>` and `<tag>/<archive>.sha256` the release files, and an optional `<tag>/notes.md` the release notes. Releases never set it.
-
 LCU 0.9.7's `lcu update` runs the new archive's `scripts/install.py` (`install_macos.py`, `install_windows.py` on Windows) with its own Python. Those three files stay in the archive as stubs without logic that hand over to `install.sh` (or `install.ps1`) with the same arguments.
 
 `-b` buffers setup output from passing tests and shows it only for failures. Narrow `-p` to one file, such as `test_runtime.py`, while iterating.

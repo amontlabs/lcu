@@ -2,7 +2,7 @@
 // `lcu update --notice --hook ...` runs on agent prompts: it reads only the cache and never waits on the network.
 const { mkdirSync, readFileSync, readSync, renameSync, statSync, utimesSync, writeFileSync, closeSync, openSync } = process.getBuiltinModule('node:fs');
 const { homedir } = process.getBuiltinModule('node:os');
-const { dirname, join, resolve } = process.getBuiltinModule('node:path');
+const { dirname, join } = process.getBuiltinModule('node:path');
 const { parseArgs } = process.getBuiltinModule('node:util');
 
 export const REPO = 'amontlabs/lcu';
@@ -19,17 +19,6 @@ export const ANNOUNCE_ACCOUNT = '*';
 export const TIMEOUT = 5;
 const SEVERITIES = ['security', 'breaking'];
 
-/**
- * TEST ONLY: `LCU_UPDATE_SOURCE` names a local directory (or file:// URL) that stands in for GitHub: `latest`
- * holds the latest tag, `<tag>/<archive>` and `<tag>/<archive>.sha256` the release files and `<tag>/notes.md`
- * its release notes. It exists so update can be exercised offline; releases never set it.
- */
-export function testSource(env = process.env) {
-  const value = env.LCU_UPDATE_SOURCE;
-  if (!value) return null;
-  return value.startsWith('file:') ? process.getBuiltinModule('node:url').fileURLToPath(value) : resolve(value);
-}
-
 /** What tests replace. */
 export const deps = {
   now: () => Date.now() / 1000,
@@ -40,6 +29,10 @@ export const deps = {
     child.unref();
   },
   fetchLatest: () => fetchLatest(),
+  fetch: (url, init) => fetch(url, init),
+  /** Run curl with `args`: `{status, stdout, stderr, error}`; the output is small (headers, notes, checksums). */
+  curl: (args, timeout) => process.getBuiltinModule('node:child_process').spawnSync('curl', args,
+    { stdio: ['ignore', 'pipe', 'pipe'], timeout: (timeout + 5) * 1000, maxBuffer: 4 << 20 }),
   apply: async (root, info, options) => (await import('./update_apply.mjs')).apply(root, info, options),
   module: (name) => import(`./${name}.mjs`),
   readStdin() {
@@ -141,44 +134,73 @@ function trustSystemCertificates() {
   }
 }
 
-/** curl uses the system trust store and proxy settings; it is the fallback when Node's own request fails. */
-function curl(args, timeout = TIMEOUT) {
-  const result = process.getBuiltinModule('node:child_process').spawnSync('curl',
-    ['-fsS', '--proto', '=https', '--max-time', String(timeout), ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: (timeout + 5) * 1000 });
-  if (result.error) throw new Error(`HTTPS request failed and curl is unavailable (${result.error.message}).`);
-  if (result.status !== 0) throw new Error(`${result.stderr}`.trim() || `curl exited ${result.status}`);
-  return result.stdout;
+/** True when `url` goes through an HTTPS proxy from the environment, which Node's fetch does not use. */
+export function proxied(url, env = process.env) {
+  if (!(env.HTTPS_PROXY || env.https_proxy)) return false;
+  const host = new URL(url).hostname.toLowerCase();
+  const bypass = `${env.NO_PROXY ?? env.no_proxy ?? ''}`.split(',').map((entry) => entry.trim().toLowerCase().replace(/^\*?\./, ''))
+    .filter(Boolean);
+  return !bypass.some((entry) => entry === '*' || host === entry || host.endsWith(`.${entry}`));
 }
 
-/** GET (or HEAD without following redirects) `url`; network failures fall back to curl. */
-export async function request(url, { head = false, limit = 1 << 16, timeout = TIMEOUT } = {}) {
+/**
+ * Run the system curl over HTTPS only; it uses the system trust store and proxy settings. Returns its output.
+ * A download writes to a file (`-o`), never to this process's memory.
+ */
+export function curl(args, timeout = TIMEOUT) {
+  const result = deps.curl(['-fsS', '--proto', '=https', '--tlsv1.2', '--max-time', String(timeout), ...args], timeout);
+  if (result.error && result.status == null) throw new Error(`curl could not run (${result.error.code ?? result.error.message}).`);
+  if (result.status !== 0) throw new Error(`${result.stderr ?? ''}`.trim() || `curl exited ${result.status}`);
+  return Buffer.from(result.stdout ?? '');
+}
+
+const DEVNULL = process.platform === 'win32' ? 'NUL' : '/dev/null';
+
+/** fetch `url`, or null when the request itself failed (no HTTP answer), so curl can try. */
+async function attempt(url, init, timeout) {
   trustSystemCertificates();
-  let response;
   try {
-    response = await fetch(url, { method: head ? 'HEAD' : 'GET', redirect: head ? 'manual' : 'follow',
-      headers: { 'User-Agent': 'lcu-update' }, signal: AbortSignal.timeout(timeout * 1000) });
+    return await deps.fetch(url, { ...init, headers: { 'User-Agent': 'lcu-update' }, signal: AbortSignal.timeout(timeout * 1000) });
   } catch (error) {
     if (error.name === 'TimeoutError') throw new Error(`Timed out fetching ${url}`);
-    if (head) return { location: curl(['-I', '-o', process.platform === 'win32' ? 'NUL' : '/dev/null', '-w', '%{redirect_url}', url]).toString().trim() };
-    return { body: curl(['-L', url], timeout).subarray(0, limit) };
+    return null;
   }
-  if (head) return { status: response.status, location: response.headers.get('location') };
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-  return { body: Buffer.from(await response.arrayBuffer()).subarray(0, limit) };
 }
+
+/** The body of `url` (redirects followed), at most `limit` bytes. */
+export async function getText(url, { limit = 1 << 16, timeout = TIMEOUT } = {}) {
+  const response = proxied(url) ? null : await attempt(url, {}, timeout);
+  if (!response) return curl(['-L', url], timeout).subarray(0, limit).toString('utf8');
+  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  return Buffer.from(await response.arrayBuffer()).subarray(0, limit).toString('utf8');
+}
+
+/** Download `url` into `file`; returns the file's SHA-256. */
+export async function downloadTo(url, file, { timeout = 30 * 60 } = {}) {
+  const { createReadStream, createWriteStream } = process.getBuiltinModule('node:fs');
+  const { pipeline } = process.getBuiltinModule('node:stream/promises');
+  const { Readable } = process.getBuiltinModule('node:stream');
+  const response = proxied(url) ? null : await attempt(url, {}, timeout);
+  if (response) {
+    if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+    await pipeline(Readable.fromWeb(response.body), createWriteStream(file));
+  } else {
+    curl(['-L', '-o', file, url], timeout);
+  }
+  const digest = process.getBuiltinModule('node:crypto').createHash('sha256');
+  await pipeline(createReadStream(file), digest);
+  return digest.digest('hex');
+}
+
+const REDIRECTS = [301, 302, 303, 307, 308];
 
 /** The latest release tag, from the redirect of /releases/latest (no API, no rate limit). */
 export async function latestTag() {
-  const source = testSource();
   let location;
-  if (source) location = `/releases/tag/${readFileSync(join(source, 'latest'), 'utf8').trim()}`;
-  else {
-    const response = await request(LATEST_URL, { head: true });
-    if (response.status !== undefined && ![301, 302, 303, 307, 308].includes(response.status) && !response.location) {
-      throw new Error(`HTTP ${response.status} for ${LATEST_URL}`);
-    }
-    location = response.location;
-  }
+  const response = proxied(LATEST_URL) ? null : await attempt(LATEST_URL, { method: 'HEAD', redirect: 'manual' }, TIMEOUT);
+  if (!response) location = curl(['-I', '-o', DEVNULL, '-w', '%{redirect_url}', LATEST_URL]).toString('utf8').trim();
+  else if (REDIRECTS.includes(response.status)) location = response.headers.get('location');
+  else if (!response.ok) throw new Error(`HTTP ${response.status} for ${LATEST_URL}`);
   const match = /\/releases\/tag\/([^/?#]+)$/.exec(location ?? '');
   if (!match) throw new Error('Unexpected response while looking for the latest LCU release.');
   return match[1];
@@ -188,9 +210,7 @@ export async function latestTag() {
 export async function severityOf(tag, version) {
   let text;
   try {
-    const source = testSource();
-    text = source ? readFileSync(join(source, tag, 'notes.md'), 'utf8').slice(0, 262144)
-      : (await request(notesUrl(tag, version), { limit: 262144 })).body.toString('utf8');
+    text = await getText(notesUrl(tag, version), { limit: 262144 });
   } catch {
     return 'normal';
   }
