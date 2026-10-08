@@ -34,8 +34,16 @@ npm_cache=${LCU_BB_NPM_CACHE:-${TMPDIR:-/tmp}/lcu-bb-npm}
 LCU_BB_NPM_CACHE="$npm_cache" python3 "$repo/tests/blackbox/npmcache.py" "$oracle" >/dev/null
 LCU_BB_NPM_CACHE="$npm_cache" python3 "$repo/tests/blackbox/npmcache.py" "$repo" >/dev/null
 mkdir -p "$repo/tests/blackbox/golden" "$repo/.port/coverage-data"
+# LCU_BB_A_CACHE: a host directory of cached oracle snapshots (run.py --a-cache), world-writable because the container
+# user is not the host user. CI keys it on the oracle, harness and image hashes.
+cache_args=()
+if [[ -n ${LCU_BB_A_CACHE:-} ]]; then
+  mkdir -p "$LCU_BB_A_CACHE" && chmod 0777 "$LCU_BB_A_CACHE"
+  cache_args=(-v "$(cd -- "$LCU_BB_A_CACHE" && pwd):/acache")
+  set -- --a-cache /acache "$@"
+fi
 exec docker run --rm --network none --platform "$platform" --user "$user" \
   -v "$repo:/src:ro" -v "$oracle:/oracle:ro" -v "$repo/tests/blackbox/golden:/src/tests/blackbox/golden" \
-  -v "$repo/.port:/src/.port" -v "$npm_cache:/npmcache:ro" -e LCU_BB_NPM_CACHE=/npmcache \
+  -v "$repo/.port:/src/.port" -v "$npm_cache:/npmcache:ro" -e LCU_BB_NPM_CACHE=/npmcache "${cache_args[@]}" \
   -e LCU_BB_DISPOSABLE=1 -e PYTHONDONTWRITEBYTECODE=1 -e HOME="$([[ $user == 0:0 ]] && echo /root || echo /home/ubuntu)" \
   "$tag" "$python" /src/tests/blackbox/run.py --a /oracle --b /src "$@"

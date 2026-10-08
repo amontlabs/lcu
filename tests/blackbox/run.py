@@ -134,10 +134,16 @@ def main(argv=None):
                         help='reviewed JSON allowlist of expected A/B differences (see deviations.py); matching '
                              'scenarios are reported as EXPECTED with their justification, never as PASS')
     parser.add_argument('--runs', type=int, default=1, help='repeat B this many times (determinism check); default 1')
+    parser.add_argument('--shard', metavar='K/N',
+                        help='run only the K-th of N round-robin slices of the selected scenarios (1-based; CI)')
+    parser.add_argument('--a-cache', type=Path, metavar='DIR',
+                        help="reuse A's snapshot from DIR/<scenario>.txt when present, else run A and store it there. "
+                             'Only valid while A, the harness and the image are unchanged (CI keys it on their hashes)')
     parser.add_argument('--dump-diffs', type=Path, metavar='DIR',
                         help="write A's and the first differing B snapshot of every DIFF scenario to DIR/<scenario>/{A,B}.txt "
                              '(input of suggest_deviations.py)')
     args = parser.parse_args(argv)
+    sys.stdout.reconfigure(line_buffering=True)
 
     if args.node:
         resolved = shutil.which(os.path.expanduser(args.node))
@@ -146,6 +152,14 @@ def main(argv=None):
         os.environ['LCU_BB_NODE'] = resolved
     registry = load()
     chosen = selected(registry, args.k, args.exclude)
+    if args.shard:
+        try:
+            index, count = (int(part) for part in args.shard.split('/'))
+            if not 1 <= index <= count:
+                raise ValueError
+        except ValueError:
+            parser.error(f'--shard {args.shard}: expected K/N with 1 <= K <= N')
+        chosen = chosen[index - 1::count]
     if args.list:
         for entry in chosen:
             state = 'runs here' if host() in entry.hosts else 'skipped on ' + host()
@@ -180,7 +194,16 @@ def main(argv=None):
             skipped += 1
             print(f'SKIP {entry.name} ({"needs root: docker.sh --root" if entry.needs_root else "not a root scenario"})')
             continue
-        left = execute(entry, root_a, args.keep)
+        cached = args.a_cache / (entry.name.replace('/', '__') + '.txt') if args.a_cache else None
+        if cached and cached.is_file():
+            with open(cached, encoding='utf-8', errors='surrogateescape', newline='') as handle:
+                left = handle.read()
+        else:
+            left = execute(entry, root_a, args.keep)
+            if cached and not left.startswith('HARNESS ERROR'):
+                cached.parent.mkdir(parents=True, exist_ok=True)
+                with open(cached, 'w', encoding='utf-8', errors='surrogateescape', newline='') as handle:
+                    handle.write(left)
         if args.golden:
             target = HERE / 'golden' / host() / (entry.name.replace('/', '__') + '.txt')
             target.parent.mkdir(parents=True, exist_ok=True)

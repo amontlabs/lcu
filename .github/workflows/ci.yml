@@ -80,11 +80,21 @@ jobs:
         run: LCU_TEST_PYTHON="$(command -v python)" LCU_TEST_NODES="$(command -v node)" tests/node/run-all.sh
 
   blackbox:
-    # The Python 0.9.4 oracle against this tree in the disposable Linux image, network off
+    # The Python oracle (tests/blackbox/BASE) against this tree in the disposable Linux image, network off
     # (tests/blackbox/README.md). Accepted differences are the reviewed list in tests/blackbox/deviations.json.
-    name: Black-box differential (linux/amd64)
+    # Four round-robin shards (run.py --shard). The oracle side is frozen (tests/blackbox/BASE), so its snapshots are
+    # cached, keyed on the harness files and the image ID; the image is cached on its Dockerfiles. Pull requests run
+    # B once; pushes to main keep the two-run determinism check.
+    name: Black-box differential (linux/amd64, ${{ matrix.shard }}/4)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      RUNS: ${{ github.event_name == 'pull_request' && 1 || 2 }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -92,8 +102,29 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-      - run: tests/blackbox/docker.sh --runs 2 --deviations /src/tests/blackbox/deviations.json
-      - run: tests/blackbox/docker.sh --root --runs 2 --deviations /src/tests/blackbox/deviations.json
+      - id: image
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/bb-image.tar.zst
+          key: bb-image-amd64-${{ hashFiles('tests/Dockerfile', 'tests/blackbox/Dockerfile') }}
+      - if: steps.image.outputs.cache-hit == 'true'
+        run: zstd -dc "$RUNNER_TEMP/bb-image.tar.zst" | docker load
+      # Builds lcu-verification and lcu-blackbox when they are missing; --list runs nothing.
+      - run: tests/blackbox/docker.sh --list > /dev/null
+      - if: steps.image.outputs.cache-hit != 'true'
+        run: docker save lcu-verification:amd64 lcu-blackbox:amd64 | zstd -T0 -3 -o "$RUNNER_TEMP/bb-image.tar.zst"
+      - id: oracle-key
+        run: echo "id=$(docker image inspect --format '{{ .Id }}' lcu-blackbox:amd64 | cut -c8-23)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/bb-oracle
+          key: bb-oracle-amd64-${{ steps.oracle-key.outputs.id }}-${{ hashFiles('tests/blackbox/**', '!tests/blackbox/**/__pycache__/**') }}-${{ matrix.shard }}
+      - run: tests/blackbox/docker.sh --shard ${{ matrix.shard }}/4 --runs "$RUNS" --deviations /src/tests/blackbox/deviations.json
+        env:
+          LCU_BB_A_CACHE: ${{ runner.temp }}/bb-oracle
+      - run: tests/blackbox/docker.sh --root --shard ${{ matrix.shard }}/4 --runs "$RUNS" --deviations /src/tests/blackbox/deviations.json
+        env:
+          LCU_BB_A_CACHE: ${{ runner.temp }}/bb-oracle
 
   windows:
     # Modules and tests for POSIX-only targets (Linux/macOS installers and

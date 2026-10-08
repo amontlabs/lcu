@@ -29,6 +29,9 @@ tests/blackbox/docker.sh --root [args]           # root container: runs only `ne
 python3 tests/blackbox/npmcache.py [ROOT]        # populate the archive node_modules cache (needs npm + network once)
 python3 tests/blackbox/run.py --a /path/a --b /path/b   # any two implementation roots (a source tree or an extracted archive)
 python3 tests/blackbox/run.py --runs 3           # run B three times per scenario; any run-to-run difference is a DIFF
+python3 tests/blackbox/run.py --shard 2/4       # the 2nd of 4 round-robin slices of the selected scenarios (CI)
+python3 tests/blackbox/run.py --a-cache DIR      # reuse A's snapshots from DIR (written on a miss); valid only while
+                                                 # BASE, the harness and the image are unchanged (CI keys it on them)
 python3 tests/blackbox/run.py --keep             # leave the last sandboxes in /tmp/lcu-bb for inspection
 python3 tests/blackbox/run.py --golden           # write A's snapshots to tests/blackbox/golden/<platform>/ for review
 python3 tests/blackbox/oracle.py                 # materialise (and print) the cached oracle tree
