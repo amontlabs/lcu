@@ -9,15 +9,13 @@ import subprocess
 import tempfile
 import sys
 
+from lcu_node import call
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 TEMP_PARENT = "/private/tmp" if sys.platform == "darwin" else "/tmp" if os.name == "posix" else None
 
 
 def main() -> None:
-    from lcu.harness_setup import configure_hermes
-
     hermes = os.environ.get("HERMES_BIN") or shutil.which("hermes")
     if not hermes:
         raise SystemExit("Set HERMES_BIN or add an installed Hermes CLI to PATH.")
@@ -36,8 +34,8 @@ def main() -> None:
             "HOME": str(home),
             "HERMES_HOME": str(hermes_home),
         }
-        configure_hermes(home, [str(node), str(ROOT / "adapters/test/mcp-fixture.mjs")],
-                         node, ROOT, scope="user", project=None, env=env)
+        call("harness_setup", "configureHermes", home, [str(node), str(ROOT / "adapters/test/mcp-fixture.mjs")],
+             node, ROOT, {"scope": "user", "env": env})
         command = [hermes, "plugins", "doctor", "lcu-cua", "--ci"]
         result = subprocess.run(command, cwd=home, env=env, text=True, capture_output=True, timeout=90)
         output = result.stdout + result.stderr

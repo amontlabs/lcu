@@ -47,32 +47,36 @@ class BuildPlatformTests(unittest.TestCase):
                 (release / 'adapters/diagnostics.mjs').write_text('fixture')
                 (release / 'adapters/pi/index.ts').write_text('fixture')
             with mock.patch.object(build_bundle, 'architecture', return_value='arm64'), \
-                    mock.patch('lcu.platforms.resolve_installed_mac_app',
-                               return_value=SimpleNamespace(runtime=node.parent.parent)) as resolve, \
+                    mock.patch.object(build_bundle, 'resolve_mac_app', return_value=node.parent.parent) as resolve, \
                     mock.patch.object(build_bundle, 'build_owner_auth',
                                       side_effect=lambda dest: Path(dest).write_text('fixture')) as owner_auth, \
                     mock.patch.object(build_bundle, 'provision_agents', side_effect=fake_provision):
                 archive = build_bundle.build(root / 'dist', target='darwin', app=app)
             owner_auth.assert_called_once()
-            resolve.assert_called_once_with(app, arch='arm64')
+            resolve.assert_called_once_with(app, 'arm64')
             self.assertEqual(archive.name, f'lcu-{VERSION}-darwin-arm64.tar.gz')
             with tarfile.open(archive) as bundle:
                 names = {member.name for member in bundle}
                 prefix = f'lcu-{VERSION}-darwin-arm64/'
                 self.assertIn(prefix + 'scripts/install_macos.py', names)
-                self.assertIn(prefix + 'lcu/platforms.py', names)
-                self.assertIn(prefix + 'lcu/macos_host.py', names)
+                self.assertIn(prefix + 'scripts/install.mjs', names)
+                self.assertNotIn(prefix + 'scripts/install.py', names)
+                self.assertNotIn(prefix + 'scripts/install_windows.mjs', names)
+                self.assertFalse(any(name.startswith(prefix + 'lcu/') and name.endswith('.py') for name in names))
+                self.assertIn(prefix + 'lcu/platforms.mjs', names)
+                self.assertIn(prefix + 'lcu/macos_host.mjs', names)
                 self.assertIn(prefix + 'lcu/macos_sky_service.mjs', names)
                 self.assertNotIn(prefix + 'lcu/linux_sky_service.mjs', names)
+                self.assertNotIn(prefix + 'lcu/x11.mjs', names)
                 self.assertNotIn(prefix + 'bin/lcu-codex-sandbox', names)
-                self.assertIn(prefix + 'lcu/sandbox_shim.py', names)
-                self.assertIn(prefix + 'lcu/interpreter.py', names)
-                self.assertIn(prefix + 'lcu/apps.py', names)
+                self.assertIn(prefix + 'lcu/sandbox_shim.mjs', names)
+                self.assertIn(prefix + 'lcu/update.mjs', names)
                 self.assertIn(prefix + 'bin/lcu-owner-auth', names)
-                self.assertIn(prefix + 'lcu/claude_mod.py', names)
-                self.assertIn(prefix + 'lcu/doctor.py', names)
-                self.assertIn(prefix + 'lcu/app_layout.py', names)
-                self.assertIn(prefix + 'lcu/asar.py', names)
+                self.assertIn(prefix + 'lcu/app_layout.mjs', names)
+                self.assertIn(prefix + 'lcu/asar.mjs', names)
+                # runtime.mjs imports windows.mjs on every platform; the Windows host modules stay out.
+                self.assertEqual({name for name in names if name.startswith(prefix + 'lcu/windows')}, {prefix + 'lcu/windows.mjs'})
+                self.assertNotIn(prefix + 'bin/lcu.cmd', names)
                 self.assertIn(prefix + 'adapters/client.mjs', names)
                 self.assertIn(prefix + 'adapters/claude.mjs', names)
                 self.assertIn(prefix + 'adapters/audio-files.mjs', names)
@@ -86,7 +90,7 @@ class BuildPlatformTests(unittest.TestCase):
     def test_darwin_archive_keeps_supported_architecture_gate(self):
         with tempfile.TemporaryDirectory() as temporary:
             with mock.patch.object(build_bundle, 'architecture', return_value='x64'), \
-                    mock.patch('lcu.platforms.resolve_installed_mac_app') as resolve:
+                    mock.patch.object(build_bundle, 'resolve_mac_app') as resolve:
                 with self.assertRaisesRegex(ValueError, 'does not support macOS x64'):
                     build_bundle.build(Path(temporary) / 'dist', target='darwin')
             resolve.assert_not_called()
@@ -104,15 +108,22 @@ class BuildPlatformTests(unittest.TestCase):
                 manifest = json.load(bundle.extractfile(f'lcu-{VERSION}-linux-x64/bundle.json'))
                 self.assertEqual((manifest['platform'], manifest['architecture']), ('linux', 'x64'))
                 names = {member.name for member in bundle}
-                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/interpreter.py', names)
-                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/apps.py', names)
+                for name in ('lcu/runtime.mjs', 'lcu/usage.txt', 'lcu/update_apply.mjs', 'lcu/status.mjs',
+                             'scripts/install.sh', 'scripts/install.mjs', 'scripts/bundle.mjs', 'scripts/install.py'):
+                    self.assertIn(f'lcu-{VERSION}-linux-x64/{name}', names)
+                self.assertFalse(any(name.endswith('.py') and '/lcu/' in name for name in names))
+                for name in ('scripts/bundle.py', 'scripts/installed_app.py', 'scripts/install_macos.py'):
+                    self.assertNotIn(f'lcu-{VERSION}-linux-x64/{name}', names)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/bin/lcu-owner-auth', names)
-                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/claude_mod.py', names)
                 self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/linux_sky_service.mjs', names)
-                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/sandbox_shim.py', names)
+                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/x11.mjs', names)
+                self.assertIn(f'lcu-{VERSION}-linux-x64/lcu/sandbox_shim.mjs', names)
                 shim = bundle.getmember(f'lcu-{VERSION}-linux-x64/bin/lcu-codex-sandbox')
                 self.assertTrue(shim.mode & 0o111)
                 self.assertNotIn(f'lcu-{VERSION}-linux-x64/lcu/macos_sky_service.mjs', names)
+                self.assertEqual({name for name in names if name.startswith(f'lcu-{VERSION}-linux-x64/lcu/windows')},
+                                 {f'lcu-{VERSION}-linux-x64/lcu/windows.mjs'})
+                self.assertNotIn(f'lcu-{VERSION}-linux-x64/bin/lcu.cmd', names)
 
     @posix_archive
     def test_shipped_document_links_resolve_inside_the_release(self):

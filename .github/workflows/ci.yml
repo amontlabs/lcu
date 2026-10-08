@@ -14,35 +14,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  unit:
-    name: Unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
+  node:
+    # LCU's runtime, setup, install and update are Node. The app ships Node 24; 22.15 is the minimum
+    # (process.execve). Tests for POSIX-only behaviour skip themselves on Windows with a reason.
+    name: Node tests (${{ matrix.os }}, Node ${{ matrix.node }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest]
-        python: ['3.12']
-        include:
-          - os: ubuntu-24.04
-            python: '3.14'
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+        node: ['22.15.0', '24']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python }}
       - uses: actions/setup-node@v5
         with:
-          node-version: 24
-      - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
-      - run: python -m unittest discover -b -s tests -p 'test_*.py'
-      - run: npm test --prefix adapters
+          node-version: ${{ matrix.node }}
+      # Node 22 does not take a directory for --test; name the files (bash expands the glob on Windows too).
+      - run: node --test tests/node/*.test.mjs
+        shell: bash
 
-  windows:
-    # Modules and tests for POSIX-only targets (Linux/macOS installers and
-    # layouts, fcntl, mode bits, Unix sockets) skip themselves on Windows.
-    name: Windows build and tests
-    runs-on: windows-latest
+  tooling:
+    # Build tooling and the adapters stay Python and npm; they are never shipped as LCU's runtime.
+    name: Build tooling and adapters (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
@@ -55,17 +54,61 @@ jobs:
       - run: npm ci --prefix adapters --ignore-scripts --no-audit --no-fund
       - run: python -m unittest discover -b -s tests -p 'test_*.py'
       - run: npm test --prefix adapters
+
+  windows:
+    name: Windows archive
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
       - run: python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"
       - run: python scripts/check_archive.py (Get-ChildItem "$env:RUNNER_TEMP\dist\*.zip").FullName
+
+  e2e:
+    # tests/e2e: OLD (v0.9.7) and NEW release archives compared as data (setup files, exit codes, launch
+    # command and environment), the upgrade from 0.9.7 and back, no reachable Python, and the startup budget
+    # (NEW median at most 10% + 5 ms above OLD for each entry point).
+    name: End-to-end against 0.9.7 (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # the v0.9.7 tag is the OLD tree
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: tests/e2e/run.sh
 
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      # Bug-class rules only (syntax errors, undefined names); style is not gated.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # Bug-class rules only (syntax errors, undefined names); style is not gated. The test drivers and
+      # build tooling are still Python.
       - run: pipx run ruff check --isolated --select E9,F63,F7,F82 .
       - run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=error
+      - name: Node modules parse
+        run: git ls-files -z '*.mjs' '*.cjs' | xargs -0 -n1 node --check
+      - name: Launchers without an extension parse as sh
+        run: for file in bin/lcu bin/lcu-session bin/lcu-codex-sandbox; do sh -n "$file"; done
       - name: JSON files parse
         run: git ls-files '*.json' ':!:**/package-lock.json' | xargs -n1 python3 -m json.tool --no-ensure-ascii > /dev/null
 

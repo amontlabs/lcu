@@ -2,7 +2,9 @@ FROM node:24.11.1-bookworm-slim AS pi-verification
 RUN npm install --global @mariozechner/pi-coding-agent@0.73.0 --ignore-scripts --no-audit --no-fund
 
 FROM ubuntu:24.04
-# Match scripts/install.py's Ubuntu 24.04 runtime dependencies, then add fixtures.
+# Match scripts/install.mjs's Ubuntu 24.04 runtime dependencies, then add fixtures.
+# LCU itself needs no Python: python3 (and its GTK/Qt bindings) is here only because the
+# test drivers and fixtures under tests/ are Python.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     at-spi2-core bubblewrap ca-certificates dbus-x11 ffmpeg \
     libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 \
@@ -13,7 +15,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libtss2-mu-4.0.1-0t64 libtss2-tcti-device0t64 libudev1 libusb-1.0-0 \
     libx11-6 libx11-xcb1 libxcb-dri3-0 libxcb1 libxcomposite1 \
     libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxrandr2 \
-    libxres1 libxtst6 mesa-vulkan-drivers pulseaudio pulseaudio-utils python3 \
+    libxtst6 mesa-vulkan-drivers pulseaudio pulseaudio-utils python3 \
     x11-utils xdg-utils xz-utils \
     python3-gi gir1.2-gtk-3.0 gir1.2-gtk-4.0 python3-pyqt5 xvfb openbox xdotool \
     xfce4-session xfwm4 xfdesktop4 xfce4-panel curl binutils \

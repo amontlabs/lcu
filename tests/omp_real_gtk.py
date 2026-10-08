@@ -25,8 +25,7 @@ from urllib.parse import urlsplit
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu.harness_setup import configure_omp
+from lcu_node import call  # noqa: E402
 
 
 def parse_args():
@@ -128,7 +127,7 @@ def run(args):
         docker_command = [docker] + (['--host', args.docker_host] if args.docker_host else [])
         command = [*docker_command, 'exec', '-i', '-u', args.container_user,
                    args.container, args.lcu_runtime]
-        configure_omp(home, command, ROOT, scope='user', project=None, env=env)
+        call('harness_setup', 'configureOmp', home, command, ROOT, {'scope': 'user', 'env': env})
 
         marker = 'omp-lcu-' + uuid.uuid4().hex[:12]
         prompt = (f'Use the original Computer Use tools. In the window '

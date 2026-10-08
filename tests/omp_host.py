@@ -15,7 +15,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+from lcu_node import call as lcu_call  # noqa: E402
 OMP = os.environ.get("OMP_BIN")
 TEMP_PARENT = "/private/tmp" if sys.platform == "darwin" else "/tmp" if os.name == "posix" else None
 
@@ -57,8 +57,6 @@ class _FixtureProvider(BaseHTTPRequestHandler):
 @unittest.skipUnless(OMP, "Set OMP_BIN to an installed OMP executable for native host verification.")
 class OmpHostTests(unittest.TestCase):
     def test_generated_extension_delivers_first_prompt_calls_original_tool_and_cleans_up(self):
-        from lcu.harness_setup import configure_omp
-
         _FixtureProvider.requests = []
         with tempfile.TemporaryDirectory(prefix="lcu-omp-host-", dir=TEMP_PARENT) as temporary:
             root = Path(temporary)
@@ -105,8 +103,8 @@ class OmpHostTests(unittest.TestCase):
                 "LCU_MCP_COMMAND": json.dumps([str(node), str(fixture)]),
                 "LCU_FIXTURE_LOG": str(fixture_log),
             }
-            configure_omp(home, [str(node), str(fixture)], ROOT,
-                          scope="user", project=None, env=env)
+            lcu_call("harness_setup", "configureOmp", home, [str(node), str(fixture)], ROOT,
+                 {"scope": "user", "env": env})
 
             command = [str(Path(OMP).resolve()), "--print", "--no-session",
                        "--cwd", str(root / "cwd"), "--session-dir", str(root / "session"),

@@ -65,9 +65,9 @@ def prepare(output: Path, case: str, node: Path, clod: Path, claude_version: Pat
         "env": {"LCU_RESULT_LOG": str(result_log)},
     }}}
     (project / ".mcp.json").write_text(json.dumps(mcp, indent=2) + "\n", encoding="utf-8")
-    sys.path.insert(0, str(ROOT))
-    from lcu.claude_visibility import install
-    install(home, project=project)
+    sys.path.insert(0, str(ROOT / "tests"))
+    from lcu_node import call
+    call("claude_visibility", "install", home, {"project": project})
     return {"home": str(home), "project": str(project), "claude_version": version,
             "claude_version_output": reported_version.strip(),
             "result_log": str(result_log), "fake_key": FAKE_KEY,

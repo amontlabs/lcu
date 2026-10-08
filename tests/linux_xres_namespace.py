@@ -1,15 +1,15 @@
-"""LCU's X helper against a real X server: process identity is trusted only from a server in LCU's PID namespace.
+"""LCU's X questions against a real X server: process identity is trusted only from a server in LCU's PID namespace.
 
 SO_PEERCRED process ids, which the X server reports through X-Resource, are relative to the PID namespace of
-the server, and equal numbers in two PID namespaces prove nothing. The helper
-(lcu/linux_sky_service.mjs, XRES_HELPER_SCRIPT) therefore proves, before it trusts any id, that the X server
+the server, and equal numbers in two PID namespaces prove nothing. LCU
+(lcu/x11.mjs, asked by lcu/linux_sky_service.mjs) therefore proves, before it trusts any id, that the X server
 shares its PID namespace from the actual socket: it resolves the display's socket (/tmp/.X11-unix/X<n>, abstract or
 file), finds the listening process through /proc/net/unix and /proc/*/fd, and requires that process's
 /proc/<pid>/ns/pid to equal its own. A TCP or remote display, an unidentifiable server or one in another
-namespace fails closed. The helper's own client id check (the server's record of the helper's client equals
-getpid()) stays as an additional condition.
+namespace fails closed. The own client id check (the server's record of LCU's own client equals getpid())
+stays as an additional condition.
 
-This test runs the helper
+This test asks through tests/x11_helper.mjs, which prints what the former python3 helper printed:
  1. from this namespace: it must report the process owning a window, and the socket proof must hold; a TCP-style
     DISPLAY must not pass the proof;
  2. from a child PID namespace against the same server (`unshare`, where permitted): it must report nothing;
@@ -22,22 +22,17 @@ case, so a refusal cannot come from an unreachable X server.
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
-import tempfile
 
 repo = Path(__file__).resolve().parent.parent
-script = subprocess.run(
-    ['node', '--input-type=module', '-e',
-     f'import {{XRES_HELPER_SCRIPT}} from {json.dumps((repo / "lcu/linux_sky_service.mjs").as_uri())};'
-     'process.stdout.write(XRES_HELPER_SCRIPT);'],
-    capture_output=True, text=True, check=True).stdout
-path = Path(tempfile.mkdtemp()) / 'helper.py'
-path.write_text(script)
+node = shutil.which('node')
+driver = str(repo / 'tests/x11_helper.mjs')
 
 
 def helper(*arguments, prefix=(), env=None):
-    result = subprocess.run([*prefix, sys.executable, str(path), *arguments], capture_output=True, text=True, timeout=30,
+    result = subprocess.run([*prefix, node, driver, *arguments], capture_output=True, text=True, timeout=30,
                             env={**os.environ, **(env or {})})
     return result.stdout.strip()
 
@@ -95,9 +90,9 @@ else:
 # Aligned ids: the helper's pid in a child PID namespace equals its pid in this one, so everything the server
 # reports (SO_PEERCRED ids are in the server's namespace) matches by number. Needs root to set ns_last_pid.
 LAUNCHER = r'''
-import contextlib, ctypes, io, os, sys
+import ctypes, os, sys
 libc = ctypes.CDLL(None, use_errno=True)
-wanted, helper_path, window = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+wanted, node, driver, window = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 CLONE_NEWNS, CLONE_NEWPID, MS_REC, MS_PRIVATE = 0x20000, 0x20000000, 0x4000, 1 << 18
 open('/proc/sys/kernel/ns_last_pid', 'w').write(str(wanted - 2))  # the next process of this namespace gets wanted - 1
 if libc.unshare(CLONE_NEWPID) != 0:
@@ -112,19 +107,7 @@ open('/proc/sys/kernel/ns_last_pid', 'w').write(str(wanted - 1))  # inside: the 
 child = os.fork()  # `wanted` in both namespaces, unless another process of this container forked in between
 if child:
     os._exit(os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]))
-code = compile(open(helper_path).read(), helper_path, 'exec')
-answers = {'getpid': str(os.getpid())}
-for argv in (['socket'], ['xres', window], ['pid', window]):
-    sys.argv = ['helper.py'] + argv
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        try:
-            exec(code, {'__name__': '__main__'})
-        except SystemExit:
-            pass
-    answers[argv[0]] = buffer.getvalue().strip()
-print(__import__('json').dumps(answers), flush=True)
-os._exit(0)
+os.execv(node, [node, driver, 'all', window])  # the same pid answers socket, xres and pid as one JSON line
 '''
 
 
@@ -133,7 +116,7 @@ def aligned():
         return 'not root, or /proc/sys/kernel/ns_last_pid is not writable'
     for attempt in range(8):
         wanted = 4000 + 137 * attempt + os.getpid() % 100
-        run = subprocess.run([sys.executable, '-c', LAUNCHER, str(wanted), str(path), window_id],
+        run = subprocess.run([sys.executable, '-c', LAUNCHER, str(wanted), node, driver, window_id],
                              capture_output=True, text=True, timeout=60)
         lines = [line for line in run.stdout.splitlines() if line.startswith('{')]
         if run.returncode != 0 or not lines:
@@ -156,4 +139,4 @@ else:
     assert outcome['socket'] == '0', ('the socket proof held across PID namespaces', outcome)
     assert outcome['pid'] == '', ('equal pids across PID namespaces were trusted', outcome)
     print('INFO: aligned pids across PID namespaces: X-Resource alone trusted them, the socket proof refused', flush=True)
-print('PASS: X helper trusts the X server in this namespace and fails closed from a child PID namespace', flush=True)
+print('PASS: LCU trusts the X server in this namespace and fails closed from a child PID namespace', flush=True)

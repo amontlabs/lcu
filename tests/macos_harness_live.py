@@ -87,20 +87,18 @@ def source_root() -> Path:
     configured = os.environ.get("LCU_SOURCE_ROOT")
     candidates = ([Path(configured)] if configured else []) + list(Path(__file__).resolve().parents)
     for candidate in candidates:
-        if (candidate / "lcu/harness_setup.py").is_file():
+        if (candidate / "lcu/harness_setup.mjs").is_file():
             return candidate.resolve()
-    raise SystemExit("Could not locate the LCU source tree; set LCU_SOURCE_ROOT to a tree containing lcu/harness_setup.py")
+    raise SystemExit("Could not locate the LCU source tree; set LCU_SOURCE_ROOT to a tree containing lcu/harness_setup.mjs")
 
 
 ROOT = source_root()
-sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
-from lcu.harness_setup import configure_hermes, configure_omp
+from lcu_node import call, codex_cli  # noqa: E402
 def cua_environment(home: Path, app: Path, *, audio: bool = False) -> dict[str, str]:
-    from lcu.app_layout import locate_codex_tools
     resources = app / "Contents/Resources"
     runtime = resources / "cua_node"
-    tools = locate_codex_tools(resources)
+    codex = codex_cli(resources, root=ROOT)
     modules = runtime / "lib/node_modules"
     plugins = resources / "plugins"
     helper = modules / "@oai/sky/Codex Computer Use.app"
@@ -115,7 +113,7 @@ def cua_environment(home: Path, app: Path, *, audio: bool = False) -> dict[str, 
         "NODE_REPL_NODE_PATH": str(runtime / "bin/node"),
         "NODE_REPL_NODE_MODULE_DIRS": str(modules),
         "NODE_REPL_TRUSTED_CODE_PATHS": os.pathsep.join((str(codex_home), str(modules), str(plugins))),
-        "CODEX_CLI_PATH": str(tools.cli), "NODE_REPL_DISABLE_ANALYTICS": "1",
+        "CODEX_CLI_PATH": str(codex), "NODE_REPL_DISABLE_ANALYTICS": "1",
         "NODE_REPL_REQUEST_META": json.dumps({"x-codex-turn-metadata": {
             "session_id": f"lcu-native-{uuid.uuid4()}", "turn_id": str(uuid.uuid4())}}),
     }
@@ -554,7 +552,7 @@ def main() -> None:
     cli, release, runtime, app = (args.cli.resolve(strict=True), args.release.resolve(strict=True),
                                   args.runtime.resolve(strict=True), args.app.resolve(strict=True))
     if not all((release / path).is_file() for path in
-               ("bin/lcu", "lcu/runtime.py", "adapters/pi/index.ts", "adapters/hermes/plugin.yaml")):
+               ("bin/lcu", "lcu/runtime.mjs", "adapters/pi/index.ts", "adapters/hermes/plugin.yaml")):
         raise SystemExit("Staged LCU source tree is incomplete")
     url = urlsplit(args.base_url)
     if (url.scheme != "http" or url.hostname != "192.168.64.1" or url.port != 62098 or
@@ -627,20 +625,22 @@ def main() -> None:
                         f"      - id: {args.model}\n        contextWindow: 200000\n"
                         "        maxTokens: 8192\n        supportsTools: true\n"
                         "        compat:\n          supportsDeveloperRole: false\n", encoding="utf-8")
-                    configure_omp(home, ["/usr/bin/env", f"HOME={Path.home()}", str(overlay_runtime)],
-                                  test_release, scope="user", project=None, env=env)
+                    call("harness_setup", "configureOmp", home,
+                         ["/usr/bin/env", f"HOME={Path.home()}", str(overlay_runtime)],
+                         test_release, {"scope": "user", "env": env}, root=ROOT)
                     (profile / "config.yml").write_text("setupVersion: 2\nstartup:\n  quiet: true\n")
                     run_args = ["--cwd", str(root / "cwd"), "--session-dir", str(root / "session")]
                 else:
                     node = app / "Contents/Resources/cua_node/bin/node"
-                    configure_hermes(home, ["/usr/bin/env", f"HOME={Path.home()}", str(overlay_runtime)],
-                                     node, test_release, scope="user", project=None, env=env)
+                    call("harness_setup", "configureHermes", home,
+                         ["/usr/bin/env", f"HOME={Path.home()}", str(overlay_runtime)],
+                         node, test_release, {"scope": "user", "env": env}, root=ROOT)
                     instrument_hermes_cleanup(hermes_home / "plugins/lcu-cua/__init__.py")
-                    from lcu.harness_setup import _run
                     for key, value in (("model.provider", "custom"), ("model.default", args.model),
                         ("model.base_url", args.base_url.rstrip("/")), ("model.api_mode", "chat_completions"),
                         ("agent.max_turns", "12"), ("tools.tool_search.enabled", "off")):
-                        _run([str(cli), "config", "set", key, value], cwd=home, env=env)
+                        subprocess.run([str(cli), "config", "set", key, value], cwd=home, env=env,
+                                       check=True, timeout=120)
                     run_args = []
                 for index, marker in enumerate(markers):
                     phase = f"process-{index + 1}"

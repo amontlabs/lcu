@@ -13,14 +13,14 @@ import platform
 import sys
 import tempfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.app_layout import locate_codex_tools
-from mcp_client import Client, text
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lcu_node import codex_cli  # noqa: E402
+from mcp_client import Client, text  # noqa: E402
 
 
 def isolated_env(home: Path, app: Path) -> dict[str, str]:
     resources = app / 'Contents/Resources'
-    tools = locate_codex_tools(resources)
+    codex = codex_cli(resources)
     runtime = resources / 'cua_node'
     modules = runtime / 'lib/node_modules'
     plugins = resources / 'plugins'
@@ -46,7 +46,7 @@ def isolated_env(home: Path, app: Path) -> dict[str, str]:
         'NODE_REPL_DISABLE_ANALYTICS': '1',
         'NODE_REPL_REQUEST_META': json.dumps({'x-codex-turn-metadata': {
             'session_id': 'lcu-macos-validation', 'turn_id': 'pure-js-check'}}),
-        'CODEX_CLI_PATH': str(tools.cli),
+        'CODEX_CLI_PATH': str(codex),
     }
 
 

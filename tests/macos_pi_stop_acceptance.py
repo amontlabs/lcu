@@ -28,6 +28,9 @@ import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lcu_node import codex_cli  # noqa: E402
+
 
 APP_ID = 'com.apple.TextEdit'
 INITIAL_MARKER = 'Generated Pi Stop fixture.\n'
@@ -223,12 +226,11 @@ def main() -> None:
     release = args.release.resolve(strict=True)
     app = args.app.resolve(strict=True)
     pi = args.pi.resolve(strict=True)
-    sys.path.insert(0, str(release))
-    from lcu.app_layout import locate_codex_tools
+    os.environ['LCU_MODULE_ROOT'] = str(release)
 
     resources = app / 'Contents/Resources'
     runtime = resources / 'cua_node'
-    tools = locate_codex_tools(resources)
+    codex = codex_cli(resources)
     lcu = release / 'bin/lcu'
     extension = release / 'adapters/pi/index.ts'
     for path in (lcu, extension, runtime / 'bin/node', runtime / 'bin/node_repl', pi):
@@ -347,7 +349,7 @@ def main() -> None:
             'NODE_REPL_NODE_MODULE_DIRS': str(runtime / 'lib/node_modules'),
             'NODE_REPL_TRUSTED_CODE_PATHS': os.pathsep.join((str(codex_home),
                 str(runtime / 'lib/node_modules'), str(resources / 'plugins'))),
-            'CODEX_CLI_PATH': str(tools.cli),
+            'CODEX_CLI_PATH': str(codex),
             'SKY_CUA_SERVICE_PATH': str(runtime / 'lib/node_modules/@oai/sky/Codex Computer Use.app'),
         }
         env = {key: value for key, value in env.items() if value}

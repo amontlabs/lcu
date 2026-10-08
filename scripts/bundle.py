@@ -1,11 +1,18 @@
-"""Local release inventory. This module has no download or build dependencies."""
+"""Build-time release inventory: seal an LCU release, and download test package fixtures.
+
+Not shipped. Installed releases are verified by scripts/bundle.mjs, which also holds VERSION; the
+inventory here must stay identical to the one there (tests/test_bundle.py checks both against each other).
+"""
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
+import re
+from urllib.request import Request, urlopen
 
-VERSION = '0.9.7'
+_NODE_BUNDLE = Path(__file__).resolve().parent / 'bundle.mjs'
+VERSION = re.search(r"^export const VERSION = '([^']+)';$", _NODE_BUNDLE.read_text(), re.MULTILINE).group(1)
 
 
 def architecture(target='linux'):
@@ -47,15 +54,31 @@ def seal(root, arch, target='linux'):
 
 
 def verify(root, arch, target='linux'):
+    """The build's own check of what it sealed."""
     path = root / 'bundle.json'
     if not path.is_file() or path.is_symlink():
-        raise ValueError('Install from an extracted LCU release bundle. Source checkouts contain no runtime; build a release with scripts/build_bundle.py first.')
+        raise ValueError('The release has no bundle.json.')
     manifest = json.loads(path.read_text())
-    if not isinstance(manifest, dict) or manifest.get('format') != 1 or manifest.get('platform') != target or manifest.get('version') != VERSION:
-        raise ValueError('Unsupported LCU bundle manifest')
-    if manifest.get('architecture') != arch:
-        raise ValueError(f'Bundle architecture {manifest.get("architecture")} does not match this machine ({arch})')
-    expected, actual = manifest.get('files'), inventory(root, target)
-    if not isinstance(expected, dict) or expected != actual:
-        raise ValueError('LCU bundle integrity check failed; extract a clean release archive.')
+    if (not isinstance(manifest, dict) or manifest.get('format') != 1 or manifest.get('platform') != target
+            or manifest.get('version') != VERSION or manifest.get('architecture') != arch
+            or manifest.get('files') != inventory(root, target)):
+        raise ValueError('LCU bundle integrity check failed.')
     return manifest
+
+
+def download_fixture(lock, entry, destination):
+    """Fetch the pinned official package as a development/test fixture; LCU's installer never downloads it."""
+    url = lock['source'].format(deb_arch=entry['deb_arch'])
+    digest = hashlib.sha256()
+    try:
+        with urlopen(Request(url, headers={'User-Agent': 'lcu-dev'}), timeout=60) as response, \
+                destination.open('xb') as output:
+            while chunk := response.read(1024 * 1024):
+                digest.update(chunk)
+                output.write(chunk)
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+    if digest.hexdigest() != entry['sha256']:
+        destination.unlink(missing_ok=True)
+        raise ValueError('Official application package checksum mismatch; refusing to extract it')

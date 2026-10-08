@@ -12,10 +12,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu.macos_host import start_original_host, stop_original_host
-from lcu.runtime import _configure_macos_lifecycle
-from macos_session import isolated_env
+from macos_session import isolated_env  # noqa: E402
 
 
 def main():
@@ -28,7 +25,6 @@ def main():
         scratch = Path(directory)
         env = isolated_env(scratch, app)
         env['SKY_CUA_SERVICE_PATH'] = str(runtime / 'lib/node_modules/@oai/sky/Codex Computer Use.app')
-        _configure_macos_lifecycle(ROOT, runtime, env)
         log = scratch / 'native-argv.jsonl'
         fake = scratch / 'record-native-command'
         fake.write_text(f'#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\n'
@@ -39,15 +35,18 @@ def main():
                         'if "turn-Retry" in sys.argv[2] and "turn-Retry" not in previous:\n'
                         '    sys.exit(17)\n')
         fake.chmod(0o700)
-        host, temporary, address = start_original_host(
-            python=Path(sys.executable), client=fake,
-            entry=ROOT / 'lcu/macos_host.py', env=env)
-        env['LCU_MAC_LIFETIME_SOCKET'] = address
         script = scratch / 'probe.mjs'
+        # LCU's own lifecycle wiring and lifetime host, as `lcu` sets them up for one MCP connection.
         script.write_text('''
 import assert from 'node:assert/strict';
 import {createCuaClient} from CLIENT_MODULE;
-const client = createCuaClient({command: COMMAND, env: process.env});
+import {configureMacosLifecycle} from RUNTIME_MODULE;
+import {startOriginalHost} from HOST_MODULE;
+const env = {...process.env};
+configureMacosLifecycle(ROOT, RUNTIME, env);
+const host = await startOriginalHost({client: FAKE_CLIENT, env});
+env.LCU_MAC_LIFETIME_SOCKET = host.address;
+const client = createCuaClient({command: COMMAND, env});
 await client.connect();
 try {
   for (const event of ['Stop', 'Interrupt']) {
@@ -68,22 +67,23 @@ try {
   const next = {...retry, turnId:'after-retry'};
   assert.ok(!(await client.call('js', setup, next)).isError);
   assert.ok(!(await client.call('js', setup, next)).isError);
-} finally { await client.close(); }
+} finally { await client.close(); await host.stop(); }
 '''.replace('CLIENT_MODULE', json.dumps((ROOT / 'adapters/client.mjs').as_uri()))
+                  .replace('RUNTIME_MODULE', json.dumps((ROOT / 'lcu/runtime.mjs').as_uri()))
+                  .replace('HOST_MODULE', json.dumps((ROOT / 'lcu/macos_host.mjs').as_uri()))
+                  .replace('FAKE_CLIENT', json.dumps(str(fake)))
+                  .replace('ROOT, RUNTIME', json.dumps(str(ROOT)) + ', ' + json.dumps(str(runtime)))
                   .replace('COMMAND', json.dumps([str(runtime / 'bin/node'), str(
                       runtime / 'lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs')])) )
-        try:
-            subprocess.run([str(runtime / 'bin/node'), str(script)], env=env,
-                           cwd=scratch, check=True, timeout=45)
-            records = [json.loads(line) for line in log.read_text().splitlines()]
-            assert len(records) == 4, records
-            for record, event in zip(records, ('Stop', 'Interrupt', 'Retry', 'Retry')):
-                assert record[0] == 'turn-ended', record
-                assert json.loads(record[1]) == {
-                    'type': 'agent-turn-complete', 'thread-id': 'lcu-mac-cleanup-fixture',
-                    'turn-id': f'turn-{event}'}, record
-        finally:
-            stop_original_host(host, temporary)
+        subprocess.run([str(runtime / 'bin/node'), str(script)], env=env,
+                       cwd=scratch, check=True, timeout=45)
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        assert len(records) == 4, records
+        for record, event in zip(records, ('Stop', 'Interrupt', 'Retry', 'Retry')):
+            assert record[0] == 'turn-ended', record
+            assert json.loads(record[1]) == {
+                'type': 'agent-turn-complete', 'thread-id': 'lcu-mac-cleanup-fixture',
+                'turn-id': f'turn-{event}'}, record
     print(json.dumps({'result': 'passed', 'native_commands_recorded': 4,
                       'events': ['Stop', 'Interrupt'], 'failed_callback_retried': True,
                       'desktop_actions': 0}))

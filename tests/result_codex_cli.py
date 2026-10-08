@@ -12,15 +12,13 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from lcu.codex_hooks import install_hooks
+from lcu_node import call  # noqa: E402
 
 ADAPTER = ROOT / "adapters/codex.mjs"
 FIXTURE = ROOT / "adapters/test/result-fixture.mjs"
@@ -261,7 +259,7 @@ def run_case(cli: Path, app_resources: Path, node: str, output: Path, case: str,
         "NO_COLOR": "1",
     }
     host_root = app_resources / "plugins/openai-bundled"
-    install_hooks(cli, codex_home / "config.toml", project, env, host_root)
+    call("codex_hooks", "installHooks", cli, codex_home / "config.toml", project, env, host_root)
     command = [str(cli), "--strict-config", "-a", "on-request", "-c", 'model_provider="fixture"',
                "-c", 'model="fixture"', "exec", "--ephemeral", "--skip-git-repo-check", "--json",
                "-C", str(project), f"Call original LCU js once with code lcu-result:{case}, then finish."]

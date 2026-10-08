@@ -122,6 +122,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     log({ type: 'active-call-aborted', code: args.code, meta: _meta });
     return { content: [{ type: 'text', text: 'fixture observed close cancellation' }] };
   }
+  if (name === 'js' && args.code === 'ignore-cancel') {
+    // A call that keeps running after its cancellation, like a JavaScript await the original kernel cannot stop.
+    log({ type: 'active-call-start', code: args.code, meta: _meta });
+    extra.signal.addEventListener('abort', () => log({ type: 'active-call-aborted', code: args.code }), { once: true });
+    await new Promise(() => {});
+  }
   if (name === 'js' && args.code === 'release-held-cleanup') {
     releaseHeldCleanup?.();
     // Let the held turn_ended reply reach the relay before this result does.

@@ -9,11 +9,9 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tempfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.harness_setup import configure_omp
+from lcu_node import call
 
 
 def isolated_env(root, omp, profile):
@@ -83,9 +81,9 @@ def run_scope(root, omp, scope, profile):
     if not node:
         raise RuntimeError('Node.js is required to run the original MCP fixture')
     try:
-        configure_omp(Path(env['HOME']), [node, str(fixture)], release,
-                      scope=scope, project=project if scope == 'project' else None, env=env)
-    except ValueError as exc:
+        call('harness_setup', 'configureOmp', Path(env['HOME']), [node, str(fixture)], release,
+             {'scope': scope, 'project': project if scope == 'project' else None, 'env': env})
+    except RuntimeError as exc:
         if scope != 'project' or 'project' not in str(exc).lower():
             raise
         profile_plugins = Path(env['HOME']) / '.omp/profiles' / profile / 'plugins'

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createConnection, createServer} from 'node:net';
@@ -198,9 +198,8 @@ try {
   assert.ok(turnEnded.timeoutMs > 0 && turnEnded.timeoutMs <= 4_000);
   assert.ok(turnEnded.timeoutMs < 5_000);
   // The JS wait for the private lifetime host must outlast the host's own limit.
-  const hostSource = await readFile(new URL('../lcu/macos_host.py', import.meta.url), 'utf8');
-  const hostTimeoutSeconds = Number(
-    hostSource.match(/^TURN_ENDED_CLI_TIMEOUT_SECONDS = (\d+)$/m)?.[1]);
+  const {TURN_ENDED_CLI_TIMEOUT_SECONDS: hostTimeoutSeconds} = await import(
+    new URL('../lcu/macos_host.mjs', import.meta.url).href);
   assert.ok(hostTimeoutSeconds >= 6, 'the host must outlast the helper\'s ~5.2 s run');
   assert.equal(LIFETIME_SIGNAL_TIMEOUT_MS, hostTimeoutSeconds * 1000 + 2000);
   await waitFor(() => observedContexts.some(context => context.app === 'com.fixture.A'),

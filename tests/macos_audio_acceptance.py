@@ -27,7 +27,8 @@ import uuid
 import wave
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mcp_client import Client, text
+from lcu_node import codex_cli  # noqa: E402
+from mcp_client import Client, text  # noqa: E402
 
 
 def require_disposable_guest(expected_user: str) -> str:
@@ -44,13 +45,11 @@ def require_disposable_guest(expected_user: str) -> str:
 
 
 def environment(home: Path, app: Path, *, audio: bool) -> dict[str, str]:
-    # Import from the selected LCU release at runtime so the original and
+    # Ask the selected LCU release (LCU_MODULE_ROOT) so the original and
     # LCU children use the same app-selected codex executable path.
-    from lcu.app_layout import locate_codex_tools
-
     resources = app / 'Contents/Resources'
     runtime = resources / 'cua_node'
-    tools = locate_codex_tools(resources)
+    codex = codex_cli(resources)
     modules = runtime / 'lib/node_modules'
     plugins = resources / 'plugins'
     helper = modules / '@oai/sky/Codex Computer Use.app'
@@ -73,7 +72,7 @@ def environment(home: Path, app: Path, *, audio: bool) -> dict[str, str]:
         'NODE_REPL_NODE_PATH': str(runtime / 'bin/node'),
         'NODE_REPL_NODE_MODULE_DIRS': str(modules),
         'NODE_REPL_TRUSTED_CODE_PATHS': os.pathsep.join((str(codex_home), str(modules), str(plugins))),
-        'CODEX_CLI_PATH': str(tools.cli),
+        'CODEX_CLI_PATH': str(codex),
         'NODE_REPL_DISABLE_ANALYTICS': '1',
         'NODE_REPL_REQUEST_META': json.dumps({'x-codex-turn-metadata': {
             'session_id': f'lcu-audio-{uuid.uuid4()}', 'turn_id': str(uuid.uuid4())}}),
@@ -274,8 +273,7 @@ def main() -> None:
     model = require_disposable_guest(args.expected_user)
     app = args.app.resolve(strict=True)
     release = args.release.resolve(strict=True)
-    sys.path.insert(0, str(release))
-    from lcu.app_layout import locate_codex_tools
+    os.environ['LCU_MODULE_ROOT'] = str(release)
 
     resources = app / 'Contents/Resources'
     runtime = resources / 'cua_node'

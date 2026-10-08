@@ -1,6 +1,6 @@
 """Exercise macOS Codex registration under a disposable home only.
 
-Calls setup.configure directly so neither pwd nor a personal account home is
+Calls LCU's setup configure (lcu/setup.mjs) directly so neither pwd nor a personal account home is
 selected. It does not install the Chrome host or start a desktop provider.
 """
 
@@ -13,9 +13,24 @@ import sys
 import tempfile
 import tomllib
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lcu.codex_hooks import original_hooks
-from lcu.setup import configure, export_bundle, host_policy
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lcu_node import call  # noqa: E402
+
+
+def configure(names, home, command, tools_root, release, *, environ):
+    return call('setup', 'configure', names, home, command, tools_root, release, {'environ': environ}, root=release)
+
+
+def export_bundle(destination, command, release, *, chrome):
+    call('setup', 'exportBundle', destination, command, release, {'chrome': chrome}, root=release)
+
+
+def host_policy(release):
+    return call('setup', 'hostPolicy', release, root=release)
+
+
+def original_hooks(host_root):
+    return call('codex_hooks', 'originalHooks', host_root)
 
 
 def check_mode(release: Path, app: Path, *, chrome: bool) -> None:

@@ -18,10 +18,21 @@ import tempfile
 import uuid
 
 SOURCE = Path(__file__).resolve().parents[1]
-sys.dont_write_bytecode = True
-sys.path.insert(0, str(SOURCE))
-
-from lcu.windows_host import plan_original_asar, write_original_host  # noqa: E402
+# LCU's own Node module plans and writes the extraction; this script only reports and probes it.
+EXTRACT = r'''
+const [module, archive, node, destination] = process.argv.slice(1);
+const { planOriginalAsar, writeOriginalHost } = await import(module);
+let plan, entry;
+try {
+  plan = planOriginalAsar(archive, { node });
+  entry = writeOriginalHost(plan, destination);
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
+console.log(JSON.stringify({ main: plan.main, factory: plan.factory, module: plan.module.length,
+  uncarried: plan.uncarried, contents: Object.keys(plan.contents).sort(), entry }));
+'''
 
 PROBE = r'''
 const Module = require('node:module');
@@ -47,17 +58,22 @@ def main(argv=None):
     parser.add_argument('--node', type=Path, default=Path(shutil.which('node') or 'node'),
                         help='Node executable that runs the analyzer and the load check')
     args = parser.parse_args(argv)
-    plan = plan_original_asar(args.asar, node=args.node)
-    print(f'main bundle: {plan.main}')
-    print(f'factory: {plan.factory} ({len(plan.module)} generated characters)')
-    print(f'top-level calls on imported modules not carried: {plan.uncarried}')
-    print(f'chunk files: {len(plan.contents)}')
-    for name in sorted(plan.contents):
-        print(f'  {name}')
     with tempfile.TemporaryDirectory(prefix='lcu-host-check-') as scratch:
         root = Path(scratch)
-        entry = write_original_host(plan, root / 'host')
-        generated = entry.parent / plan.main.rsplit('/', 1)[0] / 'lcu-original-pipe-host.cjs'
+        result = subprocess.run([str(args.node), '--input-type=module', '-e', EXTRACT,
+                                 (SOURCE / 'lcu/windows_host.mjs').as_uri(), str(args.asar), str(args.node),
+                                 str(root / 'host')], capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            raise ValueError(result.stderr.strip() or 'extraction failed')
+        plan = json.loads(result.stdout)
+        print(f"main bundle: {plan['main']}")
+        print(f"factory: {plan['factory']} ({plan['module']} generated characters)")
+        print(f"top-level calls on imported modules not carried: {plan['uncarried']}")
+        print(f"chunk files: {len(plan['contents'])}")
+        for name in plan['contents']:
+            print(f'  {name}')
+        entry = Path(plan['entry'])
+        generated = entry.parent / plan['main'].rsplit('/', 1)[0] / 'lcu-original-pipe-host.cjs'
         probe = root / 'probe.cjs'
         probe.write_text(PROBE)
         pipe = ('\\\\.\\pipe\\lcu-host-check-' + str(uuid.uuid4()) if sys.platform == 'win32'
