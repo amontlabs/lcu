@@ -223,21 +223,10 @@ class ClaudePluginHookTests(unittest.TestCase):
         self.assertIn('official ChatGPT desktop app', message)
         self.assertEqual(self.recorded('curl.calls'), [])
 
-    def test_a_missing_python_is_reported_before_any_download(self):
-        tools = Path(self.temporary.name) / 'tools'
-        tools.mkdir()
-        for name in ('cat', 'mkdir', 'rmdir', 'rm', 'find', 'tr', 'sed'):
-            (tools / name).symlink_to(shutil.which(name))
-        for name in ('curl', 'uname'):
-            shutil.copy2(self.shims / name, tools / name)
-        probe = 'import sys; sys.exit(sys.version_info < (3, 12))'
-        for directory in ('/opt/homebrew/bin', '/usr/local/bin'):
-            for name in ('python3.14', 'python3.13', 'python3.12', 'python3'):
-                candidate = Path(directory) / name
-                if candidate.exists() and not subprocess.run([str(candidate), '-c', probe]).returncode:
-                    self.skipTest(f'{candidate} qualifies and the hook always searches {directory}')
-        self.assertIn('Python 3.12 or newer', self.run_hook(path=str(tools)))
-        self.assertEqual(self.recorded('curl.calls'), [])
+    def test_the_hook_needs_no_python(self):
+        # LCU 0.10 installs and runs on the app's own Node; the hook looks for no Python.
+        hook = (PLUGIN / 'scripts/ensure-lcu.sh').read_text()
+        self.assertNotIn('python', hook.lower())
 
     def test_installer_failure_is_reported_as_valid_json_and_leaves_no_registration(self):
         message = self.run_hook(FAKE_INSTALL_FAILS='1')

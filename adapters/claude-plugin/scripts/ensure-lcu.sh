@@ -93,21 +93,6 @@ if [ ! -x "$lcu" ]; then
     tell "LCU needs the official ChatGPT desktop app, which it never installs. Get it from" \
       "https://chatgpt.com/download/ and start a new session. For an app outside" \
       "/Applications, set LCU_APP to its path."
-  # A session started from the Dock has a short PATH; LCU's own launchers also look here.
-  PATH=$PATH:/opt/homebrew/bin:/usr/local/bin
-  export PATH
-  python=
-  for name in python3.14 python3.13 python3.12 python3; do
-    candidate=$(command -v "$name" || true)
-    if [ -n "$candidate" ] &&
-        "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null; then
-      python=$candidate
-      break
-    fi
-  done
-  [ -n "$python" ] ||
-    tell "LCU needs Python 3.12 or newer on PATH. Install it, then start a new session."
-
   # The tag comes from the redirect of /releases/latest, as in `lcu update`: no API, no rate limit.
   latest=$(curl -fsS --proto '=https' --max-time 20 -o /dev/null -w '%{redirect_url}' \
     -I "$REPO/releases/latest" 2>>"$log") ||
