@@ -33,6 +33,12 @@ const TURN_END_TOOL = 'turn_ended';
 const MOD_ONLY_TOOLS = new Set(['approval_request', 'approval_choice']);
 const TURN_CONTEXT_META = 'x-codex-turn-metadata';
 const CLAUDE_TOOL_USE_META = 'claudecode/toolUseId';
+/**
+ * Once the host is gone, Interrupt cleanup for its open turns gets this long before the original server is
+ * closed anyway, so a relay whose host exited or was killed ends within seconds, not after the cleanup's own
+ * timeouts (20 s per step on macOS) or after an in-flight call.
+ */
+export const SHUTDOWN_DRAIN_TIMEOUT_MS = 2_000;
 const TURN_CONTEXT_SCHEMA = {
   type: 'object',
   properties: {
@@ -113,7 +119,10 @@ function nativeForm(params, approval) {
  * The relay leaves public tool descriptors, instructions, and result blocks
  * with the original server and changes only the host-specific identity seams.
  */
-export async function runClaudeBridge({ command, args = [], cwd, env, log = openDiagnosticLog({ adapter: 'claude' }) } = {}) {
+export async function runClaudeBridge({
+  command, args = [], cwd, env, log = openDiagnosticLog({ adapter: 'claude' }),
+  shutdownDrainMs = SHUTDOWN_DRAIN_TIMEOUT_MS,
+} = {}) {
   if (!nonEmptyString(command) || !Array.isArray(args) ||
       args.some(argument => typeof argument !== 'string')) {
     throw new TypeError('Claude bridge requires the original MCP command and string arguments');
@@ -382,12 +391,24 @@ export async function runClaudeBridge({ command, args = [], cwd, env, log = open
     const closeUpstreamAfterTurnCleanup = () => {
       if (shutdown) return shutdown;
       shutdown = (async () => {
-        for (const turn of [...activeTurns.values()]) {
-          try {
-            await turnEnded(turn.sessionId, turn.turnId, 'Interrupt');
-          } catch (error) {
-            console.error('Claude MCP turn cleanup during shutdown failed:', asError(error));
+        const drain = (async () => {
+          for (const turn of [...activeTurns.values()]) {
+            try {
+              await turnEnded(turn.sessionId, turn.turnId, 'Interrupt');
+            } catch (error) {
+              console.error('Claude MCP turn cleanup during shutdown failed:', asError(error));
+            }
           }
+        })();
+        let timer;
+        const drained = await Promise.race([drain.then(() => true), new Promise(resolve => {
+          timer = setTimeout(resolve, shutdownDrainMs, false);
+        })]);
+        clearTimeout(timer);
+        if (!drained) {
+          console.error(`Claude MCP turn cleanup during shutdown did not finish within ${shutdownDrainMs} ms; ` +
+            'closing the original server');
+          log.event('shutdown_drain', { ms: shutdownDrainMs, outcome: 'timeout' });
         }
         if (connected) {
           connected = false;
@@ -404,11 +425,13 @@ export async function runClaudeBridge({ command, args = [], cwd, env, log = open
     server.onclose = () => { void closeUpstreamAfterTurnCleanup(); };
     const transport = new StdioServerTransport();
     const closeDownstream = () => {
-      void closeUpstreamAfterTurnCleanup().finally(() => {
-        if (!serverClose) serverClose = server.close().catch(error => {
-          console.error('Claude MCP relay close failed:', asError(error));
-        });
+      // The host is gone. Closing the server aborts its in-flight calls, which cancels them upstream and
+      // starts their Interrupt cleanup, and its onclose drains the remaining turns before closing upstream.
+      // Draining first would wait for each in-flight call to end on its own.
+      if (!serverClose) serverClose = server.close().catch(error => {
+        console.error('Claude MCP relay close failed:', asError(error));
       });
+      void closeUpstreamAfterTurnCleanup();
     };
     await server.connect(transport);
     // The SDK's stdio server transport owns MCP framing but does not surface stdin EOF.

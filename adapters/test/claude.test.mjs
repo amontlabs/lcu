@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
@@ -578,6 +579,54 @@ test('Claude relay interrupts an active turn on cancel and drains cleanup before
       entry.args.session_id === 'close-session').length, 1);
   } finally {
     await closed.close();
+  }
+});
+
+test('Claude relay ends within seconds when its host goes away during a call whose cleanup never finishes', async () => {
+  // The host is killed: the relay only sees stdin EOF and nobody sends it a signal.
+  const { SHUTDOWN_DRAIN_TIMEOUT_MS } = await import('../claude.mjs');
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-relay-gone-'));
+  const logPath = join(directory, 'original-fixture.jsonl');
+  const logs = () => readRecords(logPath);
+  const child = spawn(process.execPath, [relay, process.execPath, fixture], {
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: directory, TMPDIR: directory,
+      LCU_FIXTURE_LOG: logPath, LCU_LOG_DIR: join(directory, 'diagnostics') },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  child.stdout.resume();
+  child.stderr.resume();
+  const send = message => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
+  try {
+    send({ id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {},
+      clientInfo: { name: 'claude-relay-gone-test', version: '1' } } });
+    send({ method: 'notifications/initialized' });
+    // A 'hold-' session's original turn_ended never answers, and the call ignores its cancellation.
+    send({ id: 2, method: 'tools/call', params: { name: 'set_turn_context',
+      arguments: { session_id: 'hold-gone', turn_id: 'gone-turn', tool_use_id: 'gone-use' } } });
+    send({ id: 3, method: 'tools/call', params: { name: 'js', arguments: { code: 'ignore-cancel' },
+      _meta: { 'claudecode/toolUseId': 'gone-use' } } });
+    await waitFor(() => logs().some(entry => entry.type === 'active-call-start' && entry.code === 'ignore-cancel'));
+    const started = Date.now();
+    child.stdin.end();
+    await Promise.race([exited, new Promise(resolve => setTimeout(resolve, SHUTDOWN_DRAIN_TIMEOUT_MS + 8_000))]);
+    const elapsed = Date.now() - started;
+    assert.notEqual(child.exitCode ?? child.signalCode, null, `relay still running ${elapsed} ms after its host went away`);
+    assert.ok(elapsed < SHUTDOWN_DRAIN_TIMEOUT_MS + 3_000, `relay took ${elapsed} ms to exit`);
+    const events = logs();
+    const aborted = events.findIndex(entry => entry.type === 'active-call-aborted' && entry.code === 'ignore-cancel');
+    const cleanup = events.findIndex(entry => entry.type === 'turn-ended' && entry.args.session_id === 'hold-gone' &&
+      entry.args.hook_event_name === 'Interrupt');
+    const exit = events.findIndex(entry => entry.type === 'fixture-exit');
+    assert.ok(aborted >= 0 && cleanup > aborted && exit > cleanup,
+      'the relay cancels the call, then starts Interrupt cleanup, then closes the original server');
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    const started = logs().find(entry => entry.type === 'fixture-start');
+    if (started && !logs().some(entry => entry.type === 'fixture-exit')) {
+      try { process.kill(started.pid, 'SIGKILL'); } catch {}
+    }
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
