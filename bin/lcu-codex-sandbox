@@ -1,14 +1,19 @@
-#!/usr/bin/env python3
-from pathlib import Path
-import sys
-sys.dont_write_bytecode = True
-
-root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(root))
-from lcu import interpreter
-try:
-    interpreter.ensure(Path(__file__).resolve(), sys.argv[1:])
-except ValueError as exc:
-    sys.exit(f'LCU: {exc}')
-from lcu.sandbox_shim import main
-sys.exit(main(sys.argv[1:]))
+#!/bin/sh
+# Run the ChatGPT app's own Node on lcu/sandbox_shim.mjs (lcu-codex-sandbox). Contract: docs/REMOVE-PYTHON.md, "Launcher contract".
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink -- "$self") || break
+  case $link in /*) self=$link ;; *) self=${self%/*}/$link ;; esac
+done
+case $self in */*) root=${self%/*}/.. ;; *) root=.. ;; esac
+node=${LCU_NODE-}
+[ -f "$root/node-path" ] && { IFS= read -r node < "$root/node-path" || :; }
+if [ -z "$node" ] || [ ! -x "$node" ]; then
+  if [ -f "$root/node-path" ]; then
+    printf 'LCU: the ChatGPT app'\''s Node (%s) is missing or not executable. Repair or update the ChatGPT app, then reinstall LCU.\n' "$node" >&2
+  else
+    printf 'LCU: this LCU tree records no Node (node-path) and LCU_NODE is not set. Reinstall LCU, or set LCU_NODE in a source checkout.\n' >&2
+  fi
+  exit 1
+fi
+exec "$node" "$root/lcu/sandbox_shim.mjs" "$@"

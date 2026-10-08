@@ -1,0 +1,272 @@
+import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { chmodSync, mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+
+import {
+  MAC_HELPER, MAC_REQUIRED_FILES, MAC_SOCKET_ENV, MAC_SOCKET_SUFFIX, accounts, aclWritersUntrusted, macSocketPath,
+  macSocketPathProblem, plistStrings, resolveInstalledLinuxApp, resolveInstalledMacApp, untrustedEntry,
+} from '../../lcu/platforms.mjs';
+import { linuxApp, override, temporary, write } from './fixtures.mjs';
+
+const VERSION = '26.924.22138';
+const RUNTIME = '0.0.24/20260924074400-f52ea85e2a98';
+
+const plist = (values) => '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" ' +
+  '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n' +
+  Object.entries(values).map(([key, value]) => `\t<key>${key}</key>\n\t<string>${value}</string>\n`).join('') + '</dict>\n</plist>\n';
+
+function macApp(t) {
+  const app = join(temporary(t), 'ChatGPT.app');
+  const contents = join(app, 'Contents');
+  write(join(contents, 'Info.plist'), plist({ CFBundleIdentifier: 'com.openai.codex', CFBundleShortVersionString: VERSION }));
+  write(join(contents, MAC_HELPER, 'Contents/Info.plist'), plist({ CFBundleIdentifier: 'com.openai.sky.CUAService' }));
+  write(join(contents, 'Resources/cua_node/manifest.json'), JSON.stringify({ platform: 'darwin', arch: 'arm64', runtime_archive_version: RUNTIME }));
+  for (const relative of MAC_REQUIRED_FILES) write(join(contents, relative), relative, 0o755);
+  const cli = write(join(contents, 'Resources/codex-cli/bin/codex'), 'original cli', 0o755);
+  const host = write(join(contents, 'Resources/codex-cli/bin/codex-code-mode-host'), 'original code-mode host', 0o755);
+  return { app, contents, cli, host };
+}
+
+function codesign({ verify = 0, team = '2DC432GLL2' } = {}) {
+  const calls = [];
+  const fake = (command, args) => {
+    calls.push([command, ...args]);
+    if (args.includes('--verify')) return { status: verify, stdout: '', stderr: verify ? 'invalid' : '' };
+    const identifier = args.at(-1).endsWith('ChatGPT.app') ? 'com.openai.codex' : 'com.openai.sky.CUAService';
+    return { status: 0, stdout: '', stderr: `Identifier=${identifier}\nTeamIdentifier=${team}\n` };
+  };
+  fake.calls = calls;
+  return fake;
+}
+
+function onMac(t, fake = codesign()) {
+  override(t, process, 'platform', 'darwin');
+  t.mock.method(childProcess, 'spawnSync', fake);
+  return fake;
+}
+
+test('a macOS app is accepted in place with its version, runtime and relocated original CLI, each signature checked once', (t) => {
+  const { app, cli, host } = macApp(t);
+  const fake = onMac(t);
+  const result = resolveInstalledMacApp(app, { arch: 'arm64' });
+  assert.deepEqual([result.app, result.version, result.runtimeVersion, result.arch, result.codexCli, result.codeModeHost],
+    [app, VERSION, RUNTIME, 'arm64', cli, host]);
+  assert.deepEqual(fake.calls.map((call) => call.slice(1, -1).join(' ')),
+    ['--verify --deep --strict', '-dv --verbose=2', '--verify --deep --strict', '-dv --verbose=2']);
+  assert.ok(fake.calls.every(([command]) => command === '/usr/bin/codesign'));
+});
+
+test('a compatible update is accepted without version, runtime or hash pins', (t) => {
+  const { app, contents, cli } = macApp(t);
+  write(join(contents, 'Info.plist'), plist({ CFBundleIdentifier: 'com.openai.codex', CFBundleShortVersionString: '26.999.12345' }));
+  write(join(contents, 'Resources/cua_node/manifest.json'), JSON.stringify({ platform: 'darwin', arch: 'arm64', runtime_archive_version: '0.0.99/new' }));
+  writeFileSync(cli, 'updated signed app CLI');
+  onMac(t);
+  const result = resolveInstalledMacApp(app, { arch: 'arm64' });
+  assert.deepEqual([result.version, result.runtimeVersion], ['26.999.12345', '0.0.99/new']);
+});
+
+test('missing files, partial CLI layouts, wrong identity, architecture or host are refused', (t) => {
+  const { app, contents, cli } = macApp(t);
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64' }), /only be validated on macOS/);
+  onMac(t);
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'x86' }), /Unsupported macOS architecture/);
+  unlinkSync(join(contents, MAC_REQUIRED_FILES[0]));
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64' }), /Required application file is missing/);
+  write(join(contents, MAC_REQUIRED_FILES[0]), 'node', 0o755);
+  unlinkSync(cli);
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64' }), /complete original Codex CLI layout/);
+  write(cli, 'cli', 0o755);
+  write(join(contents, 'Info.plist'), plist({ CFBundleIdentifier: 'wrong.identifier', CFBundleShortVersionString: VERSION }));
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64' }), /Unexpected application bundle identifier/);
+});
+
+test('an invalid signature or another signer is refused', (t) => {
+  const { app } = macApp(t);
+  onMac(t, codesign({ verify: 1 }));
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64' }), /signature verification failed/);
+  childProcess.spawnSync.mock.mockImplementation(codesign({ team: 'another-team' }));
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64' }), /signer does not match/);
+});
+
+test('binary property lists are read too, and nested keys never count', () => {
+  const binary = Buffer.from('YnBsaXN0MDDUAQIDBAUGBwlfEBJDRkJ1bmRsZUlkZW50aWZpZXJfEBpDRkJ1bmRsZVNob3J0VmVyc2lvblN0cmluZ1ZOZXN0ZWRTVW5pXxAZY29tLm9wZW5haS5za3kuQ1VBU2VydmljZVQyNi4x0QEIUXhiAOkmAwgRJkNKTmpvcnQAAAAAAAABAQAAAAAAAAAKAAAAAAAAAAAAAAAAAAAAeQ==', 'base64');
+  assert.deepEqual(plistStrings(binary), { CFBundleIdentifier: 'com.openai.sky.CUAService', CFBundleShortVersionString: '26.1', Uni: 'é☃' });
+  const nested = '<plist><dict><key>Types</key><array><dict><key>CFBundleIdentifier</key><string>evil</string></dict></array>' +
+    '<key>CFBundleIdentifier</key><string>com.openai.codex</string><key>E</key><string/><key>A&amp;B</key><string>x&lt;y</string></dict></plist>';
+  assert.deepEqual(plistStrings(Buffer.from(nested)), { CFBundleIdentifier: 'com.openai.codex', E: '', 'A&B': 'x<y' });
+});
+
+const SUFFIX = `/${MAC_SOCKET_SUFFIX}`;
+const homeOfLength = (size) => `/Users/${'a'.repeat(size - SUFFIX.length - '/Users/'.length)}`;
+const realHome = (t, homedir) => t.mock.method(os, 'userInfo', () => ({ homedir, username: 'fixture' }));
+
+test('the helper socket path: 103 bytes pass, 104 do not, bytes not characters count', (t) => {
+  assert.equal(Buffer.byteLength(SUFFIX), 83);
+  realHome(t, homeOfLength(103));
+  assert.deepEqual(macSocketPath({}), { path: homeOfLength(103) + SUFFIX, overridden: false });
+  assert.equal(macSocketPathProblem({}), null);
+  os.userInfo.mock.mockImplementation(() => ({ homedir: homeOfLength(104) }));
+  const message = macSocketPathProblem({});
+  for (const part of ['is 104 bytes (macOS limit 103)', homeOfLength(104) + SUFFIX, 'home folder', 'LCU cannot change the signed helper']) {
+    assert.ok(message.includes(part), part);
+  }
+  for (const [name, fails] of [['a'.repeat(13), false], ['a'.repeat(14), true]]) {
+    os.userInfo.mock.mockImplementation(() => ({ homedir: `/Users/${name}` }));
+    assert.equal(Boolean(macSocketPathProblem({})), fails);
+  }
+  os.userInfo.mock.mockImplementation(() => ({ homedir: `/Users/${'é'.repeat(13)}` }));
+  assert.match(macSocketPathProblem({}), /is 116 bytes/);
+});
+
+test('the default socket path uses the real home, an override replaces it, an empty one is ignored', (t) => {
+  realHome(t, '/Users/real');
+  assert.deepEqual(macSocketPath({ HOME: `/tmp/${'x'.repeat(200)}` }), { path: `/Users/real${SUFFIX}`, overridden: false });
+  assert.deepEqual(macSocketPath({ [MAC_SOCKET_ENV]: '' }), { path: `/Users/real${SUFFIX}`, overridden: false });
+  assert.deepEqual(macSocketPath({ [MAC_SOCKET_ENV]: '/tmp/s.sock' }), { path: '/tmp/s.sock', overridden: true });
+  const message = macSocketPathProblem({ [MAC_SOCKET_ENV]: `/tmp/${'b'.repeat(99)}` });
+  assert.match(message, /104 bytes/);
+  assert.ok(message.includes(MAC_SOCKET_ENV));
+  assert.ok(!message.includes('home folder, so'));
+});
+
+test('an installed Linux app is selected in place with its actual versions', (t) => {
+  const app = linuxApp(join(temporary(t), 'chatgpt'), { relocated: true });
+  const result = resolveInstalledLinuxApp(app, { arch: 'arm64' });
+  assert.deepEqual([result.app, result.version, result.runtimeVersion, result.codexCli],
+    [app, VERSION, 'runtime-new', join(app, 'resources/codex-cli/bin/codex')]);
+});
+
+test('a Linux app missing a required file or built for another architecture is refused', (t) => {
+  const base = temporary(t);
+  const app = linuxApp(join(base, 'chatgpt'));
+  unlinkSync(join(app, 'resources/cua_node/bin/node_repl'));
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /Application payload is incomplete/);
+  const other = linuxApp(join(base, 'other'), { arch: 'x64' });
+  assert.throws(() => resolveInstalledLinuxApp(other, { arch: 'arm64' }), /unsupported platform, architecture/);
+});
+
+test('the version falls back to the dpkg package that owns the exact executable path', (t) => {
+  const app = linuxApp(join(temporary(t), 'chatgpt'));
+  writeFileSync(join(app, 'resources/app.asar'), 'not an archive');
+  const queries = [];
+  t.mock.method(childProcess, 'spawnSync', (command, args) => {
+    queries.push([command, ...args]);
+    if (args[0] === '-S') return { status: 0, stdout: `chatgpt:arm64: ${join(app, 'ChatGPT')}\nother: ${join(app, 'ChatGPT')}x\n` };
+    return { status: 0, stdout: '26.1.2 arm64' };
+  });
+  assert.equal(resolveInstalledLinuxApp(app, { arch: 'arm64' }).version, '26.1.2');
+  assert.deepEqual(queries.map((query) => query.slice(0, 2)), [['dpkg-query', '-S'], ['dpkg-query', '-W']]);
+  childProcess.spawnSync.mock.mockImplementation((command, args) => (args[0] === '-S'
+    ? { status: 0, stdout: `chatgpt:arm64: ${join(app, 'ChatGPT')}\n` } : { status: 0, stdout: '26.1.2 amd64' }));
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /wrong architecture/);
+});
+
+test('an app tree writable by other accounts is refused, including writable ancestors; a sticky directory is fine', (t) => {
+  const base = temporary(t);
+  const app = linuxApp(join(base, 'shared/chatgpt'));
+  resolveInstalledLinuxApp(app, { arch: 'arm64' });
+  chmodSync(join(app, 'resources/cua_node/bin'), 0o777);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /not in a location only root and this account/);
+  chmodSync(join(app, 'resources/cua_node/bin'), 0o755);
+  chmodSync(join(app, 'resources/cua_node/bin/node'), 0o757);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /writable by group or other/);
+  chmodSync(join(app, 'resources/cua_node/bin/node'), 0o755);
+  chmodSync(join(base, 'shared'), 0o777);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /shared is writable/);
+  chmodSync(join(base, 'shared'), 0o1777);
+  resolveInstalledLinuxApp(app, { arch: 'arm64' });
+});
+
+test('an app tree owned by another account is refused unless trusted', { skip: process.getuid() === 0 && 'root-owned files are always trusted' }, (t) => {
+  const app = linuxApp(join(temporary(t), 'chatgpt'));
+  const owner = process.getuid();
+  override(t, process, 'getuid', () => owner + 1);
+  override(t, process, 'geteuid', () => owner + 1);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), new RegExp(`owned by uid ${owner}`));
+  assert.equal(resolveInstalledLinuxApp(app, { arch: 'arm64', trustedUids: [owner] }).app, app);
+});
+
+test('links: escaping the app is refused, links inside it are followed and validated, cycles end', (t) => {
+  const base = temporary(t);
+  const app = linuxApp(join(base, 'chatgpt'));
+  const modules = join(app, 'resources/cua_node/lib/node_modules');
+  const payload = write(join(app, 'resources/shared/dependency.js'), 'export {};\n');
+  symlinkSync(join(app, 'resources/shared'), join(modules, 'linked'));
+  const helper = write(join(app, 'resources/helper.mjs'), 'export {};\n');
+  symlinkSync(helper, join(modules, 'helper.mjs'));
+  symlinkSync(modules, join(modules, 'loop'));
+  symlinkSync(join(modules, 'loop'), join(modules, 'again'));
+  resolveInstalledLinuxApp(app, { arch: 'arm64' });
+  chmodSync(payload, 0o666);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /dependency\.js is writable by group or other/);
+  chmodSync(payload, 0o644);
+  chmodSync(helper, 0o666);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /helper\.mjs is writable by group or other/);
+  chmodSync(helper, 0o644);
+  mkdirSync(join(base, 'outside'));
+  symlinkSync(join(base, 'outside'), join(app, 'resources/plugins/openai-bundled/plugins/chrome/escape'));
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /escape links outside the application/);
+  unlinkSync(join(app, 'resources/plugins/openai-bundled/plugins/chrome/escape'));
+  const outside = linuxApp(join(base, 'elsewhere'));
+  rmSync(join(app, 'resources/cua_node/bin'), { recursive: true });
+  symlinkSync(join(outside, 'resources/cua_node/bin'), join(app, 'resources/cua_node/bin'));
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /outside the application/);
+});
+
+test('executed plugin trees are covered', (t) => {
+  const app = linuxApp(join(temporary(t), 'chatgpt'));
+  const script = write(join(app, 'resources/plugins/openai-bundled/plugins/browser/scripts/run.mjs'), 'export {};\n', 0o666);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /writable by group or other/);
+  chmodSync(script, 0o644);
+  const diagnostic = write(join(app, 'resources/plugins/openai-bundled/plugins/chrome/scripts/diagnostics/status.mjs'), '', 0o646);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /writable by group or other/);
+  chmodSync(diagnostic, 0o644);
+  resolveInstalledLinuxApp(app, { arch: 'arm64' });
+});
+
+test('group write needs every group member trusted, and then the ACL decides', (t) => {
+  const app = linuxApp(join(temporary(t), 'chatgpt'));
+  const node = join(app, 'resources/cua_node/bin/node');
+  chmodSync(node, 0o775);
+  const stranger = process.getuid() + 1000;
+  const members = t.mock.method(accounts, 'groupMembers', () => new Set([stranger]));
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /writable by group or other/);
+  members.mock.mockImplementation(() => null);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /writable by group or other/);
+  members.mock.mockImplementation(() => new Set([0, process.getuid()]));
+  const acls = t.mock.method(accounts, 'readAcls', (paths) => new Map(paths.map((path) => [path, []])));
+  resolveInstalledLinuxApp(app, { arch: 'arm64' });
+  assert.deepEqual(acls.mock.calls.map((call) => call.arguments[0]), [[node]], 'one getfacl run, only for the group-writable entry');
+  acls.mock.mockImplementation(() => new Map([[node, [{ tag: 'user', id: stranger, perm: 'rw-' }, { tag: 'mask', id: null, perm: 'rwx' }]]]));
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), new RegExp(`node is writable by uid ${stranger} through a POSIX ACL`));
+  acls.mock.mockImplementation(() => null);
+  assert.throws(() => resolveInstalledLinuxApp(app, { arch: 'arm64' }), /POSIX ACL cannot be read/);
+});
+
+test('group zero is not trusted by its number alone, and named ACL entries count only through the mask', () => {
+  const info = { uid: 0, gid: 0, mode: 0o100664, isSymbolicLink: () => false, isDirectory: () => false };
+  assert.ok(untrustedEntry(info, new Set([0]), () => new Set([0, 1234])));
+  assert.equal(untrustedEntry(info, new Set([0]), () => new Set([0])), 'acl');
+  assert.equal(untrustedEntry({ ...info, mode: 0o100644 }, new Set([0]), () => null), null);
+  const none = () => new Set();
+  const mask = (perm) => ({ tag: 'mask', id: null, perm });
+  assert.match(aclWritersUntrusted([{ tag: 'user', id: 4242, perm: 'rw-' }, mask('rwx')], new Set([0]), none), /uid 4242 through a POSIX ACL/);
+  assert.equal(aclWritersUntrusted([{ tag: 'user', id: 4242, perm: 'rw-' }, mask('r-x')], new Set([0]), none), null);
+  assert.equal(aclWritersUntrusted([{ tag: 'user', id: 4242, perm: 'r--' }, mask('rwx')], new Set([0]), none), null);
+  assert.equal(aclWritersUntrusted([{ tag: 'user', id: 4242, perm: 'rw-' }, mask('rwx')], new Set([0, 4242]), none), null);
+  assert.match(aclWritersUntrusted([{ tag: 'group', id: 50, perm: 'rw-' }, mask('rwx')], new Set([0]), () => new Set([4242])), /group 50/);
+});
+
+test('getfacl output is read per file, with escaped names', (t) => {
+  t.mock.method(childProcess, 'spawnSync', (command, args) => {
+    assert.equal(command, 'getfacl');
+    assert.ok(args.includes('--skip-base'));
+    return { status: 0, stdout: '# file: /a\\040b\n# owner: 0\n# group: 0\nuser::rwx\nuser:4242:rw-\ngroup::r-x\nmask::rwx\nother::r-x\n\n' };
+  });
+  assert.deepEqual(accounts.readAcls(['/a b']).get('/a b'),
+    [{ tag: 'user', id: null, perm: 'rwx' }, { tag: 'user', id: 4242, perm: 'rw-' }, { tag: 'group', id: null, perm: 'r-x' }, { tag: 'mask', id: null, perm: 'rwx' }]);
+});

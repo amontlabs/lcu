@@ -25,7 +25,7 @@ const TURN_METADATA_LIMIT = 128;
 // background and finishPendingCleanup() gates the next Sky request on it.
 const TURN_CLEANUP_HOOK_TIMEOUT_MS = 4_000;
 // How long to wait for the private lifetime host: its TURN_ENDED_CLI_TIMEOUT_SECONDS
-// (10 s, lcu/macos_host.py) plus 2 s for the socket round trip. Keep it above the host.
+// (10 s, lcu/macos_host.mjs) plus 2 s for the socket round trip. Keep it above the host.
 export const LIFETIME_SIGNAL_TIMEOUT_MS = 12_000;
 // The original command is retried once, at the next Sky request, then dropped.
 const CLI_CLEANUP_ATTEMPTS = 2;
