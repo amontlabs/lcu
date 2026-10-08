@@ -211,6 +211,9 @@ test('install.sh hands over to the Node installer on the app Node, and the 0.9.7
     assert.deepEqual(readFileSync(join(base, 'argv'), 'utf8').trim().split('\n'),
       [join(REPO, 'scripts/install.mjs'), '--prefix', '/opt/y', `--existing-app=${app}`, '--skip-system']);
   }
+  result = run([join(REPO, 'scripts/install.sh'), '--existing-app', join(base, 'missing'), '--help']);
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, readFileSync(join(REPO, 'scripts/install-usage.txt'), 'utf8'));
   result = run([join(REPO, 'scripts/install.sh'), '--existing-app', join(base, 'missing')]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /chatgpt\.com\/download/);

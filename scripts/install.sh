@@ -31,6 +31,13 @@ case $app in '~') app=$HOME ;; '~/'*) app=$HOME/${app#'~/'} ;; esac
 
 if [ "$system" = Darwin ]; then node_dir=$app/Contents/Resources/cua_node/bin; else node_dir=$app/resources/cua_node/bin; fi
 if ! node_dir=$(cd -P -- "$node_dir" 2>/dev/null && pwd -P) || [ ! -f "$node_dir/node" ] || [ ! -x "$node_dir/node" ]; then
+  # `--help` works without the app; the text is the one the Node installer prints.
+  for arg do
+    case $arg in -h|--help)
+      while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$source_dir/scripts/install-usage.txt"
+      exit 0 ;;
+    esac
+  done
   fail "LCU requires the official ChatGPT desktop app, which includes Codex, to be installed first. LCU does not download or install the app. No app with its Node was found at $app. Install it from https://chatgpt.com/download/ and rerun LCU. If it is installed elsewhere, pass --existing-app PATH."
 fi
 node=$node_dir/node

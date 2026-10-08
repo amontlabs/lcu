@@ -71,8 +71,8 @@ POSIX_MODULES = {'session.mjs'}
 # The installers. install.py, install_macos.py and install_windows.py are logic-free stubs that LCU 0.9.7's
 # `lcu update` runs with its own Python; they hand over to the Node installer.
 SHIPPED_SCRIPTS = {
-    'linux': ('install.sh', 'install.mjs', 'bundle.mjs', 'install.py'),
-    'darwin': ('install.sh', 'install.mjs', 'bundle.mjs', 'install.py', 'install_macos.py'),
+    'linux': ('install.sh', 'install.mjs', 'install-usage.txt', 'bundle.mjs', 'install.py'),
+    'darwin': ('install.sh', 'install.mjs', 'install-usage.txt', 'bundle.mjs', 'install.py', 'install_macos.py'),
     'windows': ('install.ps1', 'install_windows.mjs', 'bundle.mjs', 'windows_launcher.mjs', 'install_windows.py'),
 }
 

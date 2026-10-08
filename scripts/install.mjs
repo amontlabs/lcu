@@ -187,22 +187,8 @@ const OPTIONS = {
   'app-package': { type: 'string' }, 'existing-app': { type: 'string' }, offline: { type: 'boolean', default: false },
 };
 
-const USAGE = `usage: scripts/install.sh [--prefix PREFIX] [--runtime-only | --agent AGENT ... | --export PATH] [options]
-
-Install LCU beside the locally installed ChatGPT app. Linux needs X11 and D-Bus; apt provisioning needs root.
-
-  --prefix PREFIX       installation prefix (Linux: /opt/lcu; macOS: ~/.local/share/lcu)
-  --existing-app PATH   the installed app (Linux: /usr/lib/chatgpt; macOS: /Applications/ChatGPT.app)
-  --runtime-only        install without registering an agent
-  --agent AGENT         agent to register; repeat, or use all or auto (--list-agents lists them)
-  --user USER           target account; root must select one
-  --yes                 apply explicit choices without a confirmation prompt
-  --skip-system         Linux: skip apt; system libraries must already exist
-  --offline             never use the network; requires --skip-system
-  --scope, --project, --export, --chrome, --no-chrome, --audio, --no-audio, --approval, --session,
-  --allow-missing, --check-desktop
-                        passed to \`lcu setup\`; see \`lcu setup --help\`
-`;
+// One help text for install.sh, which prints it when no app Node is found, and for this installer.
+const USAGE = readFileSync(join(SOURCE, 'scripts/install-usage.txt'), 'utf8');
 
 /** `lcu setup` arguments for the options given, in the order `lcu setup` documents them. */
 function setupArguments(values, user) {
