@@ -550,13 +550,13 @@ export async function status(root, family = 'chrome') {
   return enabled && connected;
 }
 
-const USAGE = 'usage: lcu browser {install [--directory DIR] | status [--browser chrome|edge]}';
+const USAGE = 'Usage: lcu browser {install [--directory DIR] | status [--browser chrome|edge]}';
 
 /** `lcu browser ARGV`; returns the exit status. */
 export async function main(root, argv) {
   const [action, ...rest] = argv;
   if (action === 'serve' || action === 'protocol') {
-    warn(USAGE, 'lcu browser: error: the in-app browser host and codex:// protocol commands were removed; use the ' +
+    warn('lcu browser: the in-app browser host and codex:// protocol commands were removed; use the ' +
       'installed app browser. For external Chrome, run `lcu browser install` and enable the official ChatGPT extension.');
     return 2;
   }
@@ -569,16 +569,15 @@ export async function main(root, argv) {
   let values;
   try {
     if (!['install', 'status'].includes(action)) {
-      throw new Error(action === undefined ? 'the following arguments are required: action'
-        : `argument action: invalid choice: '${action}' (choose from install, status)`);
+      throw new Error(action === undefined ? 'Name an action: install or status.' : `Unknown action '${action}'; use install or status.`);
     }
     const options = action === 'install' ? { directory: { type: 'string' } } : { browser: { type: 'string', default: 'chrome' } };
     ({ values } = parseArgs({ args: rest, options }));
     if (action === 'status' && !['chrome', 'edge'].includes(values.browser)) {
-      throw new Error(`argument --browser: invalid choice: '${values.browser}' (choose from chrome, edge)`);
+      throw new Error(`Unknown browser '${values.browser}'; use chrome or edge.`);
     }
   } catch (error) {
-    warn(USAGE, `lcu browser: error: ${error.message}`);
+    warn(`lcu browser: ${error.message}`, "Run 'lcu browser --help' for usage.");
     return 2;
   }
   if (action === 'status') return (await status(root, values.browser)) ? 0 : 1;

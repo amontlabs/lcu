@@ -1,4 +1,4 @@
-usage: scripts/install.sh [--prefix PREFIX] [--runtime-only | --agent AGENT ... | --export PATH] [options]
+Usage: scripts/install.sh [--prefix PREFIX] [--runtime-only | --agent AGENT ... | --export PATH] [options]
 
 Install LCU beside the locally installed ChatGPT app. Linux needs X11 and D-Bus; apt provisioning needs root.
 

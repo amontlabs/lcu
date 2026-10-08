@@ -267,7 +267,7 @@ function printWindowsStatus(report) {
   return Boolean(windows.ok);
 }
 
-const USAGE = 'usage: lcu doctor [--non-interactive] [--require-ready]';
+const USAGE = 'Usage: lcu doctor [--non-interactive] [--require-ready]';
 const HELP = `${USAGE}
 
 Check the original desktop provider and guide first-use permissions.
@@ -282,7 +282,7 @@ export async function main(root, argv, { resolved, env } = {}) {
     ({ values } = parseArgs({ args: argv, options: { 'non-interactive': { type: 'boolean' }, 'require-ready': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' } } }));
   } catch (error) {
-    warn(`${USAGE}\nlcu doctor: error: ${error.message}`);
+    warn(`lcu doctor: ${error.message}`, "Run 'lcu doctor --help' for usage.");
     return 2;
   }
   if (values.help) {

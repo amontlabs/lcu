@@ -47,7 +47,7 @@ export async function collect(root) {
   };
 }
 
-const USAGE = 'usage: lcu status [-h] [--json]\n\nReport the installed LCU release, the selected app and whether the pair is tested.\n\n' +
+const USAGE = 'Usage: lcu status [-h] [--json]\n\nReport the installed LCU release, the selected app and whether the pair is tested.\n\n' +
   '  --json  print one JSON object instead of text\n';
 
 /** `lcu status ARGV` for the release `root`; returns the exit status. */
@@ -56,7 +56,7 @@ export async function main(root, argv = []) {
   try {
     ({ values } = parseArgs({ args: argv, options: { json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } }));
   } catch (error) {
-    warn(`${USAGE}lcu status: error: ${error.message}`);
+    warn(`lcu status: ${error.message}`, "Run 'lcu status --help' for usage.");
     return 2;
   }
   if (values.help) {

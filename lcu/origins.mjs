@@ -387,7 +387,7 @@ async function forgetCommand(args, home) {
   return problems.length ? 1 : 0;
 }
 
-export const USAGE = 'usage: lcu origins [list] [--session ID] [--json]\n' +
+export const USAGE = 'Usage: lcu origins [list] [--session ID] [--json]\n' +
   '       lcu origins forget ORIGIN [--session ID | --all-sessions] [--allowed | --denied]';
 const HELP = `${USAGE}
 
@@ -413,12 +413,12 @@ function parseCommand(argv) {
   const options = action === 'forget'
     ? { session: { type: 'string' }, 'all-sessions': { type: 'boolean' }, allowed: { type: 'boolean' }, denied: { type: 'boolean' } }
     : { session: { type: 'string' }, json: { type: 'boolean' } };
-  if (!['list', 'forget'].includes(action)) throw new Error(`argument action: invalid choice: '${action}' (choose from list, forget)`);
+  if (!['list', 'forget'].includes(action)) throw new Error(`Unknown action '${action}'; use list or forget.`);
   const { values, positionals } = parseArgs({ args: rest, options: { ...options, help: { type: 'boolean', short: 'h' } }, allowPositionals: action === 'forget' });
   if (values.help) return { action: 'help' };
   if (action === 'forget') {
-    if (positionals.length !== 1) throw new Error(positionals.length ? `unrecognized arguments: ${positionals.slice(1).join(' ')}` : 'the following arguments are required: origin');
-    if (values.session !== undefined && values['all-sessions']) throw new Error('argument --all-sessions: not allowed with argument --session');
+    if (positionals.length !== 1) throw new Error(positionals.length ? `Unexpected argument '${positionals[1]}'.` : 'Name the origin to forget, for example https://example.com.');
+    if (values.session !== undefined && values['all-sessions']) throw new Error('Use either --session or --all-sessions, not both.');
     values.origin = positionals[0];
   }
   return { action, ...values };
@@ -436,7 +436,7 @@ export async function main(argv, { env = process.env, windows } = {}) {
   try {
     args = parseCommand(words);
   } catch (error) {
-    warn(USAGE, `lcu origins: error: ${error.message}`);
+    warn(`lcu origins: ${error.message}`, "Run 'lcu origins --help' for usage.");
     return 2;
   }
   if (args.action === 'help') {

@@ -191,7 +191,9 @@ test('removed and unknown subcommands are usage errors', async (t) => {
   const seen = await output(t);
   assert.equal(await browser.main(f.root, ['serve']), 2);
   assert.match(seen.err, /were removed/);
-  assert.equal(await browser.main(f.root, ['x']), 2);
+  assert.equal(await browser.main(f.root, ['frob']), 2);
+  assert.match(seen.err, /lcu browser: Unknown action 'frob'; use install or status\.\nRun 'lcu browser --help' for usage\./);
+  assert.doesNotMatch(seen.err, /invalid choice|: error:|usage:/);
   assert.equal(await browser.main(f.root, []), 2);
   assert.equal(await browser.main(f.root, ['status', '--browser', 'firefox']), 2);
   assert.equal(await browser.main(f.root, ['install', '--help']), 0);

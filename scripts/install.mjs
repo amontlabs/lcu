@@ -222,7 +222,7 @@ export async function main(argv) {
   } catch (error) {
     if (!(error instanceof UsageError)) throw error;
     // A usage error, as with every LCU command: exit status 2.
-    process.stderr.write(`${USAGE}LCU installer: ${error.message}\n`);
+    process.stderr.write(`LCU installer: ${error.message}\nRun 'scripts/install.sh --help' for usage.\n`);
     return 2;
   }
   if (values.help) {

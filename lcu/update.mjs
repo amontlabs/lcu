@@ -431,7 +431,7 @@ const OPTIONS = {
   json: { type: 'boolean' }, hook: { type: 'string' }, announce: { type: 'string' }, yes: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 };
-const USAGE = 'usage: lcu update [-h] [--check | --notice] [--json] [--yes]\n\n' +
+const USAGE = 'Usage: lcu update [-h] [--check | --notice] [--json] [--yes]\n\n' +
   'Find out whether a newer LCU release exists and install it.\n\n' +
   '  --check   check now without installing\n  --notice  print the cached update notice for an agent (never uses the network)\n' +
   '  --json    print JSON (with --check or --notice)\n  --yes     do not ask before installing\n';
@@ -455,7 +455,7 @@ export async function main(root, argv = []) {
   try {
     args = parse(argv);
   } catch (error) {
-    process.stderr.write(`${USAGE}lcu update: ${error.message}\n`);
+    process.stderr.write(`lcu update: ${error.message}\nRun 'lcu update --help' for usage.\n`);
     return 2;
   }
   if (args.help) {

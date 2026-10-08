@@ -292,7 +292,7 @@ async function revoke({ app }, { root, home, auth }) {
 }
 
 export const USAGE = 'lcu apps [list] [--json]\n       lcu apps allow <app>\n       lcu apps revoke <app>';
-const HELP = `usage: ${USAGE}
+const HELP = `Usage: ${USAGE}
 
 Manage the apps Computer Use may always control, without the Codex app.
 
@@ -305,12 +305,12 @@ allow and revoke ask for Touch ID or your login password; list does not.`;
 
 function parseCommand(words) {
   const [action, ...rest] = words;
-  if (!['list', 'allow', 'revoke'].includes(action)) throw new Error(`argument action: invalid choice: '${action}' (choose from list, allow, revoke)`);
+  if (!['list', 'allow', 'revoke'].includes(action)) throw new Error(`Unknown action '${action}'; use list, allow or revoke.`);
   const options = { help: { type: 'boolean', short: 'h' }, ...(action === 'list' ? { json: { type: 'boolean' } } : {}) };
   const { values, positionals } = parseArgs({ args: rest, options, allowPositionals: action !== 'list' });
   if (values.help) return { action: 'help' };
   if (action !== 'list' && positionals.length !== 1) {
-    throw new Error(positionals.length ? `unrecognized arguments: ${positionals.slice(1).join(' ')}` : 'the following arguments are required: app');
+    throw new Error(positionals.length ? `Unexpected argument '${positionals[1]}'.` : `Name the app to ${action}.`);
   }
   return { action, json: Boolean(values.json), app: positionals[0] };
 }
@@ -332,7 +332,7 @@ export async function main(root, argv, { platform = process.platform, home, auth
   try {
     args = ['-h', '--help'].includes(words[0]) ? { action: 'help' } : parseCommand(words);
   } catch (error) {
-    warn(`usage: ${USAGE}`, `lcu apps: error: ${error.message}`);
+    warn(`lcu apps: ${error.message}`, "Run 'lcu apps --help' for usage.");
     return 2;
   }
   if (args.action === 'help') {

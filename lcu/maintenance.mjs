@@ -83,7 +83,7 @@ function generationDirectory(release, apps, windows) {
   throw new Error(`Release ${basename(release)} references an app outside ${appsReal}.`);
 }
 
-const USAGE = 'usage: lcu prune [--keep N] [--yes]';
+const USAGE = 'Usage: lcu prune [--keep N] [--yes]';
 
 /** `lcu prune ARGV` from the release `root`; returns the exit status. */
 export async function main(root, argv) {
@@ -91,9 +91,9 @@ export async function main(root, argv) {
   try {
     ({ values } = parseArgs({ args: argv, options: { keep: { type: 'string', default: '2' }, yes: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false } } }));
-    if (!/^[+-]?\d+$/.test(values.keep.trim())) throw new Error(`argument --keep: invalid int value: '${values.keep}'`);
+    if (!/^[+-]?\d+$/.test(values.keep.trim())) throw new Error(`--keep takes a whole number, not '${values.keep}'.`);
   } catch (error) {
-    warn(`${USAGE}\nlcu prune: error: ${error.message}`);
+    warn(`lcu prune: ${error.message}`, "Run 'lcu prune --help' for usage.");
     return 2;
   }
   if (values.help) {

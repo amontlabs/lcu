@@ -719,14 +719,14 @@ export const OPTIONS = {
 };
 const CHOICES = { scope: ['user', 'project'], approval: ['ask', 'auto'], session: ['discover', 'direct'] };
 
-export const USAGE = 'usage: lcu setup [--agent ID ...] [--scope user|project] [--project PATH] [--yes] [--chrome | --no-chrome]\n' +
+export const USAGE = 'Usage: lcu setup [--agent ID ...] [--scope user|project] [--project PATH] [--yes] [--chrome | --no-chrome]\n' +
   '                 [--audio | --no-audio] [--approval ask|auto] [--session discover|direct] [--allow-missing]\n' +
   '                 [--reconcile] [--check-desktop] [--export PATH] [--list-agents] [--user ACCOUNT] [--prefix PATH]';
 const HELP = `${USAGE}
 
 Configure LCU tools, without requiring a running desktop.
 
-options:
+Options:
   --agent ID          Agent ID; repeat for several, all for every supported client, or auto for detected
                       clients. Use --list-agents.
   --scope user|project
@@ -756,7 +756,7 @@ Run on the machine hosting the agent backend. For Codex SSH remote projects, tha
 installs or authenticates the agent itself.
 `;
 
-/** A command-line mistake: printed with the usage, exit status 2. */
+/** A command-line mistake: exit status 2. */
 export class UsageError extends Error {}
 
 /** Parse `lcu setup` arguments (`options` adds the installer's own). */
@@ -769,7 +769,7 @@ export function parse(argv, options = {}) {
   }
   for (const [key, choices] of Object.entries(CHOICES)) {
     if (values[key] !== undefined && !choices.includes(values[key])) {
-      throw new UsageError(`argument --${key}: invalid choice: '${values[key]}' (choose from ${choices.join(', ')})`);
+      throw new UsageError(`Unknown --${key} value '${values[key]}'; use ${choices.join(' or ')}.`);
     }
   }
   values.prefix ??= defaultPrefix();
@@ -989,7 +989,7 @@ export async function main(argv, { configure: register = configure } = {}) {
   try {
     args = parse(argv);
   } catch (error) {
-    warn(USAGE, `lcu setup: error: ${error.message}`);
+    warn(`lcu setup: ${error.message}`, "Run 'lcu setup --help' for usage.");
     return 2;
   }
   if (args.help) {
