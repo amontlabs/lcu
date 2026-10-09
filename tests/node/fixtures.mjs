@@ -5,9 +5,15 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { sealRecord } from '../../lcu/platforms.mjs';
 import { VERSION, inventory } from '../../scripts/bundle.mjs';
 
 export const REPO = join(dirname(fileURLToPath(import.meta.url)), '../..');
+
+// macOS signature records go to a scratch file for each test process, never to the account's own cache.
+const records = realpathSync(mkdtempSync(join(tmpdir(), 'lcu-seal-records-')));
+sealRecord.path = () => join(records, 'macos-signatures.json');
+process.on('exit', () => rmSync(records, { recursive: true, force: true }));
 
 /**
  * The `skip` option of a test that cannot run on Windows: false elsewhere, the reason (POSIX modes, symlinks,
