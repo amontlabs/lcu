@@ -60,6 +60,19 @@ Before publishing, inspect the tar member list and unpacked tree. They must cont
 
 `lcu update --check` and the background refresh fetch that file for the latest release tag and read the marker. The notice is then prefixed "Security update:" or "Breaking update:". The marker must be on a line of its own; a mention inside other text is ignored, so notes can describe the syntax safely. Without a marker, or with any other value, the notice has no prefix. The marker must be in the notes file at the release tag, because that is the copy that is fetched; a later edit on main is not seen for an already tagged release.
 
+## Thanking outside contributors
+
+When someone outside the maintainers reports an issue that leads to a change, opens a PR, or finds a bug in review, the release that first ships that work thanks them by GitHub handle for what they actually did. When a change comes from an outside report, its PR body links the issue and thanks the person, and the commit carries a `Reported-by: Name (@handle)` trailer so release time can find it. Squash-merge an outside PR with the contributor as commit author (GitHub's default), and keep `Reported-by:` only if they also reported the problem. To collect names, look through the commits since the previous release tag for authors who are not maintainers, `Reported-by:` and `Co-authored-by:` trailers, and the issues and PRs those commits link. End the release notes with a `## Thanks` section, one line per person that combines everything they did, for example:
+
+~~~md
+## Thanks
+
+- @handle for reporting and fixing a slow host start ([#123](https://github.com/amontlabs/lcu/issues/123), [#124](https://github.com/amontlabs/lcu/pull/124))
+- @other for reporting that `lcu update` skipped a registration ([#125](https://github.com/amontlabs/lcu/issues/125))
+~~~
+
+Past release notes are not edited to add credit.
+
 ## Install and exercise an isolated fixture
 
 Prepare a disposable Ubuntu 24.04-compatible Linux desktop and account. A test may use a verified local official .deb as input, but extract it into the disposable fixture before invoking LCU:
