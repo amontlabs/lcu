@@ -1510,15 +1510,23 @@ test('Claude relay shutdown ends the children its parent cascade submits during 
 test('Claude relay recommits a prompt closure on a deduplicated Stop after history eviction', async () => {
   const bridge = await connectRelay({ crossTurn: false, maxEndedTurns: 3 });
   try {
-    await callWithContext(bridge.client, 'js', { code: 'p0' }, { sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'rc2-p' });
-    await stop(bridge.client, 'strict-p', 'strict-p0');
+    const sessionId = 'hold-strict-p';
+    const turnId = 'strict-p0';
+    await callWithContext(bridge.client, 'js', { code: 'p0' }, { sessionId, turnId, toolUseId: 'rc2-p' });
+    // P0's cleanup is held: its prompt is closed at once, its key is recorded only when the reply arrives.
+    const firstStop = stop(bridge.client, sessionId, turnId);
+    await waitFor(() => turnEnds(bridge).some(entry => entry.args.session_id === sessionId));
     for (const index of [1, 2, 3]) await stop(bridge.client, `strict-u${index}`, `u${index}`);
-    const dedupe = await stop(bridge.client, 'strict-p', 'strict-p0');
-    // Unbound Stops also fill the key history, so P0's key may be gone too; the closure is what matters.
-    assert.ok(!dedupe.isError);
+    await callWithContext(bridge.client, 'js', { code: 'release-held-cleanup' }, { sessionId: 'other', turnId: 'other', toolUseId: 'rc2-r' });
+    await firstStop;
+    // P0's prompt is now evicted from the history, but its key survives.
+    const before = turnEnds(bridge).length;
+    const dedupe = await stop(bridge.client, sessionId, turnId);
+    assert.equal(dedupe.content[0].text, 'Turn already ended.');
+    assert.equal(turnEnds(bridge).length, before, 'no additional upstream cleanup for P0');
     const child = await callWithContext(bridge.client, 'js', { code: 'c' }, {
-      sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'rc2-c', agentId: 'strict-c' });
-    assert.equal(child.isError, true);
+      sessionId, turnId, toolUseId: 'rc2-c', agentId: 'strict-c' });
+    assert.equal(child.isError, true, 'the deduplicated Stop recommitted the prompt closure');
   } finally {
     await bridge.close();
   }
