@@ -685,3 +685,34 @@ test('Pi deduplicates agent_end cleanup when shutdown overlaps it', async () => 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('Pi does not start another host to end a turn when the host never connected', async () => {
+  const oldCommand = process.env.LCU_MCP_COMMAND;
+  const oldSpawns = process.env.LCU_TEST_SPAWN_LOG;
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-pi-noconnect-'));
+  const spawns = join(directory, 'spawns');
+  // A host that exits at once: connect() fails, as it does when a start outlasts the connect timeout.
+  process.env.LCU_MCP_COMMAND = JSON.stringify([process.execPath, '-e',
+    "require('node:fs').appendFileSync(process.env.LCU_TEST_SPAWN_LOG, 'x'); process.exit(1)"]);
+  process.env.LCU_TEST_SPAWN_LOG = spawns;
+  const handlers = new Map();
+  const pi = { on(event, handler) { handlers.set(event, handler); }, registerTool() {}, registerCommand() {} };
+  const warnings = [];
+  const ctx = { sessionManager: { getSessionId: () => 'noconnect-session' }, hasUI: false,
+    ui: { notify: (message, level) => warnings.push({ message, level }) } };
+  try {
+    piExtension(pi);
+    await assert.rejects(handlers.get('before_agent_start')({ systemPrompt: 'Pi' }, ctx));
+    await handlers.get('agent_start')({}, ctx);
+    await handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, ctx);
+    await handlers.get('session_shutdown')();
+    assert.deepEqual(warnings, []);
+    assert.equal(readFileSync(spawns, 'utf8'), 'x');
+  } finally {
+    if (oldCommand === undefined) delete process.env.LCU_MCP_COMMAND;
+    else process.env.LCU_MCP_COMMAND = oldCommand;
+    if (oldSpawns === undefined) delete process.env.LCU_TEST_SPAWN_LOG;
+    else process.env.LCU_TEST_SPAWN_LOG = oldSpawns;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

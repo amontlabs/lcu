@@ -455,15 +455,21 @@ export default function (pi: ExtensionAPI, options: {
     return pending;
   }
 
-  async function finish(event: 'Stop' | 'Interrupt', reconnect = true) {
+  async function finish(event: 'Stop' | 'Interrupt') {
     if (active) pendingCleanup = { turn: active, event };
     active = undefined;
     if (cleanupInFlight) return cleanupInFlight;
     const cleanup = pendingCleanup;
     if (!cleanup) return;
     const attempt = (async () => {
-      const client = bridge ?? (reconnect ? await connected() : undefined);
-      if (!client) return;
+      // Without a connection no host knows this turn, so there is nothing to end. Starting a
+      // host only to end a turn it never saw would block Pi for a whole host start, and fail
+      // with the SDK's request timeout when that start is slow.
+      const client = bridge;
+      if (!client) {
+        if (pendingCleanup === cleanup) pendingCleanup = undefined;
+        return;
+      }
       await client.turnEnded({ ...cleanup.turn, event: cleanup.event });
       if (pendingCleanup === cleanup) pendingCleanup = undefined;
     })();
@@ -478,7 +484,7 @@ export default function (pi: ExtensionAPI, options: {
   async function leaveSession() {
     awaitingTurn = undefined;
     try {
-      await finish('Interrupt', false);
+      await finish('Interrupt');
       await retryPickerCleanup();
     } finally {
       await bridge?.close();
