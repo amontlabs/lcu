@@ -110,6 +110,15 @@ test('Linux and Windows have no owner prompt: on turns it on directly and record
   }
 });
 
+test('a file with a UTF-8 BOM reads as set; invalid UTF-8 reads as off', async (t) => {
+  const f = fixture(t);
+  write(f.path, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"enabled":true,"source":"owner"}')]));
+  const json = JSON.parse((await f.run(['--json'])).out);
+  assert.deepEqual([json.enabled, json.source], [true, 'owner']);
+  write(f.path, Buffer.concat([Buffer.from('{"enabled":true,"source":"'), Buffer.from([0xff]), Buffer.from('"}')]));
+  assert.equal(JSON.parse((await f.run(['--json'])).out).enabled, false);
+});
+
 test('a malformed file reads as off with a clear message and is only replaced when the user changes the setting', async (t) => {
   for (const content of ['{not json', '[]', '{"enabled": "yes"}', '{}', '']) {
     const f = fixture(t);

@@ -10,12 +10,17 @@ export function crossTurnSettingPath(home = homedir(), platform = process.platfo
     : posix.join(home, '.local', 'state', 'lcu', 'cross-turn.json');
 }
 
-/** Whether cross-turn Computer Use is on. Anything but a regular file with `enabled: true` is off; never throws. */
+/**
+ * Whether cross-turn Computer Use is on. Anything but a regular file with `enabled: true` is off; never throws.
+ * Decodes like lcu/cross_turn.mjs: strict UTF-8, an optional leading BOM, an object (not array) with a boolean `enabled`.
+ */
 export function crossTurnEnabled(path = crossTurnSettingPath()) {
   try {
     if (!lstatSync(path).isFile()) return false;
-    const setting = JSON.parse(readFileSync(path, 'utf8'));
-    return setting !== null && typeof setting === 'object' && !Array.isArray(setting) && setting.enabled === true;
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(path)).replace(/^\uFEFF/, '');
+    const setting = JSON.parse(text);
+    return setting !== null && typeof setting === 'object' && !Array.isArray(setting) &&
+      typeof setting.enabled === 'boolean' && setting.enabled;
   } catch {
     return false;
   }

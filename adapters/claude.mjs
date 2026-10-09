@@ -289,8 +289,9 @@ export async function runClaudeBridge({
     const current = lives.get(key);
     if (current) return current;
     if (endedKeys.has(key)) return undefined;
-    // A key this relay never bound is ended upstream without being recorded; closing its prompt (above, in
-    // turnEnded) is all later subagents need.
+    // A key this relay never bound is still ended upstream, so record it: a first bind with cross-turn on
+    // must renew instead of forwarding the ended id. The history is bounded oldest-first.
+    remember(endedKeys, key);
     const subagent = event === 'SubagentStop';
     return { key, sessionId, turnId, subagent, upstreamId: subagent ? subagentTurnId(sessionId, turnId) : turnId,
       endedUpstream: true, cleanup: null, ended: false };

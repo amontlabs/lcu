@@ -990,6 +990,11 @@ test('cross-turn setting is on only for a regular file with enabled true', () =>
       writeFileSync(path, text);
       assert.equal(crossTurnEnabled(path), expected, text);
     }
+    // Like `lcu cross-turn status`: a UTF-8 BOM is accepted, invalid UTF-8 is not.
+    writeFileSync(path, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"enabled":true}')]));
+    assert.equal(crossTurnEnabled(path), true, 'BOM');
+    writeFileSync(path, Buffer.concat([Buffer.from('{"enabled":true,"source":"'), Buffer.from([0xff]), Buffer.from('"}')]));
+    assert.equal(crossTurnEnabled(path), false, 'invalid UTF-8');
     const target = join(directory, 'real.json');
     writeFileSync(target, '{"enabled":true}');
     rmSync(path);
@@ -1509,10 +1514,45 @@ test('Claude relay recommits a prompt closure on a deduplicated Stop after histo
     await stop(bridge.client, 'strict-p', 'strict-p0');
     for (const index of [1, 2, 3]) await stop(bridge.client, `strict-u${index}`, `u${index}`);
     const dedupe = await stop(bridge.client, 'strict-p', 'strict-p0');
-    assert.equal(dedupe.content[0].text, 'Turn already ended.');
+    // Unbound Stops also fill the key history, so P0's key may be gone too; the closure is what matters.
+    assert.ok(!dedupe.isError);
     const child = await callWithContext(bridge.client, 'js', { code: 'c' }, {
       sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'rc2-c', agentId: 'strict-c' });
     assert.equal(child.isError, true);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay renews a key whose end was reported before its first bind, main and subagent', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const turnId = 'strict-unbound-end';
+    await stop(bridge.client, 'strict-main', turnId);
+    const main = await callWithContext(bridge.client, 'js', { code: 'm' }, { sessionId: 'strict-main', turnId, toolUseId: 'ub-m' });
+    assert.equal(main.isError, undefined);
+    assert.notEqual(upstreamTurnOf(bridge, 'ub-m'), turnId);
+
+    await stop(bridge.client, 'strict-agent', turnId, 'SubagentStop');
+    const child = await callWithContext(bridge.client, 'js', { code: 's' }, {
+      sessionId: 'strict-main', turnId, toolUseId: 'ub-s', agentId: 'strict-agent' });
+    assert.equal(child.isError, undefined);
+    assert.notEqual(upstreamTurnOf(bridge, 'ub-s'), subagentTurnId('strict-agent', turnId));
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay reads a cross-turn setting that starts with a UTF-8 BOM', async () => {
+  const bridge = await connectRelay({ crossTurn: false });
+  try {
+    writeFileSync(crossTurnSettingPath(bridge.directory),
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"enabled":true}')]));
+    const sessionId = 'strict-bom';
+    await callWithContext(bridge.client, 'js', { code: 'a' }, { sessionId, turnId: 'strict-bom', toolUseId: 'bom-1' });
+    await stop(bridge.client, sessionId, 'strict-bom');
+    const again = await callWithContext(bridge.client, 'js', { code: 'b' }, { sessionId, turnId: 'strict-bom', toolUseId: 'bom-2' });
+    assert.equal(again.isError, undefined);
   } finally {
     await bridge.close();
   }
