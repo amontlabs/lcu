@@ -150,7 +150,7 @@ The original package's AppArmor profile names /usr/lib/chatgpt/ChatGPT, its Elec
 
 ## Account and agent registration
 
-Use `--agent pi`, `codex`, `claude-code`, `omp`, or `hermes` to select agents. Repeat `--agent` for several; `--agent all` selects all five and fails for each harness whose prerequisite executable is missing (add [`--allow-missing`](#harnesses-installed-later) to defer them instead). OMP and Hermes restrict this combination to user scope. `--agent auto` selects detected agents (their executable is on `PATH` or their usual config path exists). With no `--agent`, an interactive setup shows a chooser and marks detected agents, but waits for you to choose. Noninteractive setup requires an explicit selection. Use `--runtime-only` to install LCU without registering an agent. Aliases are `claude`, `oh-my-pi`, and `hermes-agent`. Install and authenticate each selected harness yourself; LCU does neither. Setup runs the native harness registration tools with the release's private `agent-tools` Node runtime: on Linux this is a pinned Node 24.21 downloaded from nodejs.org into `agent-tools` when the archive is built; on macOS the build links the installed app's CUA Node. Setup then creates local byte-identical original instruction references. Pi receives an extension, OMP and Hermes receive native plugins, and Codex CLI and Claude Code receive MCP registration. Setup preserves unrelated configuration values, although upstream tools can reformat files. Root setup drops to the selected account before writing account files. Other harnesses can use the shared client and portable export.
+Use `--agent pi`, `codex`, `claude-code`, `omp`, or `hermes` to select agents. Repeat `--agent` for several; `--agent all` selects all five and fails for each harness whose prerequisite executable is missing (add [`--allow-missing`](#harnesses-installed-later) to defer them instead). OMP and Hermes restrict this combination to user scope. `--agent auto` selects detected agents (their executable is on `PATH` or their usual config path exists). With no `--agent`, an interactive setup shows a chooser and marks detected agents, but waits for you to choose. Noninteractive setup requires an explicit selection. Use `--runtime-only` to install LCU without registering an agent. Aliases are `claude`, `oh-my-pi`, and `hermes-agent`. Install and authenticate each selected harness yourself; LCU does neither. Setup runs the native harness registration tools with the release's private `agent-tools` Node runtime: on Linux this is a pinned Node 24.21 downloaded from nodejs.org into `agent-tools` when the archive is built; on macOS the build links the installed app's CUA Node. Setup then creates local byte-identical original instruction references. Pi receives an extension, OMP and Hermes receive native plugins, and Codex CLI and Claude Code receive MCP registration. Setup preserves unrelated configuration values, although upstream tools can reformat files. `--cross-turn on|off` (with `--unattended` for disposable sandbox machines) sets [cross-turn Computer Use](#cross-turn-computer-use); the installer forwards both, and rejects them with `--runtime-only` like the other setup options. Root setup drops to the selected account before writing account files. Other harnesses can use the shared client and portable export.
 
 ~~~sh
 /opt/lcu/current/bin/lcu setup --agent codex --agent claude-code
@@ -343,6 +343,28 @@ On macOS, Computer Use asks before it first uses each app and offers **Always al
 - On Linux the original runtime has no per-app approval, so `lcu apps` says so; Windows is unsupported.
 
 See the [verification record](verification/apps-command-2026-10-04.md).
+
+## Cross-turn Computer Use
+
+Normally the original service ends Computer Use for a turn when the turn ends, and refuses further calls for that turn id ("Computer Use is unavailable because the current turn ended. It will work again after the next user message."). In Claude Code that also catches a background subagent that is still working after the turn that started it ended, because subagents share their parent's prompt id. `cross-turn` is an opt-in setting that keeps Computer Use available to every turn of a session, including those subagents and a turn that reuses an ended turn id. It is off by default.
+
+~~~sh
+~/.local/share/lcu/current/bin/lcu cross-turn            # status (also: status --json)
+~/.local/share/lcu/current/bin/lcu cross-turn on         # macOS: Touch ID or your password
+~/.local/share/lcu/current/bin/lcu cross-turn off        # no prompt
+~/.local/share/lcu/current/bin/lcu cross-turn on --unattended
+~~~
+
+- `lcu setup --cross-turn on|off [--unattended]` sets the same thing (not with `--export`), and the Linux and macOS installer forwards both options (not with `--runtime-only`; the Windows installer does not accept them, so on Windows run the installed `lcu setup` or `lcu cross-turn`). On a sandbox VM provisioned without a person: `lcu setup ... --cross-turn on --unattended`. Interactive setup asks once (`[y/N]`) when nothing is stored yet; a stored choice is kept, `--yes` without the option leaves the setting unchanged, and answering no records `off`. A failed or cancelled prompt leaves the setting as it was and does not fail the rest of setup.
+- The setting is `~/.local/state/lcu/cross-turn.json` (Windows: `<account home>\AppData\Local\LCU\cross-turn.json`, for example `%USERPROFILE%\AppData\Local\LCU\cross-turn.json`), `{"enabled", "source", "changed_at"}`, beside `setup.json`. The Claude relay reads it on each turn, so running sessions pick the change up without a restart. A missing, damaged or non-boolean file is off.
+- On macOS, `on` asks for Touch ID or your login password through `bin/lcu-owner-auth`, the helper `lcu apps allow` uses; it fails closed the same way. `off` never asks, and neither does a command that would change nothing. Linux and Windows have no owner prompt, so `on` takes effect directly.
+- `--unattended` skips the prompt, records `"source": "unattended"` and prints a warning. It is for disposable sandbox machines provisioned without a person at the screen (for example Silo computers).
+- `lcu status --json` reports `cross_turn: {"enabled", "source"}`.
+- This is a guard against an agent turning it on by accident, not a sandbox: anything running as your account can edit the file or pass `--unattended`, as with the approved-apps list.
+- It affects the Claude Code relay only. Other agents ignore the setting (Codex hooks carry Codex's own turn id and Pi, which Oh My Pi wraps, generates a new one per turn, as read in code). Per-app approvals (macOS and Windows; the Linux runtime has none) and your harness's tool approvals are unchanged either way.
+- Independent of the setting, a foreground subagent finishing no longer makes Computer Use refuse its parent's still-running turn. See [Claude turn identity](ADAPTERS.md#claude-turn-identity-and-cross-turn-computer-use).
+
+See the [verification record](verification/cross-turn-2026-10-10.md).
 
 ## Chrome site decisions
 
