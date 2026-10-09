@@ -24,6 +24,9 @@ export function callTimeout(name, args) {
     : TURN_END_TIMEOUT_MS;
 }
 
+/** Longest wait for a host to start and list its tools; the SDK's 60 s default is shorter than a start under load. */
+export const CONNECT_TIMEOUT_MS = 120_000;
+
 /** Longest timer delay Node accepts; an approval wait ends only by answer or abort. */
 export const APPROVAL_TIMEOUT_MS = 2 ** 31 - 1;
 
@@ -561,11 +564,11 @@ export function createCuaClient({
       const started = Date.now();
       let reported = false;
       try {
-        await client.connect(transport);
+        await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS });
         connected = true;
         reported = true;
         log.event('upstream_connect', { ms: Date.now() - started, ok: true });
-        const listed = await client.listTools();
+        const listed = await client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS });
         tools = listed.tools.filter(tool => MODEL_TOOLS.has(tool.name));
         if (tools.length !== MODEL_TOOLS.size) throw new Error('Original CUA js/js_reset tools are missing');
         return this;
