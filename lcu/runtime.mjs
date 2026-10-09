@@ -24,10 +24,11 @@ const unique = (values) => [...new Set(values)];
 
 /**
  * Resolve one selected, intact application generation: `{app, resources, runtime, metadata: {version, runtime}}`.
- * Identity, signature and ownership checks run here, once per call. `reuseRecordedSeal` (launches only) lets
- * macOS skip the deep signature check of a build this account already verified.
+ * Identity, signature and ownership checks run here, once per call. `reuseRecordedChecks` (launches only) lets
+ * macOS skip the deep signature check of a build, and Windows the hashing of a private copy, that this account
+ * already verified and that has not changed since.
  */
-export function paths(root, descriptor = readJson(join(root, 'installation.json')), { reuseRecordedSeal = false } = {}) {
+export function paths(root, descriptor = readJson(join(root, 'installation.json')), { reuseRecordedChecks = false } = {}) {
   const app = join(root, 'app');
   const lock = readJson(join(root, 'runtime.lock.json'));
   const selected = typeof descriptor.app === 'string' ? descriptor.app : '';
@@ -37,11 +38,11 @@ export function paths(root, descriptor = readJson(join(root, 'installation.json'
     if (!isAbsolute(selected) || !lock.platforms?.darwin?.architectures?.[arch] || real(selected) !== real(app)) {
       throw new Error('Selected application descriptor does not match the supported macOS app link.');
     }
-    const resolved = resolveInstalledMacApp(selected, { arch, reuseRecordedSeal });
+    const resolved = resolveInstalledMacApp(selected, { arch, reuseRecordedSeal: reuseRecordedChecks });
     return { app: resolved.app, resources: resolved.resources, runtime: resolved.runtime,
       metadata: { version: resolved.version, runtime: resolved.runtimeVersion } };
   }
-  if (target === 'windows') return windowsPaths(root, lock, descriptor);
+  if (target === 'windows') return windowsPaths(root, lock, descriptor, reuseRecordedChecks);
   if (target !== 'linux') throw new Error(`Unsupported installed application platform: ${target}`);
   if (!isAbsolute(selected) || !Object.hasOwn(lock.architectures ?? {}, arch) || real(selected) !== real(app)) {
     throw new Error('Selected application descriptor does not match the supported architecture and app link. ' +
@@ -59,7 +60,7 @@ export function paths(root, descriptor = readJson(join(root, 'installation.json'
     metadata: { version: resolved.version, runtime: resolved.runtimeVersion } };
 }
 
-function windowsPaths(root, lock, descriptor) {
+function windowsPaths(root, lock, descriptor, reuseRecordedInventory) {
   const { app: selected, architecture: arch, package_version: version, runtime, sha256: digest } = descriptor;
   if (typeof selected !== 'string' || !isAbsolute(selected) || arch !== 'x64' ||
       !lock.platforms?.windows?.architectures?.[arch] || typeof version !== 'string' || !version ||
@@ -82,7 +83,8 @@ function windowsPaths(root, lock, descriptor) {
     throw new Error('Managed Windows application inventory is invalid.');
   }
   if (inventorySha256(inventory) !== digest) throw new Error('Managed Windows application inventory does not match its descriptor.');
-  const resolved = validateWindowsAppTree(selected, { expectedVersion: version, expectedRuntime: runtime, expectedInventory: inventory });
+  const resolved = validateWindowsAppTree(selected, { expectedVersion: version, expectedRuntime: runtime, expectedInventory: inventory,
+    reuseRecordedInventory });
   if (resolved.app !== realpathSync(expected)) throw new Error('Selected Windows application does not match the managed generation.');
   return { app: resolved.app, resources: resolved.resources, runtime: resolved.runtime,
     metadata: { version: resolved.version, runtime: resolved.runtimeVersion } };
@@ -436,8 +438,9 @@ export async function main(root, argv) {
   }
   const descriptor = readJson(join(root, 'installation.json'));
   const platform = descriptor.platform ?? 'linux';
-  // A launch reuses a recorded deep signature check; `lcu doctor` always checks in full.
-  const resolved = paths(root, descriptor, { reuseRecordedSeal: !doctorArgs });
+  // A launch reuses a recorded deep signature check (macOS) or inventory match (Windows); `lcu doctor` always
+  // checks in full.
+  const resolved = paths(root, descriptor, { reuseRecordedChecks: !doctorArgs });
   const env = environment(root, resolved, { chrome: count('--chrome') === 1, audio: count('--audio') === 1, platform });
   if (doctorArgs) return (await command('doctor')).main(root, doctorArgs, { resolved, env });
   if (platform === 'windows') return launchWindows(root, resolved, env, discoveryCompat);

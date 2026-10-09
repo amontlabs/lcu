@@ -4,7 +4,9 @@
 const { closeSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync} = process.getBuiltinModule('node:fs');
 const { dirname, join, relative, sep } = process.getBuiltinModule('node:path');
 const createHash = (algorithm) => process.getBuiltinModule('node:crypto').createHash(algorithm);
+import { cacheDirectory, checkOnce, recorded, writeRecord } from './check_record.mjs';
 import { isDirectory, isFile, within } from './fsutil.mjs';
+import { tryAcquire } from './lock.mjs';
 
 export const PACKAGE_NAME = 'OpenAI.Codex';
 export const PACKAGE_PUBLISHER = 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B';
@@ -50,10 +52,17 @@ function sha256File(path) {
   return digest.digest('hex');
 }
 
-/** Hash the selected Store package tree for managed-copy integrity checks. */
-export function applicationInventory(app) {
-  if (!lstatSync(app).isDirectory()) throw new Error(`Windows application directory is missing or redirected: ${app}`);
+/**
+ * Walk the package tree: `{inventory, stamps}`. The inventory hashes every file when `hash` is set (else it has
+ * the directories only); the stamps are each entry's `[path, type, size, mtime (ns), file id, volume]` as
+ * `lstat` reports them, root first. A link, junction or other unsupported file is refused either way.
+ */
+function scanTree(app, hash) {
+  const stamp = (key, info) => [key, info.isDirectory() ? 'directory' : 'file', `${info.size}`, `${info.mtimeNs}`, `${info.ino}`, `${info.dev}`];
+  const root = lstatSync(app, { bigint: true });
+  if (!root.isDirectory()) throw new Error(`Windows application directory is missing or redirected: ${app}`);
   const inventory = { '.': { type: 'directory' } };
+  const stamps = [stamp('.', root)];
   const walk = (parent) => {
     let names;
     try {
@@ -64,21 +73,41 @@ export function applicationInventory(app) {
     for (const name of names) {
       const path = join(parent, name);
       const key = relative(app, path).split(sep).join('/');
-      const info = lstatSync(path);
+      const info = lstatSync(path, { bigint: true });
       if (info.isSymbolicLink()) throw new Error(`Windows application contains a redirected path: ${path}`);
       if (info.isDirectory()) {
         inventory[key] = { type: 'directory' };
+        stamps.push(stamp(key, info));
         walk(path);
       } else if (info.isFile()) {
-        inventory[key] = { type: 'file', sha256: sha256File(path) };
+        if (hash) inventory[key] = { type: 'file', sha256: sha256File(path) };
+        stamps.push(stamp(key, info));
       } else {
         throw new Error(`Windows application contains an unsupported file: ${path}`);
       }
     }
   };
   walk(app);
-  return inventory;
+  return { inventory, stamps };
 }
+
+/** Hash the selected Store package tree for managed-copy integrity checks. */
+export const applicationInventory = (app) => scanTree(app, true).inventory;
+
+/** The tree's per-entry stamps (scanTree), read with `lstat` only. */
+export const applicationStamps = (app) => scanTree(app, false).stamps;
+
+/**
+ * Where LCU remembers, per account, the stamps of each private copy whose full inventory matched, so that a
+ * launch hashes the copy only when a stamp, the expected inventory, version or runtime changed. A launch waits at
+ * most `wait` milliseconds for another process that is validating, then validates itself. `lock` returns a
+ * function that releases it, or null while another process holds it. Tests replace all three.
+ */
+export const inventoryRecord = {
+  path: () => join(cacheDirectory(), 'windows-inventory.json'),
+  wait: 30_000,
+  lock: (path) => tryAcquire(path),
+};
 
 /** Canonical JSON (sorted keys, no spaces, non-ASCII escaped), as recorded digests of earlier releases were computed. */
 export function canonicalJson(value) {
@@ -181,11 +210,18 @@ export function resolveInstalledWindowsApp() {
   // Capture the registered source's exact tree as the baseline for its managed copy. The validator
   // recomputes it before returning the selection.
   return validateWindowsAppTree(app, { expectedVersion: version, expectedRuntime: runtimeManifest(app),
-    expectedInventory: applicationInventory(app) });
+    expectedInventory: applicationInventory(app), recordInventory: false });
 }
 
-/** Validate host layout and exact equality with a source-derived inventory. */
-export function validateWindowsAppTree(appPath, { expectedVersion, expectedRuntime, expectedInventory }) {
+/**
+ * Validate host layout and exact equality with a source-derived inventory. Identity, required files, runtime and
+ * the tree walk (links, junctions, unsupported files) are checked on every call. The inventory is hashed in full
+ * unless `reuseRecordedInventory` is set (launches) and this account recorded a match of the same stamps,
+ * inventory, version and runtime (inventoryRecord). A full match is recorded unless `recordInventory` is false
+ * (the registered source, which LCU never launches), and only when no stamp changed during it.
+ */
+export function validateWindowsAppTree(appPath, { expectedVersion, expectedRuntime, expectedInventory, reuseRecordedInventory = false,
+  recordInventory = true }) {
   validateHost();
   if (!expectedVersion || !expectedRuntime || !expectedInventory || typeof expectedInventory !== 'object') {
     throw new Error('A selected Windows version, runtime and source inventory are required.');
@@ -211,15 +247,34 @@ export function validateWindowsAppTree(appPath, { expectedVersion, expectedRunti
   }
   const runtimeVersion = runtimeManifest(app);
   if (runtimeVersion !== expectedRuntime) throw new Error('Windows CUA runtime changed after selection.');
-  const actual = applicationInventory(app);
-  const expected = canonicalJson(expectedInventory);
-  if (canonicalJson(actual) !== expected) {
-    const first = [...new Set([...Object.keys(actual), ...Object.keys(expectedInventory)])].sort()
-      .find((key) => canonicalJson(actual[key] ?? null) !== canonicalJson(expectedInventory[key] ?? null)) ?? '<tree>';
-    throw new Error(`Windows application differs from selected source inventory: ${first}`);
+  const inventoryDigest = inventorySha256(expectedInventory);
+  const compare = () => {
+    const { inventory: actual, stamps } = scanTree(app, true);
+    if (canonicalJson(actual) !== canonicalJson(expectedInventory)) {
+      const first = [...new Set([...Object.keys(actual), ...Object.keys(expectedInventory)])].sort()
+        .find((key) => canonicalJson(actual[key] ?? null) !== canonicalJson(expectedInventory[key] ?? null)) ?? '<tree>';
+      throw new Error(`Windows application differs from selected source inventory: ${first}`);
+    }
+    return stamps;
+  };
+  if (!recordInventory) {
+    compare();
+  } else {
+    const entry = (stamps) => JSON.stringify({ version: expectedVersion, runtime: runtimeVersion, inventory: inventoryDigest, stamps });
+    let current;
+    checkOnce(inventoryRecord, {
+      hit: (path) => reuseRecordedInventory && recorded(path, app, entry(current ??= applicationStamps(app))),
+      check: (path) => {
+        const stamps = compare();
+        if (path !== null && JSON.stringify(applicationStamps(app)) === JSON.stringify(stamps)) {
+          // Entries of generations that are gone (pruned) are dropped.
+          writeRecord(path, app, entry(stamps), isDirectory);
+        }
+      },
+    });
   }
   return { app, resources: join(app, 'app/resources'), runtime: join(app, 'app/resources/cua_node'),
     launcher: component(app, `${NODE_MODULES}/@oai/cua-repl/bin/cua-repl.mjs`), backend: 'windows',
     version: expectedVersion, arch: 'x64', runtimeVersion, inventory: expectedInventory,
-    inventoryDigest: inventorySha256(expectedInventory) };
+    inventoryDigest };
 }

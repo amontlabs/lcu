@@ -226,6 +226,12 @@ function attemptWindows(path, io, retried = false) {
   };
 }
 
+/**
+ * One attempt to take the lock at `path` without waiting: a function that releases it, or null while another
+ * process holds it. For callers that cannot await (a launch's application checks).
+ */
+export const tryAcquire = (path, io = fs) => (process.platform === 'win32' ? attemptWindows(path, io) : attemptPosix(path));
+
 const WINDOWS_WAIT = 60_000;
 
 /**
@@ -240,11 +246,10 @@ export async function acquire(path, {
   waiting = () => process.stderr.write(`LCU: waiting for another LCU process to release ${path}...\n`),
   io = fs,
 } = {}) {
-  const attempt = process.platform === 'win32' ? (lock) => attemptWindows(lock, io) : attemptPosix;
   const started = Date.now();
   let told = false;
   for (;;) {
-    const release = attempt(path);
+    const release = tryAcquire(path, io);
     if (release) return release;
     const elapsed = Date.now() - started;
     if (elapsed >= wait) throw busy();
