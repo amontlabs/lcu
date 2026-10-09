@@ -6,13 +6,16 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { sealRecord } from '../../lcu/platforms.mjs';
+import { inventoryRecord } from '../../lcu/windows.mjs';
 import { VERSION, inventory } from '../../scripts/bundle.mjs';
 
 export const REPO = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
-// macOS signature records go to a scratch file for each test process, never to the account's own cache.
-const records = realpathSync(mkdtempSync(join(tmpdir(), 'lcu-seal-records-')));
+// macOS signature and Windows inventory records go to scratch files for each test process, never to the
+// account's own cache.
+const records = realpathSync(mkdtempSync(join(tmpdir(), 'lcu-check-records-')));
 sealRecord.path = () => join(records, 'macos-signatures.json');
+inventoryRecord.path = () => join(records, 'windows-inventory.json');
 process.on('exit', () => rmSync(records, { recursive: true, force: true }));
 
 /**

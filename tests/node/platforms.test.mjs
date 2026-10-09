@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
-import { chmodSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync,
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync,
   utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import { dirname, join } from 'node:path';
@@ -220,7 +220,9 @@ test('concurrent launches wait for the one checking and reuse its record, or che
       writeFileSync(record, finished);
       write(join(contents, '_CodeSignature/CodeResources'), 'app seal of another build');
     }
-    return polls < 5 ? null : openSync(path, 'w');
+    if (polls < 5) return null;
+    const fd = openSync(path, 'w');
+    return () => closeSync(fd);
   });
   fake.calls.length = 0;
   resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
@@ -249,8 +251,9 @@ test('the lock beside the record is released after each check, also a failed one
   const held = [];
   override(t, sealRecord, 'lock', (path) => {
     assert.equal(path, `${record}.lock`);
-    held.push(openSync(path, 'w'));
-    return held.at(-1);
+    const fd = openSync(path, 'w');
+    held.push(fd);
+    return () => closeSync(fd);
   });
   resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
   childProcess.spawnSync.mock.mockImplementation(codesign({ verify: 1 }));

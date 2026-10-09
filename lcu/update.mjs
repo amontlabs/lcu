@@ -4,6 +4,7 @@ const { mkdirSync, readFileSync, readSync, renameSync, statSync, utimesSync, wri
 const { dirname, join } = process.getBuiltinModule('node:path');
 const { parseArgs } = process.getBuiltinModule('node:util');
 
+import { cacheDirectory } from './check_record.mjs';
 import { accountHome } from './fsutil.mjs';
 
 export const REPO = 'amontlabs/lcu';
@@ -80,14 +81,7 @@ export function enabled(root, env = process.env) {
 }
 
 /** Per-account cache file; the install prefix may be root-owned. */
-export function cachePath() {
-  const home = accountHome();
-  let base;
-  if (process.platform === 'win32') base = join(process.env.LOCALAPPDATA || join(home, 'AppData/Local'), 'LCU/cache');
-  else if (process.platform === 'darwin') base = join(home, 'Library/Caches/lcu');
-  else base = join(process.env.XDG_CACHE_HOME || join(home, '.cache'), 'lcu');
-  return join(base, 'update.json');
-}
+export const cachePath = () => join(cacheDirectory(), 'update.json');
 
 const sibling = (name) => join(dirname(cachePath()), name);
 

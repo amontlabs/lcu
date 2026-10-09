@@ -1,16 +1,16 @@
 // Validate an installed official application for the original CUA runtime.
 // Builtins come from process.getBuiltinModule: an ESM import of a builtin builds its export facade, which
 // costs milliseconds on every launch; child_process, crypto and tty are loaded only where they are used.
-const { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync,
-  statSync, unlinkSync, writeFileSync } = process.getBuiltinModule('node:fs');
+const { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } = process.getBuiltinModule('node:fs');
 const os = process.getBuiltinModule('node:os');
 const { basename, dirname, join, relative, resolve } = process.getBuiltinModule('node:path');
 const childProcess = () => process.getBuiltinModule('node:child_process');
 
 import { locateCodexTools } from './app_layout.mjs';
 import { readAsarMembers } from './asar.mjs';
-import { accountHome, isDirectory, isLink, isRegular, within } from './fsutil.mjs';
-import { tryExclusiveOpen } from './lock.mjs';
+import { cacheDirectory, checkOnce, recorded, writeRecord } from './check_record.mjs';
+import { isDirectory, isLink, isRegular, within } from './fsutil.mjs';
+import { tryAcquire } from './lock.mjs';
 
 const MAC_BUNDLE_ID = 'com.openai.codex';
 const MAC_HELPER_ID = 'com.openai.sky.CUAService';
@@ -137,16 +137,14 @@ function bundleIdentity(bundle, identifier) {
  * Where LCU remembers each bundle `codesign --verify --deep --strict` accepted, so that a launch skips that check
  * (over a second for the app, and several when launches run at once) until the bundle changes. A per-account
  * cache: losing it costs one deep check. A launch waits at most `wait` milliseconds for another process that is
- * checking the same app, then checks it itself. `lock` returns a descriptor, or null while another process holds
- * it. Tests replace all three.
+ * checking the same app, then checks it itself. `lock` returns a function that releases it, or null while another
+ * process holds it. Tests replace all three.
  */
 export const sealRecord = {
-  path: () => join(accountHome(), 'Library/Caches/lcu/macos-signatures.json'),
+  path: () => join(cacheDirectory(), 'macos-signatures.json'),
   wait: 15_000,
-  lock: (path) => tryExclusiveOpen(path),
+  lock: (path) => tryAcquire(path),
 };
-
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /**
  * One signed build of `bundle`: its identifier, version and build, its Info.plist file, and the hash of its
@@ -173,31 +171,6 @@ function currentKey(bundle) {
   }
 }
 
-function readRecord(path) {
-  try {
-    const record = JSON.parse(readFileSync(path, 'utf8'));
-    return record && typeof record === 'object' && !Array.isArray(record) ? record : {};
-  } catch {
-    return {};
-  }
-}
-
-const recorded = (path, bundle, key) => {
-  const record = readRecord(path);
-  return Object.hasOwn(record, bundle) && JSON.stringify(record[bundle]) === key;
-};
-
-/** Atomic, mode 0600; a failure is ignored (the next launch checks again). */
-function writeRecord(path, bundle, key) {
-  const temporary = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  try {
-    writeFileSync(temporary, JSON.stringify({ ...readRecord(path), [bundle]: JSON.parse(key) }), { mode: 0o600, flag: 'wx' });
-    renameSync(temporary, path);
-  } catch {
-    try { unlinkSync(temporary); } catch { /* not created */ }
-  }
-}
-
 function deepVerify(bundle) {
   const verified = childProcess().spawnSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle],
     { encoding: 'utf8', timeout: 120_000 });
@@ -213,47 +186,26 @@ function deepVerify(bundle) {
  * beside the record. Only a successful check whose key did not change meanwhile is recorded.
  */
 function verifySeal(bundle, details, reuse) {
-  let path;
-  try {
-    path = sealRecord.path();
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  } catch {
-    deepVerify(bundle); // no usable cache: check every time
-    return;
-  }
   const key = sealKey(bundle, details);
   if (key === null) {
     deepVerify(bundle);
     return;
   }
   let waited = false;
-  const hit = () => {
-    if (!reuse) return false;
-    const initial = !waited;
-    waited = true;
-    if (!recorded(path, bundle, key)) return false;
-    // A record another launch wrote while this one waited: the bundle may have changed during the wait.
-    return initial || currentKey(bundle) === key;
-  };
-  if (hit()) return;
-  let fd = null;
-  for (const deadline = Date.now() + sealRecord.wait; ;) {
-    try {
-      fd = sealRecord.lock(`${path}.lock`);
-    } catch {
-      break; // cannot lock: check without it
-    }
-    if (fd !== null || Date.now() >= deadline) break;
-    if (hit()) return;
-    sleep(50);
-  }
-  try {
-    if (hit()) return; // checked by the process that held the lock
-    deepVerify(bundle);
-    if (sealKey(bundle, details) === key) writeRecord(path, bundle, key);
-  } finally {
-    if (fd !== null) closeSync(fd);
-  }
+  checkOnce(sealRecord, {
+    hit: (path) => {
+      if (!reuse) return false;
+      const initial = !waited;
+      waited = true;
+      if (!recorded(path, bundle, key)) return false;
+      // A record another launch wrote while this one waited: the bundle may have changed during the wait.
+      return initial || currentKey(bundle) === key;
+    },
+    check: (path) => {
+      deepVerify(bundle);
+      if (path !== null && sealKey(bundle, details) === key) writeRecord(path, bundle, key);
+    },
+  });
 }
 
 /**
