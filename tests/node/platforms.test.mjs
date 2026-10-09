@@ -195,7 +195,7 @@ test('a missing, corrupt or unusable record, or an unsealed bundle, means a full
 });
 
 test('concurrent launches wait for the one checking and reuse its record, or check themselves after a bounded wait', (t) => {
-  const { app, helper, record, fake } = recordedMacApp(t);
+  const { app, contents, helper, record, fake } = recordedMacApp(t);
   resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
   const finished = readFileSync(record, 'utf8');
   rmSync(record);
@@ -210,6 +210,22 @@ test('concurrent launches wait for the one checking and reuse its record, or che
   resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
   assert.deepEqual(deepChecks(fake), []);
   assert.equal(polls, 3);
+  // The app changes while this launch waits: the record found after the wait is compared with the bundle as it
+  // is then, so the app is checked in full once the holder is done.
+  rmSync(record);
+  polls = 0;
+  override(t, sealRecord, 'lock', (path) => {
+    polls += 1;
+    if (polls === 3) {
+      writeFileSync(record, finished);
+      write(join(contents, '_CodeSignature/CodeResources'), 'app seal of another build');
+    }
+    return polls < 5 ? null : openSync(path, 'w');
+  });
+  fake.calls.length = 0;
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  assert.deepEqual(deepChecks(fake), [app]);
+  assert.equal(polls, 5);
   // A holder that never finishes: each bundle is checked after the wait, then recorded.
   rmSync(record);
   override(t, sealRecord, 'lock', () => null);

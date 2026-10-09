@@ -164,6 +164,15 @@ function sealKey(bundle, details) {
   }
 }
 
+/** The bundle's sealKey as it is now, its Info.plist read again; null when it cannot be read. */
+function currentKey(bundle) {
+  try {
+    return sealKey(bundle, plistStrings(readFileSync(join(bundle, 'Contents/Info.plist'))));
+  } catch {
+    return null;
+  }
+}
+
 function readRecord(path) {
   try {
     const record = JSON.parse(readFileSync(path, 'utf8'));
@@ -217,7 +226,15 @@ function verifySeal(bundle, details, reuse) {
     deepVerify(bundle);
     return;
   }
-  const hit = () => reuse && recorded(path, bundle, key);
+  let waited = false;
+  const hit = () => {
+    if (!reuse) return false;
+    const initial = !waited;
+    waited = true;
+    if (!recorded(path, bundle, key)) return false;
+    // A record another launch wrote while this one waited: the bundle may have changed during the wait.
+    return initial || currentKey(bundle) === key;
+  };
   if (hit()) return;
   let fd = null;
   for (const deadline = Date.now() + sealRecord.wait; ;) {
