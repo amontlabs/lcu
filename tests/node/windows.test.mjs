@@ -403,7 +403,7 @@ test('a link in a recorded copy is refused at every launch', { skip: posixOnly('
 });
 
 test('concurrent launches wait for the one validating and reuse its record, or validate themselves after a bounded wait', (t) => {
-  const { record, files, launch } = recordedCopy(t);
+  const { app, record, files, launch } = recordedCopy(t);
   launch();
   const finished = readFileSync(record, 'utf8');
   rmSync(record);
@@ -416,6 +416,22 @@ test('concurrent launches wait for the one validating and reuse its record, or v
   });
   assert.equal(launch(), 0);
   assert.equal(polls, 3);
+  // A file that changes after this launch first looked, while it waits: the record found after the wait is
+  // compared with the tree as it is then, so the launch validates in full once the holder is done.
+  override(t, inventoryRecord, 'wait', 5_000);
+  rmSync(record);
+  polls = 0;
+  override(t, inventoryRecord, 'lock', () => {
+    polls += 1;
+    if (polls === 3) {
+      writeFileSync(record, finished);
+      utimesSync(join(app, WINDOWS_REQUIRED_FILES[2]), new Date(0), new Date(2_000));
+    }
+    return polls < 5 ? null : () => {};
+  });
+  assert.equal(launch(), files);
+  assert.equal(polls, 5);
+  assert.equal(launch(), 0, 'and records the tree as it is now');
   // A holder that never finishes: the copy is validated after the wait, then recorded.
   rmSync(record);
   override(t, inventoryRecord, 'lock', () => null);

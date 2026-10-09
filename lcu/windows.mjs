@@ -262,8 +262,18 @@ export function validateWindowsAppTree(appPath, { expectedVersion, expectedRunti
   } else {
     const entry = (stamps) => JSON.stringify({ version: expectedVersion, runtime: runtimeVersion, inventory: inventoryDigest, stamps });
     let current;
+    let waited = false;
     checkOnce(inventoryRecord, {
-      hit: (path) => reuseRecordedInventory && recorded(path, app, entry(current ??= applicationStamps(app))),
+      hit: (path) => {
+        if (!reuseRecordedInventory) return false;
+        const initial = !waited;
+        waited = true;
+        if (!recorded(path, app, entry(current ??= applicationStamps(app)))) return false;
+        if (initial) return true;
+        // A record another launch wrote while this one waited: the tree may have changed during the wait.
+        current = applicationStamps(app);
+        return recorded(path, app, entry(current));
+      },
       check: (path) => {
         const stamps = compare();
         if (path !== null && JSON.stringify(applicationStamps(app)) === JSON.stringify(stamps)) {
