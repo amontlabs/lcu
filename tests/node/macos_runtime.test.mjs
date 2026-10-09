@@ -4,9 +4,11 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFile
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 
-import { MAC_HELPER, MAC_REQUIRED_FILES } from '../../lcu/platforms.mjs';
+import { host as doctorHost } from '../../lcu/doctor.mjs';
+import { MAC_HELPER, MAC_REQUIRED_FILES, sealRecord } from '../../lcu/platforms.mjs';
 import { configureMacosLifecycle, environment, main, paths } from '../../lcu/runtime.mjs';
-import { override, posixTests, temporary, write, mockWrite } from './fixtures.mjs';
+import { deps } from '../../scripts/install.mjs';
+import { output, override, posixTests, temporary, write, mockWrite } from './fixtures.mjs';
 
 const test = posixTests('the macOS launch path, with sh stand-ins and POSIX modes');
 
@@ -25,6 +27,8 @@ function macRelease(t) {
   write(join(contents, MAC_HELPER, 'Contents/Info.plist'), plist({ CFBundleIdentifier: 'com.openai.sky.CUAService' }));
   write(join(contents, 'Resources/cua_node/manifest.json'), JSON.stringify({ platform: 'darwin', arch: 'arm64', runtime_archive_version: RUNTIME }));
   for (const relative of MAC_REQUIRED_FILES) write(join(contents, relative), relative, 0o755);
+  write(join(contents, '_CodeSignature/CodeResources'), 'app seal');
+  write(join(contents, MAC_HELPER, 'Contents/_CodeSignature/CodeResources'), 'helper seal');
   // The original server stands in as a script that records how it was started.
   write(join(contents, 'Resources/cua_node/bin/node'), '#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "$LCU_TEST_OUT.argv"\nenv > "$LCU_TEST_OUT.env"\n' +
     '[ -n "$LCU_TEST_SIGNAL" ] && kill -"$LCU_TEST_SIGNAL" $$\nexit "${LCU_TEST_STATUS:-0}"\n', 0o755);
@@ -66,6 +70,38 @@ test('the original entry point is exec’d with the verified local app, each sig
   assert.ok(!('NODE_REPL_HOST_SERVICES_PIPE_PATH' in env));
   assert.equal(r.codesign.filter((call) => call.includes('--verify')).length, 2, 'one verification per signed bundle');
   assert.equal(r.codesign.length, 4);
+});
+
+const deepChecks = (r) => r.codesign.filter((call) => call.includes('--deep')).length;
+
+test('a launch reuses the recorded deep check; --version, doctor, status and the installer check in full', async (t) => {
+  const r = macRelease(t);
+  override(t, sealRecord, 'path', () => join(r.base, 'cache/macos-signatures.json'));
+  override(t, process, 'env', { HOME: '/fixture', CUA_REPL_ENABLED_SURFACES: 'browser' });
+  t.mock.method(process, 'execve', () => {});
+  await main(r.root, []);
+  assert.equal(deepChecks(r), 2, 'the first launch checks both bundles');
+  r.codesign.length = 0;
+  await main(r.root, []);
+  assert.equal(deepChecks(r), 0, 'a later launch reuses the record');
+  assert.equal(r.codesign.length, 2, 'the signer is still read for both bundles');
+  r.codesign.length = 0;
+  mockWrite(t, process.stdout, () => {});
+  await main(r.root, ['--version']);
+  assert.equal(deepChecks(r), 2, 'lcu --version (run by lcu setup)');
+  r.codesign.length = 0;
+  paths(r.root);
+  assert.equal(deepChecks(r), 2, 'status, browser and doctor without a resolved app');
+  r.codesign.length = 0;
+  deps.resolveMacApp(r.app, { arch: 'arm64' });
+  assert.equal(deepChecks(r), 2, 'install and lcu update');
+  // `lcu doctor` (also run by lcu setup) resolves the app in main; stop it at its first desktop probe.
+  r.codesign.length = 0;
+  override(t, doctorHost, 'probe', () => { throw new Error('fixture stops here'); });
+  override(t, doctorHost, 'interactive', () => false);
+  await output(t);
+  await main(r.root, ['doctor', '--non-interactive']).catch(() => {});
+  assert.equal(deepChecks(r), 2, 'lcu doctor');
 });
 
 async function supervised(t, r, settings) {

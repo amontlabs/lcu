@@ -24,9 +24,10 @@ const unique = (values) => [...new Set(values)];
 
 /**
  * Resolve one selected, intact application generation: `{app, resources, runtime, metadata: {version, runtime}}`.
- * Identity, signature and ownership checks run here, once per call.
+ * Identity, signature and ownership checks run here, once per call. `reuseRecordedSeal` (launches only) lets
+ * macOS skip the deep signature check of a build this account already verified.
  */
-export function paths(root, descriptor = readJson(join(root, 'installation.json'))) {
+export function paths(root, descriptor = readJson(join(root, 'installation.json')), { reuseRecordedSeal = false } = {}) {
   const app = join(root, 'app');
   const lock = readJson(join(root, 'runtime.lock.json'));
   const selected = typeof descriptor.app === 'string' ? descriptor.app : '';
@@ -36,7 +37,7 @@ export function paths(root, descriptor = readJson(join(root, 'installation.json'
     if (!isAbsolute(selected) || !lock.platforms?.darwin?.architectures?.[arch] || real(selected) !== real(app)) {
       throw new Error('Selected application descriptor does not match the supported macOS app link.');
     }
-    const resolved = resolveInstalledMacApp(selected, { arch });
+    const resolved = resolveInstalledMacApp(selected, { arch, reuseRecordedSeal });
     return { app: resolved.app, resources: resolved.resources, runtime: resolved.runtime,
       metadata: { version: resolved.version, runtime: resolved.runtimeVersion } };
   }
@@ -435,7 +436,8 @@ export async function main(root, argv) {
   }
   const descriptor = readJson(join(root, 'installation.json'));
   const platform = descriptor.platform ?? 'linux';
-  const resolved = paths(root, descriptor);
+  // A launch reuses a recorded deep signature check; `lcu doctor` always checks in full.
+  const resolved = paths(root, descriptor, { reuseRecordedSeal: !doctorArgs });
   const env = environment(root, resolved, { chrome: count('--chrome') === 1, audio: count('--audio') === 1, platform });
   if (doctorArgs) return (await command('doctor')).main(root, doctorArgs, { resolved, env });
   if (platform === 'windows') return launchWindows(root, resolved, env, discoveryCompat);

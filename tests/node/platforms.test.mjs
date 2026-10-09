@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
-import { chmodSync, mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync,
+  utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   MAC_HELPER, MAC_REQUIRED_FILES, MAC_SOCKET_ENV, MAC_SOCKET_SUFFIX, aclWritersUntrusted, macSocketPath, readAcls,
-  macSocketPathProblem, plistStrings, resolveInstalledLinuxApp, resolveInstalledMacApp, untrustedEntry,
+  macSocketPathProblem, plistStrings, resolveInstalledLinuxApp, resolveInstalledMacApp, sealRecord, untrustedEntry,
 } from '../../lcu/platforms.mjs';
 import { linuxApp, override, posixTests, temporary, write } from './fixtures.mjs';
 
@@ -92,6 +93,171 @@ test('an invalid signature or another signer is refused', (t) => {
   assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64' }), /signature verification failed/);
   childProcess.spawnSync.mock.mockImplementation(codesign({ team: 'another-team' }));
   assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64' }), /signer does not match/);
+});
+
+const deepChecks = (fake) => fake.calls.filter((call) => call.includes('--deep')).map((call) => call.at(-1));
+const identityChecks = (fake) => fake.calls.filter((call) => call.includes('-dv')).length;
+
+/** A fixture app with signature seals, the codesign stand-in, and the record in a scratch directory. */
+function recordedMacApp(t) {
+  const fixture = macApp(t);
+  write(join(fixture.contents, '_CodeSignature/CodeResources'), 'app seal');
+  write(join(fixture.contents, MAC_HELPER, 'Contents/_CodeSignature/CodeResources'), 'helper seal');
+  const record = join(temporary(t), 'cache/macos-signatures.json');
+  override(t, sealRecord, 'path', () => record);
+  const fake = onMac(t);
+  return { ...fixture, helper: join(fixture.contents, MAC_HELPER), record, fake };
+}
+
+test('a launch reuses a recorded deep check of the same build; the signer is still read every time', (t) => {
+  const { app, helper, record, fake } = recordedMacApp(t);
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  assert.deepEqual(deepChecks(fake), [app, helper]);
+  assert.equal(statSync(record).mode & 0o777, 0o600);
+  assert.equal(statSync(dirname(record)).mode & 0o777, 0o700);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(record, 'utf8'))), [app, helper]);
+  fake.calls.length = 0;
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  assert.deepEqual(deepChecks(fake), [], 'no deep check for a recorded build');
+  assert.equal(identityChecks(fake), 2);
+});
+
+test('installs, updates, doctor and the other commands check in full, and refresh the record', (t) => {
+  const { app, helper, record, fake } = recordedMacApp(t);
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  rmSync(record);
+  fake.calls.length = 0;
+  resolveInstalledMacApp(app, { arch: 'arm64' });
+  assert.deepEqual(deepChecks(fake), [app, helper]);
+  assert.ok(existsSync(record), 'a full check records the build for the next launch');
+  fake.calls.length = 0;
+  resolveInstalledMacApp(app, { arch: 'arm64' });
+  assert.deepEqual(deepChecks(fake), [app, helper], 'a recorded build is checked in full again');
+});
+
+test('any change to the bundle path, version, build, Info.plist file or seal checks that bundle in full', (t) => {
+  const { app, contents, helper, fake } = recordedMacApp(t);
+  const launch = (path = app) => {
+    fake.calls.length = 0;
+    resolveInstalledMacApp(path, { arch: 'arm64', reuseRecordedSeal: true });
+    return deepChecks(fake);
+  };
+  const info = (values) => write(join(contents, 'Info.plist'), plist({ CFBundleIdentifier: 'com.openai.codex', ...values }));
+  launch();
+  assert.deepEqual(launch(), []);
+  info({ CFBundleShortVersionString: '26.999.1' });
+  assert.deepEqual(launch(), [app], 'version');
+  info({ CFBundleShortVersionString: '26.999.1', CFBundleVersion: '2' });
+  assert.deepEqual(launch(), [app], 'build');
+  utimesSync(join(contents, 'Info.plist'), new Date(0), new Date(1_000));
+  assert.deepEqual(launch(), [app], 'Info.plist rewritten with the same strings');
+  write(join(contents, '_CodeSignature/CodeResources'), 'app seal of another build');
+  assert.deepEqual(launch(), [app], 'app seal');
+  write(join(helper, 'Contents/_CodeSignature/CodeResources'), 'helper seal of another build');
+  assert.deepEqual(launch(), [helper], 'helper seal');
+  assert.deepEqual(launch(), []);
+  const moved = join(temporary(t), 'ChatGPT.app');
+  renameSync(app, moved);
+  assert.deepEqual(launch(moved), [moved, join(moved, 'Contents', MAC_HELPER)], 'another path');
+});
+
+test('a failed deep check is never recorded and fails as before', (t) => {
+  const { app, record, fake } = recordedMacApp(t);
+  childProcess.spawnSync.mock.mockImplementation(codesign({ verify: 1 }));
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true }), /signature verification failed/);
+  assert.ok(!existsSync(record));
+  childProcess.spawnSync.mock.mockImplementation(fake);
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  assert.ok(existsSync(record));
+  childProcess.spawnSync.mock.mockImplementation(codesign({ team: 'another-team' }));
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true }), /signer does not match/,
+    'a recorded seal never skips the signer check');
+});
+
+test('a missing, corrupt or unusable record, or an unsealed bundle, means a full check', (t) => {
+  const { app, contents, helper, record, fake } = recordedMacApp(t);
+  const launch = () => {
+    fake.calls.length = 0;
+    resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+    return deepChecks(fake);
+  };
+  for (const corrupt of ['{not json', '[]', 'null', JSON.stringify({ [app]: { seal: 'forged' } })]) {
+    write(record, corrupt);
+    assert.deepEqual(launch(), [app, helper], corrupt);
+    assert.deepEqual(launch(), [], `rewritten after ${corrupt}`);
+  }
+  override(t, sealRecord, 'path', () => { throw new Error('no home'); });
+  assert.deepEqual(launch(), [app, helper]);
+  override(t, sealRecord, 'path', () => record);
+  rmSync(join(contents, '_CodeSignature'), { recursive: true });
+  assert.deepEqual(launch(), [app]);
+  assert.deepEqual(launch(), [app], 'nothing to record without a seal');
+});
+
+test('concurrent launches wait for the one checking and reuse its record, or check themselves after a bounded wait', (t) => {
+  const { app, contents, helper, record, fake } = recordedMacApp(t);
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  const finished = readFileSync(record, 'utf8');
+  rmSync(record);
+  // Another process holds the lock and records its check while this one polls.
+  let polls = 0;
+  override(t, sealRecord, 'lock', () => {
+    polls += 1;
+    if (polls === 3) writeFileSync(record, finished);
+    return null;
+  });
+  fake.calls.length = 0;
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  assert.deepEqual(deepChecks(fake), []);
+  assert.equal(polls, 3);
+  // The app changes while this launch waits: the record found after the wait is compared with the bundle as it
+  // is then, so the app is checked in full once the holder is done.
+  rmSync(record);
+  polls = 0;
+  override(t, sealRecord, 'lock', (path) => {
+    polls += 1;
+    if (polls === 3) {
+      writeFileSync(record, finished);
+      write(join(contents, '_CodeSignature/CodeResources'), 'app seal of another build');
+    }
+    return polls < 5 ? null : openSync(path, 'w');
+  });
+  fake.calls.length = 0;
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  assert.deepEqual(deepChecks(fake), [app]);
+  assert.equal(polls, 5);
+  // A holder that never finishes: each bundle is checked after the wait, then recorded.
+  rmSync(record);
+  override(t, sealRecord, 'lock', () => null);
+  override(t, sealRecord, 'wait', 120);
+  fake.calls.length = 0;
+  const started = Date.now();
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  assert.ok(Date.now() - started >= 240);
+  assert.deepEqual(deepChecks(fake), [app, helper]);
+  assert.ok(existsSync(record));
+  // A lock that cannot be opened does not hold the launch up.
+  override(t, sealRecord, 'lock', () => { throw new Error('EACCES'); });
+  rmSync(record);
+  fake.calls.length = 0;
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  assert.deepEqual(deepChecks(fake), [app, helper]);
+});
+
+test('the lock beside the record is released after each check, also a failed one', (t) => {
+  const { app, record } = recordedMacApp(t);
+  const held = [];
+  override(t, sealRecord, 'lock', (path) => {
+    assert.equal(path, `${record}.lock`);
+    held.push(openSync(path, 'w'));
+    return held.at(-1);
+  });
+  resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true });
+  childProcess.spawnSync.mock.mockImplementation(codesign({ verify: 1 }));
+  rmSync(record);
+  assert.throws(() => resolveInstalledMacApp(app, { arch: 'arm64', reuseRecordedSeal: true }), /verification failed/);
+  assert.equal(held.length, 3);
+  for (const fd of held) assert.throws(() => fstatSync(fd), { code: 'EBADF' });
 });
 
 test('binary property lists are read too, and nested keys never count', () => {
