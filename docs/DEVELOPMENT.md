@@ -62,12 +62,13 @@ Before publishing, inspect the tar member list and unpacked tree. They must cont
 
 ## Thanking outside contributors
 
-When someone outside the maintainers reports an issue that leads to a change, opens a PR, or finds a bug in review, the release that first ships that work thanks them by GitHub handle. When a change comes from an outside report or PR, its PR body links the issue or PR and thanks the person, and the commit carries a `Reported-by: Name (@handle)` trailer so release time can find it. To collect names, look through the commits since the previous release tag for `Reported-by:` and `Co-authored-by:` trailers, the issues those commits link, and PR authors who are not maintainers. End the release notes with a `## Thanks` section, one line per person, for example:
+When someone outside the maintainers reports an issue that leads to a change, opens a PR, or finds a bug in review, the release that first ships that work thanks them by GitHub handle for what they actually did. When a change comes from an outside report, its PR body links the issue and thanks the person, and the commit carries a `Reported-by: Name (@handle)` trailer so release time can find it. Squash-merge an outside PR with the contributor as commit author (GitHub's default), and keep `Reported-by:` only if they also reported the problem. To collect names, look through the commits since the previous release tag for authors who are not maintainers, `Reported-by:` and `Co-authored-by:` trailers, and the issues and PRs those commits link. End the release notes with a `## Thanks` section, one line per person that combines everything they did, for example:
 
 ~~~md
 ## Thanks
 
-- @handle for reporting that `lcu update` skipped a registration ([#123](https://github.com/amontlabs/lcu/issues/123))
+- @handle for reporting and fixing a slow host start ([#123](https://github.com/amontlabs/lcu/issues/123), [#124](https://github.com/amontlabs/lcu/pull/124))
+- @other for reporting that `lcu update` skipped a registration ([#125](https://github.com/amontlabs/lcu/issues/125))
 ~~~
 
 Past release notes are not edited to add credit.
