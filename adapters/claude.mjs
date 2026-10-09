@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -21,6 +22,7 @@ import {
   relayElicitation,
   TURN_END_TIMEOUT_MS,
 } from './client.mjs';
+import { crossTurnEnabled } from './cross-turn.mjs';
 import { openDiagnosticLog } from './diagnostics.mjs';
 import { declineAgentHostApp } from './host-guard.mjs';
 
@@ -39,6 +41,15 @@ const CLAUDE_TOOL_USE_META = 'claudecode/toolUseId';
  * timeouts (20 s per step on macOS) or after an in-flight call.
  */
 export const SHUTDOWN_DRAIN_TIMEOUT_MS = 2_000;
+/** Live (bound, not yet ended) turns a relay accepts at once. */
+const MAX_LIVE_TURNS = 1024;
+/**
+ * Ended keys and closed prompts are remembered oldest-first up to this many each, which keeps long sessions
+ * bounded without ever refusing work or cleanup. After eviction an extremely old key or prompt falls back to the
+ * prior behavior: a cross-turn-off child of a prompt closed this long ago is no longer refused here, and a
+ * cross-turn-on rebind of an evicted key forwards its prompt id (which upstream may refuse).
+ */
+export const MAX_ENDED_TURNS = 65_536;
 const TURN_CONTEXT_SCHEMA = {
   type: 'object',
   properties: {
@@ -73,6 +84,15 @@ function nonEmptyString(value) {
 
 function turnKey(sessionId, turnId) {
   return JSON.stringify([sessionId, turnId]);
+}
+
+/**
+ * A subagent's own upstream turn id: a hash of its exact (agent, prompt) key formatted as a UUID. It needs no
+ * map, so a SubagentStop can never end the parent's prompt id, which the original service shares across sessions.
+ */
+export function subagentTurnId(agentId, promptId) {
+  const hex = createHash('sha256').update(JSON.stringify([agentId, promptId])).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 function asError(error) {
@@ -121,7 +141,8 @@ function nativeForm(params, approval) {
  */
 export async function runClaudeBridge({
   command, args = [], cwd, env, log = openDiagnosticLog({ adapter: 'claude' }),
-  shutdownDrainMs = SHUTDOWN_DRAIN_TIMEOUT_MS,
+  shutdownDrainMs = SHUTDOWN_DRAIN_TIMEOUT_MS, crossTurn = () => crossTurnEnabled(),
+  maxEndedTurns = MAX_ENDED_TURNS,
 } = {}) {
   if (!nonEmptyString(command) || !Array.isArray(args) ||
       args.some(argument => typeof argument !== 'string')) {
@@ -139,9 +160,31 @@ export async function runClaudeBridge({
     capabilities: { elicitation: { form: {}, url: {} } },
   });
   const contexts = new Map();
-  const activeTurns = new Map();
-  const cleanupInFlight = new Map();
-  const cleanedTurns = new Set();
+  // One record per life of a turn key (session or agent, prompt id), created at bind and carried by every
+  // context and call of that life: { key, sessionId, turnId, subagent, upstreamId, endedUpstream, cleanup, ended }.
+  // `upstreamId` is the turn id the original service sees for this life, so cleanup always targets its own life.
+  // `endedUpstream` is set whenever that id is known or assumed ended (the host reported this life's end, a
+  // parent's end cascaded to it, or it inherited a closed prompt id), whatever the cleanup answered.
+  const lives = new Map();
+  // Keys this relay bound whose last life ended, and prompts a main Stop or Interrupt closed; one entry each.
+  const endedKeys = new Set();
+  const endedPrompts = new Set();
+  const remember = (set, value) => {
+    set.delete(value);
+    set.add(value);
+    if (set.size > maxEndedTurns) set.delete(set.values().next().value);
+  };
+  // Every upstream turn_ended still awaiting its reply, so shutdown can wait for superseded ones too.
+  const pendingEnds = new Set();
+  const sendTurnEnded = (event, sessionId, upstreamId) => {
+    const call = upstream.callTool({ name: TURN_END_TOOL, arguments: {
+      hook_event_name: event, session_id: sessionId, turn_id: upstreamId,
+    } }, undefined, { timeout: TURN_END_TIMEOUT_MS });
+    pendingEnds.add(call);
+    const forget = () => pendingEnds.delete(call);
+    call.then(forget, forget);
+    return call;
+  };
   let server;
   const approvals = createApprovalGate();
   const broker = createApprovalBroker();
@@ -153,54 +196,104 @@ export async function runClaudeBridge({
   let shutdown;
   let serverClose;
 
-  const clearTurnContexts = (sessionId, turnId) => {
+  const clearLifeContexts = (life) => {
     for (const [toolUseId, context] of contexts) {
-      if (context.sessionId === sessionId && context.turnId === turnId) contexts.delete(toolUseId);
+      if (context.life === life) contexts.delete(toolUseId);
     }
   };
 
-  async function turnEnded(sessionId, turnId, event) {
-    if (!nonEmptyString(sessionId) || !nonEmptyString(turnId) ||
-        !['Stop', 'Interrupt', 'SubagentStop'].includes(event)) {
-      throw new Error('Claude lifecycle cleanup requires an exact session, prompt, and supported event');
+  // Only live state is capped: a new turn is refused rather than exceed it.
+  const admit = (key) => {
+    if (!lives.has(key) && lives.size >= MAX_LIVE_TURNS) {
+      throw new Error('Too many active Claude turns; LCU rejected this call safely');
     }
-    const key = turnKey(sessionId, turnId);
-    if (cleanedTurns.has(key)) return { content: [{ type: 'text', text: 'Turn already ended.' }] };
-    // Each bind stores a fresh activeTurns entry; a changed entry at resolution
-    // means the turn was re-bound while this cleanup was in flight.
-    const generation = activeTurns.get(key);
-    let rebound = false;
-    let cleanup = cleanupInFlight.get(key);
+  };
+
+  const openLife = (key, sessionId, turnId, subagent, upstreamId) => {
+    const life = { key, sessionId, turnId, subagent, upstreamId, endedUpstream: endedPrompts.has(upstreamId),
+      cleanup: null, ended: false };
+    lives.set(key, life);
+    endedKeys.delete(key);
+    return life;
+  };
+
+  async function turnEnded(life, event) {
+    if (life.ended) return { content: [{ type: 'text', text: 'Turn already ended.' }] };
+    const { key, sessionId, turnId } = life;
     const started = Date.now();
     let outcome = 'error';
+    let cleanup = life.cleanup;
+    let children = [];
+    life.endedUpstream = true;
     if (!cleanup) {
-      cleanup = upstream.callTool({ name: TURN_END_TOOL, arguments: {
-        hook_event_name: event,
-        session_id: sessionId,
-        turn_id: turnId,
-      } }, undefined, { timeout: TURN_END_TIMEOUT_MS });
-      cleanupInFlight.set(key, cleanup);
+      if (!life.subagent) {
+        // The host reported the prompt's end: close it here and now, whatever upstream answers, so no subagent
+        // can run on it afterwards (cross-turn off). Never rolled back; an unclear reply fails closed.
+        remember(endedPrompts, turnId);
+        if (!crossTurn()) {
+          // Cross-turn off keeps today's behavior: the prompt's subagents shared its upstream id, so they ended
+          // with it. Their ids are captured now, before any await or re-bind can change them, and each such
+          // life counts as ended so a later cross-turn-on re-bind renews it.
+          children = [...lives.values()].filter(child => child.subagent && child.turnId === turnId);
+          children = children.map(child => {
+            const captured = { sessionId: child.sessionId, upstreamId: child.upstreamId };
+            // From now on the child's pending and later calls carry the closed prompt id, never its live hash.
+            child.endedUpstream = true;
+            child.upstreamId = turnId;
+            return captured;
+          });
+        }
+      }
+      cleanup = sendTurnEnded(event, sessionId, life.upstreamId);
+      life.cleanup = cleanup;
     }
     try {
-      const result = await cleanup.finally(() => { rebound = activeTurns.get(key) !== generation; });
+      const result = await cleanup;
       if (result.isError) {
         const detail = (result.content ?? []).filter(item => item.type === 'text')
           .map(item => item.text).join('\n');
         throw new Error(`Original CUA turn cleanup failed: ${detail || 'unknown error'}`);
       }
-      if (!rebound) {
-        cleanedTurns.add(key);
-        if (cleanedTurns.size > 256) cleanedTurns.delete(cleanedTurns.values().next().value);
-        activeTurns.delete(key);
+      life.ended = true;
+      // A re-bound key belongs to a newer life; only this life's own state goes.
+      if (lives.get(key) === life) {
+        lives.delete(key);
+        remember(endedKeys, key);
       }
+      clearLifeContexts(life);
       outcome = 'ok';
       return result;
     } finally {
       log.event('turn_end', { hook_event: event, ms: Date.now() - started, outcome });
-      if (cleanupInFlight.get(key) === cleanup) cleanupInFlight.delete(key);
-      // A re-bound turn keeps its new identities for the later Stop cleanup.
-      if (!rebound) clearTurnContexts(sessionId, turnId);
+      if (life.cleanup === cleanup && !life.ended) life.cleanup = null;
+      // Only upstream is told about the children; their own Stop still cleans up the relay.
+      for (const child of children) {
+        try {
+          await sendTurnEnded(event === 'Stop' ? 'SubagentStop' : 'Interrupt', child.sessionId, child.upstreamId);
+        } catch (error) {
+          console.error('Claude MCP subagent cleanup failed:', asError(error));
+        }
+      }
     }
+  }
+
+  // The life a Stop, SubagentStop or hook Interrupt ends: the key's current one.
+  function lifeForHook(sessionId, turnId, event) {
+    if (!nonEmptyString(sessionId) || !nonEmptyString(turnId) ||
+        !['Stop', 'Interrupt', 'SubagentStop'].includes(event)) {
+      throw new Error('Claude lifecycle cleanup requires an exact session, prompt, and supported event');
+    }
+    const key = turnKey(sessionId, turnId);
+    // Every valid main Stop or Interrupt recommits the prompt's closure, even one that is then deduplicated.
+    if (event !== 'SubagentStop') remember(endedPrompts, turnId);
+    const current = lives.get(key);
+    if (current) return current;
+    if (endedKeys.has(key)) return undefined;
+    // A key this relay never bound is ended upstream without being recorded; closing its prompt (above, in
+    // turnEnded) is all later subagents need.
+    const subagent = event === 'SubagentStop';
+    return { key, sessionId, turnId, subagent, upstreamId: subagent ? subagentTurnId(sessionId, turnId) : turnId,
+      endedUpstream: true, cleanup: null, ended: false };
   }
 
   try {
@@ -269,18 +362,29 @@ export async function runClaudeBridge({
         if (!previous && contexts.size >= 1024) {
           throw new Error('Too many pending Claude tool identities; LCU rejected this call safely');
         }
-        contexts.set(context.toolUseId, context);
         const key = turnKey(context.sessionId, context.turnId);
-        // The turn is live again: a later Stop must reach upstream turn_ended
-        // even if an earlier aborted call already ran Interrupt cleanup for it.
-        cleanedTurns.delete(key);
-        // A cleanup still in flight ended the earlier life of this turn; the
-        // next Stop must start its own upstream turn_ended instead of joining it.
-        cleanupInFlight.delete(key);
-        activeTurns.set(key, {
-          sessionId: context.sessionId,
-          turnId: context.turnId,
-        });
+        const subagent = Boolean(context.agentId);
+        const crossOn = crossTurn();
+        let life = lives.get(key);
+        const endedLife = Boolean(life?.endedUpstream);
+        // With cross-turn off, a subagent of an ended prompt shares the ended id and is refused, as before.
+        const sharesEnded = subagent && !crossOn && endedPrompts.has(context.turnId);
+        // A life whose id is already the closed prompt id cannot do better off-mode, so it is reused unless a
+        // cleanup is in flight (the next Stop must start its own).
+        const stale = endedLife && (life.cleanup || crossOn || life.upstreamId !== context.turnId);
+        if (!life || stale || (sharesEnded && life.upstreamId !== context.turnId)) {
+          admit(key);
+          // The key's earlier life already ended upstream (completed, or a cleanup in flight that this bind
+          // supersedes), so with cross-turn on this life needs a fresh upstream turn id. A random UUID, not a
+          // counter, so it needs no state beyond the life record and cannot collide with a prompt id.
+          const renew = crossOn && (endedLife || endedKeys.has(key));
+          if (renew) log.event('turn_renew', { in_flight: Boolean(life?.cleanup), subagent });
+          life = openLife(key, context.sessionId, context.turnId, subagent,
+            renew ? randomUUID() : sharesEnded ? context.turnId
+              : subagent ? subagentTurnId(context.sessionId, context.turnId) : context.turnId);
+        }
+        context.life = life;
+        contexts.set(context.toolUseId, context);
         return { content: [{ type: 'text', text: 'Turn context bound.' }] };
       }
       if (MOD_ONLY_TOOLS.has(name)) {
@@ -296,7 +400,9 @@ export async function runClaudeBridge({
       }
       if (name === TURN_END_TOOL) {
         const event = toolArgs.hook_event_name;
-        return turnEnded(toolArgs.session_id, toolArgs.turn_id, event);
+        const life = lifeForHook(toolArgs.session_id, toolArgs.turn_id, event);
+        if (!life) return { content: [{ type: 'text', text: 'Turn already ended.' }] };
+        return turnEnded(life, event);
       }
       if (!PUBLIC_TOOLS.has(name)) {
         return { isError: true, content: [{ type: 'text', text: `Unknown LCU tool: ${name}` }] };
@@ -320,7 +426,7 @@ export async function runClaudeBridge({
         ? { ...turnMetadata } : {};
       Object.assign(turnMetadata, {
         session_id: context.sessionId,
-        turn_id: context.turnId,
+        turn_id: context.life.upstreamId,
         call_id: toolUseId,
       });
       metadata[TURN_CONTEXT_META] = turnMetadata;
@@ -340,7 +446,7 @@ export async function runClaudeBridge({
           // call alive, nobody is left to answer an approval the mod is still holding open.
           if (liveCalls === 0) broker.cancelWaiting();
           try {
-            await turnEnded(context.sessionId, context.turnId, 'Interrupt');
+            await turnEnded(context.life, 'Interrupt');
           } catch (error) {
             console.error('Claude MCP interrupt cleanup failed:', asError(error));
           }
@@ -392,16 +498,22 @@ export async function runClaudeBridge({
       if (shutdown) return shutdown;
       shutdown = (async () => {
         const drain = (async () => {
-          for (const turn of [...activeTurns.values()]) {
+          for (const life of [...lives.values()]) {
             try {
-              await turnEnded(turn.sessionId, turn.turnId, 'Interrupt');
+              await turnEnded(life, 'Interrupt');
             } catch (error) {
               console.error('Claude MCP turn cleanup during shutdown failed:', asError(error));
             }
           }
         })();
+        // Cleanups of superseded lives are still in flight too; give them the same drain window.
+        // Requests submitted while draining (serial cascades) join the wait until none is left.
+        const drainAll = (async () => {
+          await drain;
+          while (pendingEnds.size) await Promise.allSettled([...pendingEnds]);
+        })();
         let timer;
-        const drained = await Promise.race([drain.then(() => true), new Promise(resolve => {
+        const drained = await Promise.race([drainAll.then(() => true), new Promise(resolve => {
           timer = setTimeout(resolve, shutdownDrainMs, false);
         })]);
         clearTimeout(timer);
@@ -438,7 +550,7 @@ export async function runClaudeBridge({
     // EOF is the actual Claude-side connection-close signal; use it to drain exact
     // active turns before closing the original MCP client.
     process.stdin.once('end', closeDownstream);
-    return { server, upstream, contexts, activeTurns, close: async () => {
+    return { server, upstream, contexts, activeTurns: lives, close: async () => {
       process.stdin.off('end', closeDownstream);
       await closeUpstreamAfterTurnCleanup();
       if (!serverClose) serverClose = server.close();

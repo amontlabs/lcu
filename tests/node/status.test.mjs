@@ -3,7 +3,7 @@ import { mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { main } from '../../lcu/status.mjs';
-import { linuxApp, output, override, posixTests, temporary, write } from './fixtures.mjs';
+import { asNonRoot, linuxApp, output, override, posixTests, temporary, write } from './fixtures.mjs';
 
 const test = posixTests('the Linux release layout, whose app is a symlink');
 
@@ -27,6 +27,7 @@ function release(t) {
 
 test('status reports the release, the observed app and the tested pair', { skip: process.platform !== 'linux' }, async (t) => {
   const { root } = release(t);
+  asNonRoot(t, process.env.HOME);
   const seen = await output(t);
   assert.equal(await main(root, ['--json']), 0);
   const status = JSON.parse(seen.out);
@@ -36,9 +37,14 @@ test('status reports the release, the observed app and the tested pair', { skip:
   assert.equal(status.compatibility.status, 'tested');
   assert.equal(status.changed_since_install, null);
   assert.deepEqual([status.setup, status.pending, status.update], [null, [], null]);
+  assert.deepEqual(status.cross_turn, { enabled: false, source: null });
   seen.out = '';
   assert.equal(await main(root, []), 0);
-  assert.match(seen.out, /^LCU 0\.9\.8 \(linux arm64\)\.\nOriginal app: ChatGPT 26\.924\.22138 \(CUA runtime-new\)[\s\S]*Tested pair: yes/);
+  assert.match(seen.out, /^LCU 0\.9\.8 \(linux arm64\)\.\nOriginal app: ChatGPT 26\.924\.22138 \(CUA runtime-new\)[\s\S]*Tested pair: yes[\s\S]*Cross-turn Computer Use: off\./);
+  write(join(process.env.HOME, '.local/state/lcu/cross-turn.json'), JSON.stringify({ enabled: true, source: 'owner' }));
+  seen.out = '';
+  assert.equal(await main(root, ['--json']), 0);
+  assert.deepEqual(JSON.parse(seen.out).cross_turn, { enabled: true, source: 'owner' });
 });
 
 test('status exits 1 without a selected app and 2 on a usage error', async (t) => {

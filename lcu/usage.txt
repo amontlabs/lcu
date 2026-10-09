@@ -3,6 +3,7 @@ Usage: lcu [--chrome] [--audio] [--mcp-discovery-compat]
        lcu browser install
        lcu browser status
        lcu apps [list|allow APP|revoke APP] [--json]   (macOS)
+       lcu cross-turn [status|on|off] [--json] [--unattended]
        lcu origins [list [--session ID] [--json]]
        lcu origins forget ORIGIN [--session ID | --all-sessions] [--allowed | --denied]
        lcu prune [--keep N] [--yes]

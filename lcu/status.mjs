@@ -5,6 +5,7 @@ const { parseArgs } = process.getBuiltinModule('node:util');
 
 import * as diagnosticLog from './diagnostic_log.mjs';
 import { accountHome, readJson } from './fsutil.mjs';
+import { readCrossTurn } from './cross_turn.mjs';
 import { paths } from './runtime.mjs';
 import { loadSetupState, setupStatePath } from './setup.mjs';
 import { say, warn } from './terminal.mjs';
@@ -19,6 +20,16 @@ function savedSetup() {
     return existsSync(setupStatePath(home)) ? loadSetupState(home) : null;
   } catch {
     return null;
+  }
+}
+
+/** `{enabled, source}` of the cross-turn setting (off when unreadable). */
+function crossTurn() {
+  try {
+    const { enabled, source } = readCrossTurn(accountHome());
+    return { enabled, source };
+  } catch {
+    return { enabled: false, source: null };
   }
 }
 
@@ -42,6 +53,7 @@ export async function collect(root) {
     changed_since_install: tested.changedSinceInstall(descriptor, { version: observed.appVersion, runtime: observed.runtime }),
     setup: saved,
     pending: saved ? saved.pending : [],
+    cross_turn: crossTurn(),
     update: update.cachedNotice(root),
     diagnostic_log: diagnosticLog.status(),
   };
@@ -85,6 +97,7 @@ export async function main(root, argv = []) {
       lines.push(`Pending harnesses (not installed yet; \`lcu setup --reconcile\` registers them): ${saved.pending.join(', ')}.`);
     }
   }
+  lines.push(`Cross-turn Computer Use: ${status.cross_turn.enabled ? `on${status.cross_turn.source ? ` (${status.cross_turn.source})` : ''}` : 'off'}.`);
   if (status.update) lines.push(update.statusLine(root));
   lines.push(diagnosticLog.summary());
   say(...lines);

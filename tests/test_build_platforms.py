@@ -44,6 +44,7 @@ class BuildPlatformTests(unittest.TestCase):
                 (release / 'adapters/audio-files.mjs').write_text('fixture')
                 (release / 'adapters/codex.mjs').write_text('fixture')
                 (release / 'adapters/host-guard.mjs').write_text('fixture')
+                (release / 'adapters/cross-turn.mjs').write_text('fixture')
                 (release / 'adapters/diagnostics.mjs').write_text('fixture')
                 (release / 'adapters/pi/index.ts').write_text('fixture')
             with mock.patch.object(build_bundle, 'architecture', return_value='arm64'), \
@@ -82,6 +83,7 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertIn(prefix + 'adapters/audio-files.mjs', names)
                 self.assertIn(prefix + 'adapters/codex.mjs', names)
                 self.assertIn(prefix + 'adapters/host-guard.mjs', names)
+                self.assertIn(prefix + 'adapters/cross-turn.mjs', names)
                 self.assertIn(prefix + 'adapters/diagnostics.mjs', names)
                 self.assertNotIn(prefix + 'app/Contents/Resources/cua_node/bin/node', names)
                 manifest = json.load(bundle.extractfile(prefix + 'bundle.json'))

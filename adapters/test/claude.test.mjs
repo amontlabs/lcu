@@ -1,13 +1,15 @@
 import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { subagentTurnId } from '../claude.mjs';
+import { crossTurnEnabled, crossTurnSettingPath } from '../cross-turn.mjs';
 
 const relay = fileURLToPath(new URL('../claude.mjs', import.meta.url));
 const fixture = fileURLToPath(new URL('./claude-fixture.mjs', import.meta.url));
@@ -19,6 +21,7 @@ function installedCurrentEntryPoint(directory) {
   copyFileSync(relay, join(releaseAdapters, 'claude.mjs'));
   copyFileSync(clientModule, join(releaseAdapters, 'client.mjs'));
   copyFileSync(fileURLToPath(new URL('../host-guard.mjs', import.meta.url)), join(releaseAdapters, 'host-guard.mjs'));
+  copyFileSync(fileURLToPath(new URL('../cross-turn.mjs', import.meta.url)), join(releaseAdapters, 'cross-turn.mjs'));
   copyFileSync(fileURLToPath(new URL('../diagnostics.mjs', import.meta.url)), join(releaseAdapters, 'diagnostics.mjs'));
   symlinkSync(join(dirname(relay), 'node_modules'), join(releaseAdapters, 'node_modules'), 'dir');
   symlinkSync(join(directory, 'releases', '0.3.0-test'), join(directory, 'current'), 'dir');
@@ -43,8 +46,13 @@ async function waitFor(predicate, timeoutMs = 5_000) {
   assert.fail(`Condition did not become true within ${timeoutMs} ms`);
 }
 
-async function connectRelay({ throughCurrentSymlink = false } = {}) {
+async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-relay-test-'));
+  // The relay reads the setting from the account's state directory, which HOME points at below.
+  if (crossTurn !== undefined) {
+    mkdirSync(join(directory, '.local', 'state', 'lcu'), { recursive: true });
+    writeFileSync(join(directory, '.local', 'state', 'lcu', 'cross-turn.json'), JSON.stringify({ enabled: crossTurn }));
+  }
   const logPath = join(directory, 'original-fixture.jsonl');
   const env = {
     PATH: process.env.PATH ?? '/usr/bin:/bin',
@@ -56,7 +64,10 @@ async function connectRelay({ throughCurrentSymlink = false } = {}) {
   const scriptPath = throughCurrentSymlink ? installedCurrentEntryPoint(directory) : relay;
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [scriptPath, process.execPath, fixture],
+    args: maxEndedTurns === undefined ? [scriptPath, process.execPath, fixture] : ['--input-type=module', '-e',
+      `import { runClaudeBridge } from ${JSON.stringify(pathToFileURL(relay).href)};` +
+      `await runClaudeBridge({ command: ${JSON.stringify(process.execPath)}, ` +
+      `args: [${JSON.stringify(fixture)}], maxEndedTurns: ${maxEndedTurns} });`],
     env,
     stderr: 'pipe',
   });
@@ -103,6 +114,7 @@ async function connectRelay({ throughCurrentSymlink = false } = {}) {
     logs,
     diagnostics,
     diagnosticText,
+    directory,
     elicitationRequests,
     respondToNextElicitation(response) { elicitationResponses.push(response); },
     close,
@@ -308,8 +320,9 @@ test('Claude relay isolates overlapping child identities and makes SubagentStop 
       .map(entry => [entry.args.code, entry.meta['x-codex-turn-metadata']]));
     assert.deepEqual(forwarded, {
       'parent-active': { session_id: sessionId, turn_id: turnId, call_id: 'parent-active' },
-      'child-a-active': { session_id: 'agent-a', turn_id: turnId, call_id: 'child-a-active' },
-      'child-b-active': { session_id: 'agent-b', turn_id: turnId, call_id: 'child-b-active' },
+      // A subagent has its own upstream turn id, so its SubagentStop can never end the parent's prompt.
+      'child-a-active': { session_id: 'agent-a', turn_id: subagentTurnId('agent-a', turnId), call_id: 'child-a-active' },
+      'child-b-active': { session_id: 'agent-b', turn_id: subagentTurnId('agent-b', turnId), call_id: 'child-b-active' },
     });
 
     const pending = [
@@ -356,7 +369,8 @@ test('Claude relay isolates overlapping child identities and makes SubagentStop 
     } });
     assert.ok(!childBStop.isError);
     assert.equal(bridge.logs().filter(entry => entry.type === 'turn-ended' &&
-      entry.args.hook_event_name === 'SubagentStop').length, 2);
+      entry.args.hook_event_name === 'SubagentStop').length, 3,
+      'agent-a once, agent-b by the parent Stop cascade (cross-turn off) and by its own SubagentStop');
   } finally {
     await bridge.close();
   }
@@ -945,6 +959,560 @@ test('Claude relay logs a refused agent host approval without its message', asyn
     const events = bridge.diagnostics();
     assert.equal(events.find(entry => entry.event === 'approval_open').kind, 'agent_host_refused');
     assert.equal(events.find(entry => entry.event === 'approval_end').action, 'decline');
+  } finally {
+    await bridge.close();
+  }
+});
+
+const stop = (client, sessionId, turnId, event = 'Stop') => client.callTool({ name: 'turn_ended', arguments: {
+  hook_event_name: event, session_id: sessionId, turn_id: turnId,
+} });
+const upstreamTurnOf = (bridge, toolUseId) => bridge.logs().find(entry => entry.type === 'tool-call' &&
+  entry.meta['claudecode/toolUseId'] === toolUseId).meta['x-codex-turn-metadata'].turn_id;
+
+test('cross-turn setting path matches the setup state directory', () => {
+  assert.equal(crossTurnSettingPath('/h', 'linux'), '/h/.local/state/lcu/cross-turn.json');
+  assert.equal(crossTurnSettingPath('/h', 'darwin'), '/h/.local/state/lcu/cross-turn.json');
+  assert.equal(crossTurnSettingPath('/h', 'win32'), join('/h', 'AppData', 'Local', 'LCU', 'cross-turn.json'));
+});
+
+test('cross-turn setting is on only for a regular file with enabled true', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-cross-turn-setting-'));
+  try {
+    const path = join(directory, 'cross-turn.json');
+    assert.equal(crossTurnEnabled(path), false, 'missing');
+    const cases = [['{not json', false], ['[]', false], ['null', false], ['true', false], ['"yes"', false],
+      ['{}', false], ['{"enabled":false}', false], ['{"enabled":"true"}', false], ['{"enabled":1}', false],
+      ['{"enabled":true}', true], ['{"enabled":true,"source":"owner","changed_at":"x"}', true]];
+    for (const [text, expected] of cases) {
+      writeFileSync(path, text);
+      assert.equal(crossTurnEnabled(path), expected, text);
+    }
+    const target = join(directory, 'real.json');
+    writeFileSync(target, '{"enabled":true}');
+    rmSync(path);
+    symlinkSync(target, path);
+    assert.equal(crossTurnEnabled(path), false, 'a symlink is not a regular file');
+    assert.equal(crossTurnEnabled(directory), false, 'a directory');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Claude relay with cross-turn on gives a woken turn a fresh upstream turn id that the original service accepts', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const sessionId = 'strict-session';
+    const turnId = 'strict-prompt';
+    const first = await callWithContext(bridge.client, 'js', { code: 'first-life' }, { sessionId, turnId, toolUseId: 'ct-1' });
+    assert.equal(first.content[0].text, 'first-life');
+    assert.equal(upstreamTurnOf(bridge, 'ct-1'), turnId, 'the first life uses the prompt id unchanged');
+    await stop(bridge.client, sessionId, turnId);
+
+    // A background event wakes the same prompt id: the original service would refuse the ended id.
+    const second = await callWithContext(bridge.client, 'js', { code: 'second-life' }, { sessionId, turnId, toolUseId: 'ct-2' });
+    assert.equal(second.isError, undefined);
+    assert.equal(second.content[0].text, 'second-life');
+    const fresh = upstreamTurnOf(bridge, 'ct-2');
+    assert.notEqual(fresh, turnId);
+    const meta = bridge.logs().find(entry => entry.type === 'tool-call' &&
+      entry.meta['claudecode/toolUseId'] === 'ct-2').meta['x-codex-turn-metadata'];
+    assert.equal(meta.session_id, sessionId);
+
+    const secondStop = await stop(bridge.client, sessionId, turnId);
+    assert.equal(secondStop.content[0].text, 'Original cleanup completed.');
+    const ends = bridge.logs().filter(entry => entry.type === 'turn-ended');
+    assert.deepEqual(ends.map(entry => entry.args.turn_id), [turnId, fresh]);
+    assert.equal((await stop(bridge.client, sessionId, turnId)).content[0].text, 'Turn already ended.');
+
+    // A third life gets yet another id.
+    await callWithContext(bridge.client, 'js', { code: 'third-life' }, { sessionId, turnId, toolUseId: 'ct-3' });
+    const third = upstreamTurnOf(bridge, 'ct-3');
+    assert.ok(third !== turnId && third !== fresh);
+
+    // Two binds in one life share the fresh id, and no raw id is logged.
+    await callWithContext(bridge.client, 'js', { code: 'third-again' }, { sessionId, turnId, toolUseId: 'ct-4' });
+    assert.equal(upstreamTurnOf(bridge, 'ct-4'), third);
+    const renewals = bridge.diagnostics().filter(entry => entry.event === 'turn_renew');
+    assert.equal(renewals.length, 2);
+    assert.ok(!bridge.diagnosticText().includes(fresh));
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay with cross-turn off keeps the prompt id as the upstream turn id and the original service refuses the woken turn', async () => {
+  for (const crossTurn of [false, undefined]) {
+    const bridge = await connectRelay({ crossTurn });
+    try {
+      const sessionId = 'strict-session';
+      const turnId = 'strict-prompt';
+      await callWithContext(bridge.client, 'js', { code: 'first-life' }, { sessionId, turnId, toolUseId: 'off-1' });
+      await stop(bridge.client, sessionId, turnId);
+      const second = await callWithContext(bridge.client, 'js', { code: 'second-life' }, { sessionId, turnId, toolUseId: 'off-2' });
+      assert.equal(upstreamTurnOf(bridge, 'off-2'), turnId);
+      assert.equal(second.isError, true);
+      await stop(bridge.client, sessionId, turnId);
+      assert.deepEqual(bridge.logs().filter(entry => entry.type === 'turn-ended').map(entry => entry.args.turn_id),
+        [turnId, turnId]);
+      assert.equal(bridge.diagnostics().filter(entry => entry.event === 'turn_renew').length, 0);
+    } finally {
+      await bridge.close();
+    }
+  }
+});
+
+test('Claude relay with cross-turn on renews a subagent turn under the child identity', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const agentId = 'strict-child';
+    const turnId = 'strict-shared-prompt';
+    await callWithContext(bridge.client, 'js', { code: 'a' }, {
+      sessionId: 'strict-parent', turnId, toolUseId: 'sub-1', agentId });
+    assert.equal(upstreamTurnOf(bridge, 'sub-1'), subagentTurnId(agentId, turnId));
+    await stop(bridge.client, agentId, turnId, 'SubagentStop');
+    const again = await callWithContext(bridge.client, 'js', { code: 'b' }, {
+      sessionId: 'strict-parent', turnId, toolUseId: 'sub-2', agentId });
+    assert.equal(again.isError, undefined);
+    const fresh = upstreamTurnOf(bridge, 'sub-2');
+    assert.notEqual(fresh, turnId);
+    await stop(bridge.client, agentId, turnId, 'SubagentStop');
+    const ends = bridge.logs().filter(entry => entry.type === 'turn-ended');
+    assert.deepEqual(ends.map(entry => [entry.args.session_id, entry.args.hook_event_name, entry.args.turn_id]),
+      [[agentId, 'SubagentStop', subagentTurnId(agentId, turnId)], [agentId, 'SubagentStop', fresh]]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay with cross-turn on renews after an Interrupt, also while the Interrupt is still in flight', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const sessionId = 'strict-session';
+    const turnId = 'strict-interrupt';
+    const controller = new AbortController();
+    const aborted = callWithContext(bridge.client, 'js', { code: 'cancel-active' }, {
+      sessionId, turnId, toolUseId: 'int-1', signal: controller.signal,
+    }).then(value => ({ value }), error => ({ error }));
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'active-call-start'));
+    controller.abort();
+    assert.ok((await aborted).error);
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'turn-ended'));
+
+    const live = await callWithContext(bridge.client, 'js', { code: 'int-live' }, { sessionId, turnId, toolUseId: 'int-2' });
+    assert.equal(live.isError, undefined);
+    const fresh = upstreamTurnOf(bridge, 'int-2');
+    assert.notEqual(fresh, turnId);
+    await stop(bridge.client, sessionId, turnId);
+    assert.deepEqual(bridge.logs().filter(entry => entry.type === 'turn-ended')
+      .map(entry => [entry.args.hook_event_name, entry.args.turn_id]), [['Interrupt', turnId], ['Stop', fresh]]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay with cross-turn on renews a re-bind that lands while Interrupt cleanup is in flight', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const sessionId = 'hold-session';
+    const turnId = 'hold-cross';
+    const controller = new AbortController();
+    const aborted = callWithContext(bridge.client, 'js', { code: 'cancel-active' }, {
+      sessionId, turnId, toolUseId: 'hc-1', signal: controller.signal,
+    }).then(value => ({ value }), error => ({ error }));
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'active-call-start'));
+    controller.abort();
+    assert.ok((await aborted).error);
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'turn-ended'));
+    await callWithContext(bridge.client, 'js', { code: 'release-held-cleanup' }, { sessionId, turnId, toolUseId: 'hc-2' });
+    const fresh = upstreamTurnOf(bridge, 'hc-2');
+    assert.notEqual(fresh, turnId);
+    await stop(bridge.client, sessionId, turnId);
+    assert.deepEqual(bridge.logs().filter(entry => entry.type === 'turn-ended').map(entry => entry.args.turn_id),
+      [turnId, fresh]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay with cross-turn on ends a renewed turn with its fresh id when the host goes away', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const sessionId = 'strict-session';
+    const turnId = 'strict-drain';
+    await callWithContext(bridge.client, 'js', { code: 'x' }, { sessionId, turnId, toolUseId: 'dr-1' });
+    await stop(bridge.client, sessionId, turnId);
+    await callWithContext(bridge.client, 'js', { code: 'y' }, { sessionId, turnId, toolUseId: 'dr-2' });
+    const fresh = upstreamTurnOf(bridge, 'dr-2');
+    await bridge.client.close();
+    await waitFor(() => bridge.logs().filter(entry => entry.type === 'turn-ended').length === 2);
+    const last = bridge.logs().filter(entry => entry.type === 'turn-ended')[1];
+    assert.deepEqual([last.args.hook_event_name, last.args.turn_id], ['Interrupt', fresh]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay: a foreground subagent ending never ends the parent turn, with cross-turn on or off', async () => {
+  for (const crossTurn of [false, true]) {
+    const bridge = await connectRelay({ crossTurn });
+    try {
+      const parent = 'strict-parent';
+      const child = 'strict-child';
+      const turnId = 'strict-shared';
+      await callWithContext(bridge.client, 'js', { code: 'p1' }, { sessionId: parent, turnId, toolUseId: 'fg-1' });
+      await callWithContext(bridge.client, 'js', { code: 'c1' }, { sessionId: parent, turnId, toolUseId: 'fg-2', agentId: child });
+      await stop(bridge.client, child, turnId, 'SubagentStop');
+      const after = await callWithContext(bridge.client, 'js', { code: 'p2' }, { sessionId: parent, turnId, toolUseId: 'fg-3' });
+      assert.equal(after.isError, undefined, `crossTurn=${crossTurn}`);
+      assert.equal(upstreamTurnOf(bridge, 'fg-3'), turnId);
+      assert.deepEqual(bridge.logs().filter(entry => entry.type === 'turn-ended').map(entry => entry.args.turn_id),
+        [subagentTurnId(child, turnId)]);
+    } finally {
+      await bridge.close();
+    }
+  }
+});
+
+test('Claude relay: a background subagent after the parent Stop is refused with cross-turn off and works with it on', async () => {
+  for (const crossTurn of [false, true]) {
+    const bridge = await connectRelay({ crossTurn });
+    try {
+      const parent = 'strict-parent';
+      const child = 'strict-child';
+      const turnId = 'strict-background';
+      await callWithContext(bridge.client, 'js', { code: 'p1' }, { sessionId: parent, turnId, toolUseId: 'bg-1' });
+      const live = await callWithContext(bridge.client, 'js', { code: 'c1' }, { sessionId: parent, turnId, toolUseId: 'bg-2', agentId: child });
+      assert.equal(live.isError, undefined);
+      await stop(bridge.client, parent, turnId);
+      const ends = () => bridge.logs().filter(entry => entry.type === 'turn-ended');
+      const later = await callWithContext(bridge.client, 'js', { code: 'c2' }, { sessionId: parent, turnId, toolUseId: 'bg-3', agentId: child });
+      if (crossTurn) {
+        assert.equal(later.isError, undefined);
+        assert.equal(upstreamTurnOf(bridge, 'bg-3'), subagentTurnId(child, turnId));
+        assert.deepEqual(ends().map(entry => entry.args.turn_id), [turnId], 'no cascade');
+      } else {
+        assert.equal(later.isError, true);
+        assert.equal(upstreamTurnOf(bridge, 'bg-3'), turnId);
+        assert.deepEqual(ends().map(entry => [entry.args.session_id, entry.args.turn_id]),
+          [[parent, turnId], [child, subagentTurnId(child, turnId)]], 'cascade to the live subagent');
+      }
+      // The subagent's own SubagentStop still cleans up in the relay.
+      assert.ok(!(await stop(bridge.client, child, turnId, 'SubagentStop')).isError);
+    } finally {
+      await bridge.close();
+    }
+  }
+});
+
+const rejected = async promise => {
+  try { return (await promise).isError === true; } catch { return true; }
+};
+const turnEnds = bridge => bridge.logs().filter(entry => entry.type === 'turn-ended');
+
+test('Claude relay: cancelling a call of an ended life does not end the renewed life', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const sessionId = 'strict-session';
+    const turnId = 'strict-old-call';
+    const controller = new AbortController();
+    const old = callWithContext(bridge.client, 'js', { code: 'cancel-active' }, {
+      sessionId, turnId, toolUseId: 'oc-1', signal: controller.signal,
+    }).then(value => ({ value }), error => ({ error }));
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'active-call-start'));
+    await stop(bridge.client, sessionId, turnId);
+    await bindContext(bridge.client, { sessionId, turnId, toolUseId: 'oc-2' });
+    controller.abort();
+    assert.ok((await old).error);
+    await bridge.client.ping();
+    assert.equal(turnEnds(bridge).length, 1, 'the old life was already ended; no cleanup for the renewed one');
+    const live = await bridge.client.callTool({ name: 'js', arguments: { code: 'renewed' },
+      _meta: { 'claudecode/toolUseId': 'oc-2' } });
+    assert.equal(live.isError, undefined, 'the renewed life keeps its bound identity');
+    const fresh = upstreamTurnOf(bridge, 'oc-2');
+    assert.notEqual(fresh, turnId);
+    await stop(bridge.client, sessionId, turnId);
+    assert.deepEqual(turnEnds(bridge).map(entry => entry.args.turn_id), [turnId, fresh]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay: the parent cascade ends each subagent id it captured even if a subagent re-binds meanwhile', async () => {
+  const bridge = await connectRelay({ crossTurn: false });
+  try {
+    const turnId = 'cascade-prompt';
+    await callWithContext(bridge.client, 'js', { code: 'a' }, { sessionId: 'p-session', turnId, toolUseId: 'cs-p' });
+    await callWithContext(bridge.client, 'js', { code: 'a' }, { sessionId: 'p-session', turnId, toolUseId: 'cs-a', agentId: 'hold-a' });
+    await callWithContext(bridge.client, 'js', { code: 'b' }, { sessionId: 'p-session', turnId, toolUseId: 'cs-b', agentId: 'child-b' });
+    const parentStop = stop(bridge.client, 'p-session', turnId);
+    await waitFor(() => turnEnds(bridge).some(entry => entry.args.session_id === 'hold-a'));
+    // Child B re-binds while A's cascade cleanup is held: its mapping moves to the ended prompt id.
+    await bindContext(bridge.client, { sessionId: 'p-session', turnId, toolUseId: 'cs-b2', agentId: 'child-b' });
+    await callWithContext(bridge.client, 'js', { code: 'release-held-cleanup' }, { sessionId: 'other', turnId: 'other', toolUseId: 'cs-r' });
+    await parentStop;
+    const forB = turnEnds(bridge).filter(entry => entry.args.session_id === 'child-b');
+    assert.deepEqual(forB.map(entry => entry.args.turn_id), [subagentTurnId('child-b', turnId)],
+      'B\'s live id from when the cascade began is ended, not the prompt id twice');
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay with cross-turn off refuses a subagent bound while the parent Stop is still pending', async () => {
+  for (const crossTurn of [false, true]) {
+    const bridge = await connectRelay({ crossTurn });
+    try {
+      const parent = 'hold-strict-parent';
+      const turnId = 'strict-pending';
+      await callWithContext(bridge.client, 'js', { code: 'p' }, { sessionId: parent, turnId, toolUseId: 'pd-p' });
+      const parentStop = stop(bridge.client, parent, turnId);
+      await waitFor(() => turnEnds(bridge).some(entry => entry.args.session_id === parent));
+      const child = await callWithContext(bridge.client, 'js', { code: 'c' }, {
+        sessionId: parent, turnId, toolUseId: 'pd-c', agentId: 'strict-child' });
+      assert.equal(child.isError === true, !crossTurn, `crossTurn=${crossTurn}`);
+      assert.equal(upstreamTurnOf(bridge, 'pd-c'), crossTurn ? subagentTurnId('strict-child', turnId) : turnId);
+      await callWithContext(bridge.client, 'js', { code: 'release-held-cleanup' }, { sessionId: 'other', turnId: 'other', toolUseId: 'pd-r' });
+      await parentStop;
+    } finally {
+      await bridge.close();
+    }
+  }
+});
+
+test('Claude relay bounds its history by eviction and never refuses work or cleanup for it', async () => {
+  const fill = async (bridge, count) => {
+    for (let index = 0; index < count; index++) {
+      await callWithContext(bridge.client, 'js', { code: 'f' }, {
+        sessionId: `strict-fill-${index}`, turnId: `fill-${index}`, toolUseId: `fill-${index}` });
+      await stop(bridge.client, `strict-fill-${index}`, `fill-${index}`);
+    }
+  };
+  // Off: a prompt closed more than the cap ago is forgotten, so its child runs on its own id (prior behavior).
+  let bridge = await connectRelay({ crossTurn: false, maxEndedTurns: 3 });
+  try {
+    await callWithContext(bridge.client, 'js', { code: 'p0' }, { sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'ev-p' });
+    await stop(bridge.client, 'strict-p', 'strict-p0');
+    const early = await callWithContext(bridge.client, 'js', { code: 'c' }, {
+      sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'ev-c1', agentId: 'strict-c1' });
+    assert.equal(early.isError, true, 'refused while the prompt is remembered');
+    await fill(bridge, 3);
+    const late = await callWithContext(bridge.client, 'js', { code: 'c' }, {
+      sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'ev-c2', agentId: 'strict-c2' });
+    assert.equal(late.isError, undefined, 'no refusal because of history size');
+    await fill(bridge, 5);
+    assert.ok(!(await stop(bridge.client, 'strict-late', 'late-prompt')).isError, 'cleanup is never refused either');
+  } finally {
+    await bridge.close();
+  }
+  // On: an evicted key rebinds with its prompt id, which upstream may refuse (prior behavior).
+  bridge = await connectRelay({ crossTurn: true, maxEndedTurns: 3 });
+  try {
+    await callWithContext(bridge.client, 'js', { code: 'p0' }, { sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'ev-p' });
+    await stop(bridge.client, 'strict-p', 'strict-p0');
+    await fill(bridge, 2);
+    await callWithContext(bridge.client, 'js', { code: 'kept' }, { sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'ev-kept' });
+    assert.notEqual(upstreamTurnOf(bridge, 'ev-kept'), 'strict-p0', 'remembered: renewed');
+    await stop(bridge.client, 'strict-p', 'strict-p0');
+    await fill(bridge, 3);
+    await callWithContext(bridge.client, 'js', { code: 'old' }, { sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'ev-old' });
+    assert.equal(upstreamTurnOf(bridge, 'ev-old'), 'strict-p0', 'evicted: forwards its prompt id');
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay cascade captures child ids when the parent end starts, even if a child re-binds while it is held', async () => {
+  const bridge = await connectRelay({ crossTurn: false });
+  try {
+    const parent = 'hold-strict-parent';
+    const turnId = 'strict-snapshot';
+    await callWithContext(bridge.client, 'js', { code: 'p' }, { sessionId: parent, turnId, toolUseId: 'sn-p' });
+    await callWithContext(bridge.client, 'js', { code: 'c' }, { sessionId: parent, turnId, toolUseId: 'sn-c', agentId: 'strict-child' });
+    const parentStop = stop(bridge.client, parent, turnId);
+    await waitFor(() => turnEnds(bridge).some(entry => entry.args.session_id === parent));
+    // The child re-binds from its own id to the closed prompt id while the parent's reply is held.
+    await bindContext(bridge.client, { sessionId: parent, turnId, toolUseId: 'sn-c2', agentId: 'strict-child' });
+    await callWithContext(bridge.client, 'js', { code: 'release-held-cleanup' }, { sessionId: 'other', turnId: 'other', toolUseId: 'sn-r' });
+    await parentStop;
+    assert.deepEqual(turnEnds(bridge).filter(entry => entry.args.session_id === 'strict-child')
+      .map(entry => entry.args.turn_id), [subagentTurnId('strict-child', turnId)]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay keeps a prompt closed when upstream answers its end with an error', async () => {
+  const bridge = await connectRelay({ crossTurn: false });
+  try {
+    const parent = 'fail-strict-parent';
+    const turnId = 'strict-failed-end';
+    await callWithContext(bridge.client, 'js', { code: 'p' }, { sessionId: parent, turnId, toolUseId: 'fe-p' });
+    assert.equal(await rejected(stop(bridge.client, parent, turnId)), true);
+    const child = await callWithContext(bridge.client, 'js', { code: 'c' }, {
+      sessionId: parent, turnId, toolUseId: 'fe-c', agentId: 'strict-child' });
+    assert.equal(child.isError, true);
+    assert.equal(upstreamTurnOf(bridge, 'fe-c'), turnId);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay renews a child that an off-mode cascade ended once cross-turn is turned on', async () => {
+  const bridge = await connectRelay({ crossTurn: false });
+  try {
+    const parent = 'strict-parent';
+    const turnId = 'strict-flip';
+    await callWithContext(bridge.client, 'js', { code: 'p' }, { sessionId: parent, turnId, toolUseId: 'fl-p' });
+    await callWithContext(bridge.client, 'js', { code: 'c' }, { sessionId: parent, turnId, toolUseId: 'fl-c', agentId: 'strict-child' });
+    await stop(bridge.client, parent, turnId);
+    writeFileSync(join(bridge.directory, '.local', 'state', 'lcu', 'cross-turn.json'), '{"enabled":true}');
+    const again = await callWithContext(bridge.client, 'js', { code: 'c2' }, {
+      sessionId: parent, turnId, toolUseId: 'fl-c2', agentId: 'strict-child' });
+    assert.equal(again.isError, undefined);
+    const fresh = upstreamTurnOf(bridge, 'fl-c2');
+    assert.ok(fresh !== turnId && fresh !== subagentTurnId('strict-child', turnId));
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay shutdown waits for a superseded life whose cleanup is still pending', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const sessionId = 'hold-session';
+    const turnId = 'sd-turn';
+    await callWithContext(bridge.client, 'js', { code: 'u' }, { sessionId, turnId, toolUseId: 'sd-1' });
+    const heldStop = stop(bridge.client, sessionId, turnId).catch(() => {});
+    await waitFor(() => turnEnds(bridge).length === 1);
+    await callWithContext(bridge.client, 'js', { code: 'v' }, { sessionId, turnId, toolUseId: 'sd-2' });
+    assert.ok(!(await stop(bridge.client, sessionId, turnId)).isError);
+    const closing = Date.now();
+    await bridge.client.close();
+    await heldStop;
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'fixture-exit'), 8_000);
+    assert.ok(Date.now() - closing >= 1_500,
+      'the held cleanup of the superseded life kept the original server open for the drain window');
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay keeps a renewed id on its active life and rejects new turns at the live limit', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const sessionId = 'strict-session';
+    const turnId = 'strict-oldest';
+    await callWithContext(bridge.client, 'js', { code: 'a' }, { sessionId, turnId, toolUseId: 'lim-0' });
+    await stop(bridge.client, sessionId, turnId);
+    await bindContext(bridge.client, { sessionId, turnId, toolUseId: 'lim-1' });
+    let refusedAt;
+    for (let index = 0; index < 1100 && refusedAt === undefined; index++) {
+      if (await rejected(bindContext(bridge.client, {
+        sessionId: `limit-${index}`, turnId: `limit-${index}`, toolUseId: `limit-${index}` }))) refusedAt = index;
+    }
+    assert.ok(refusedAt !== undefined, 'new work is rejected once too many turns are live');
+    const live = await bridge.client.callTool({ name: 'js', arguments: { code: 'still' },
+      _meta: { 'claudecode/toolUseId': 'lim-1' } });
+    assert.equal(live.isError, undefined);
+    const fresh = upstreamTurnOf(bridge, 'lim-1');
+    assert.notEqual(fresh, turnId);
+    await stop(bridge.client, sessionId, turnId);
+    assert.deepEqual(turnEnds(bridge).map(entry => entry.args.turn_id), [turnId, fresh]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay does not let a child context bound before the parent Stop run on its live id afterwards', async () => {
+  const bridge = await connectRelay({ crossTurn: false });
+  try {
+    const parent = 'hold-strict-parent';
+    const turnId = 'strict-prebound';
+    await callWithContext(bridge.client, 'js', { code: 'p' }, { sessionId: parent, turnId, toolUseId: 'pb-p' });
+    await callWithContext(bridge.client, 'js', { code: 'c0' }, { sessionId: parent, turnId, toolUseId: 'pb-c0', agentId: 'strict-child' });
+    await bindContext(bridge.client, { sessionId: parent, turnId, toolUseId: 'pb-c', agentId: 'strict-child' });
+    const parentStop = stop(bridge.client, parent, turnId);
+    await waitFor(() => turnEnds(bridge).some(entry => entry.args.session_id === parent));
+    const child = await bridge.client.callTool({ name: 'js', arguments: { code: 'late-child' },
+      _meta: { 'claudecode/toolUseId': 'pb-c' } });
+    assert.equal(child.isError, true);
+    assert.equal(upstreamTurnOf(bridge, 'pb-c'), turnId);
+    await callWithContext(bridge.client, 'js', { code: 'release-held-cleanup' }, { sessionId: 'other', turnId: 'other', toolUseId: 'pb-r' });
+    await parentStop;
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay renews with cross-turn on after its own cleanup failed', async () => {
+  const bridge = await connectRelay({ crossTurn: true });
+  try {
+    const sessionId = 'fail-strict-main';
+    const turnId = 'strict-own-failed';
+    await callWithContext(bridge.client, 'js', { code: 'a' }, { sessionId, turnId, toolUseId: 'of-1' });
+    assert.equal(await rejected(stop(bridge.client, sessionId, turnId)), true);
+    const again = await callWithContext(bridge.client, 'js', { code: 'b' }, { sessionId, turnId, toolUseId: 'of-2' });
+    assert.equal(again.isError, undefined);
+    assert.notEqual(upstreamTurnOf(bridge, 'of-2'), turnId);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay recovers a child refused with cross-turn off once cross-turn is turned on', async () => {
+  const bridge = await connectRelay({ crossTurn: false });
+  try {
+    const parent = 'strict-parent';
+    const turnId = 'strict-recover';
+    await callWithContext(bridge.client, 'js', { code: 'p' }, { sessionId: parent, turnId, toolUseId: 'rc-p' });
+    await stop(bridge.client, parent, turnId);
+    const refused = await callWithContext(bridge.client, 'js', { code: 'c' }, {
+      sessionId: parent, turnId, toolUseId: 'rc-c', agentId: 'strict-child' });
+    assert.equal(refused.isError, true);
+    writeFileSync(join(bridge.directory, '.local', 'state', 'lcu', 'cross-turn.json'), '{"enabled":true}');
+    const again = await callWithContext(bridge.client, 'js', { code: 'c2' }, {
+      sessionId: parent, turnId, toolUseId: 'rc-c2', agentId: 'strict-child' });
+    assert.equal(again.isError, undefined);
+    assert.equal(upstreamTurnOf(bridge, 'rc-c2') === turnId, false);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay shutdown ends the children its parent cascade submits during the drain', async () => {
+  const bridge = await connectRelay({ crossTurn: false });
+  try {
+    const parent = 'sd-parent';
+    const turnId = 'sd-cascade';
+    await callWithContext(bridge.client, 'js', { code: 'p' }, { sessionId: parent, turnId, toolUseId: 'sc-p' });
+    for (const child of ['sd-child-1', 'sd-child-2']) {
+      await callWithContext(bridge.client, 'js', { code: 'c' }, { sessionId: parent, turnId, toolUseId: `sc-${child}`, agentId: child });
+    }
+    await bridge.client.close();
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'fixture-exit'));
+    const records = bridge.logs();
+    const exit = records.findIndex(entry => entry.type === 'fixture-exit');
+    for (const child of ['sd-child-1', 'sd-child-2']) {
+      const end = records.findIndex(entry => entry.type === 'turn-ended' && entry.args.session_id === child);
+      assert.ok(end >= 0 && end < exit, `${child} was ended before the original server closed`);
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('Claude relay recommits a prompt closure on a deduplicated Stop after history eviction', async () => {
+  const bridge = await connectRelay({ crossTurn: false, maxEndedTurns: 3 });
+  try {
+    await callWithContext(bridge.client, 'js', { code: 'p0' }, { sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'rc2-p' });
+    await stop(bridge.client, 'strict-p', 'strict-p0');
+    for (const index of [1, 2, 3]) await stop(bridge.client, `strict-u${index}`, `u${index}`);
+    const dedupe = await stop(bridge.client, 'strict-p', 'strict-p0');
+    assert.equal(dedupe.content[0].text, 'Turn already ended.');
+    const child = await callWithContext(bridge.client, 'js', { code: 'c' }, {
+      sessionId: 'strict-p', turnId: 'strict-p0', toolUseId: 'rc2-c', agentId: 'strict-c' });
+    assert.equal(child.isError, true);
   } finally {
     await bridge.close();
   }

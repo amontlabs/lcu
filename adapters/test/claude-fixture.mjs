@@ -75,10 +75,18 @@ async function waitUntilAborted(signal) {
 // turn_ended for a 'hold-*' session waits until a 'release-held-cleanup' js call.
 let releaseHeldCleanup;
 
+// Like the original service, '*strict-*' sessions refuse tool calls for a turn id that turn_ended already ended,
+// whichever session ended it: ended turns are keyed by turn id alone.
+const endedTurns = new Set();
+
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args = {}, _meta } = request.params;
   if (name === 'turn_ended') {
     log({ type: 'turn-ended', args });
+    if (typeof args.session_id === 'string' && args.session_id.includes('strict-')) endedTurns.add(args.turn_id);
+    if (typeof args.session_id === 'string' && args.session_id.includes('fail-')) {
+      return { isError: true, content: [{ type: 'text', text: 'Original cleanup failed.' }] };
+    }
     if (typeof args.session_id === 'string' && args.session_id.startsWith('hold-') && !releaseHeldCleanup) {
       await new Promise(resolve => { releaseHeldCleanup = resolve; });
       log({ type: 'turn-ended-released', args });
@@ -87,6 +95,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   }
 
   log({ type: 'tool-call', name, args, meta: _meta });
+  const turnMeta = _meta?.['x-codex-turn-metadata'];
+  if (String(turnMeta?.session_id).includes('strict-') && endedTurns.has(turnMeta?.turn_id)) {
+    return { isError: true, content: [{ type: 'text',
+      text: 'Computer Use is unavailable because the current turn ended' }] };
+  }
   if (name === 'js' && typeof args.code === 'string' && args.code.startsWith('approval-')) {
     const params = approvalRequest(args.code);
     const response = await server.elicitInput(params, { signal: extra.signal });
