@@ -1,10 +1,16 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { userInfo } from 'node:os';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { TSchema } from 'typebox';
-import { createCuaClient, nativeAppApprovalOptions, nativeAppApprovalResponse } from '../client.mjs';
+import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { createCuaClient, MODEL_TOOLS, nativeAppApprovalOptions, nativeAppApprovalResponse } from '../client.mjs';
 import { persistAudioContent } from '../audio-files.mjs';
+import { openDiagnosticLog } from '../diagnostics.mjs';
+import { cacheDirectory, checkOnce, readRecord, writeRecord } from '../../lcu/check_record.mjs';
+import { tryAcquire } from '../../lcu/lock.mjs';
 
 type OriginalContent = { type: string; text?: string; data?: string; mimeType?: string };
 
@@ -38,6 +44,223 @@ function commandFromEnvironment(selected?: string[]) {
 function originsFromEnvironment() {
   const raw = process.env.LCU_APPROVED_ORIGINS;
   return raw ? JSON.parse(raw) : [];
+}
+
+// The original runtime's model-facing surface: the public tool descriptors and the initialization
+// instructions. Pi needs both before its model call, but they only change with LCU, the app or the CUA
+// runtime, so a session that knows them registers the tools and starts the runtime on the first call.
+type SurfaceTool = { name: string; description: string; inputSchema: Record<string, unknown> };
+type Surface = { tools: SurfaceTool[]; instructions: string };
+
+const SURFACE_FORMAT = 1;
+const SURFACE_FILE = 'pi-surfaces.json';
+const SURFACE_ENTRIES = 8;
+// Environment the original launcher reads when it builds its instructions and tool descriptions.
+// CUA_REPL_ENABLED_SURFACES is in the cache key because it changes those instructions.
+const SURFACE_ENVIRONMENT = ['CUA_REPL_ENABLED_SURFACES', 'CUA_REPL_BROWSER_ENV', 'CUA_REPL_BROWSER_GUIDANCE',
+  'NODE_REPL_TOOL_OVERRIDES', 'SKY_ENABLE_AUDIO', 'NODE_REPL_ENABLE_AUDIO'];
+// Module scope, outside the factory, so every session and subagent child that shares this evaluation
+// shares the map. Pi can also evaluate this file again in the same process: its loader does not keep a
+// module cache, and a different working directory drops the factory cache. The map therefore lives on
+// globalThis, and a later evaluation binds the same map.
+const knownSurfaces: Map<string, Surface> = (globalThis as any)[Symbol.for('lcu.pi.surfaces')] ??= new Map();
+
+/** The surface as plain JSON, the same shape the cache file holds, so both paths register identical bytes. */
+function surfaceOf(client: ReturnType<typeof createCuaClient>): Surface {
+  return JSON.parse(JSON.stringify({
+    tools: client.publicTools().map((tool: any) => ({
+      name: tool.name, description: tool.description ?? '', inputSchema: tool.inputSchema,
+    })),
+    instructions: client.instructions,
+  }));
+}
+
+/** Exactly the supported public tools, once each, with a description and an object schema, plus instructions. */
+function validSurface(value: any): value is Surface {
+  if (!value || typeof value !== 'object' || typeof value.instructions !== 'string' || !Array.isArray(value.tools)) {
+    return false;
+  }
+  const names = value.tools.map((tool: any) => tool?.name);
+  return value.tools.length === MODEL_TOOLS.size && new Set(names).size === names.length &&
+    names.every((name: string) => MODEL_TOOLS.has(name)) && value.tools.every((tool: any) =>
+    typeof tool.description === 'string' && tool.inputSchema && typeof tool.inputSchema === 'object' &&
+      !Array.isArray(tool.inputSchema));
+}
+
+const fileStamp = (path: string | undefined) => {
+  if (path === undefined) return null;
+  try {
+    const stat = statSync(path);
+    return [realpathSync(path), stat.size, stat.mtimeMs];
+  } catch {
+    return null;
+  }
+};
+
+/** The PATH of the environment the runtime command gets: the SDK's default overlaid with this process's. */
+const childPath = () => ({ ...getDefaultEnvironment(), ...process.env }.PATH);
+
+/**
+ * The file `name` starts: a name with a slash relative to the working directory the transport uses
+ * (this process's), otherwise the first executable file on `path`. Undefined when no such file is found.
+ */
+function resolveExecutable(name: string, path = childPath()) {
+  if (name.includes('/')) return resolve(name);
+  if (path === undefined) return undefined;
+  for (const directory of path.split(delimiter)) {
+    const candidate = resolve(directory || '.', name);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch { /* not here */ }
+  }
+  return undefined;
+}
+
+/** The files `command` names: the executable it starts and each later argument that is a path. */
+function commandFiles(command: string[]) {
+  return command.map((part, index) => index === 0 ? resolveExecutable(part)
+    : part.includes('/') ? resolve(part) : undefined);
+}
+
+/** Whether `file` is the LCU launcher `name`: `bin/<name>` in a tree that holds `lcu/<script>`. */
+function isLauncher(file: string | undefined, name: string, script: string) {
+  if (file === undefined) return false;
+  try {
+    const real = realpathSync(file);
+    return basename(real) === name && basename(dirname(real)) === 'bin' &&
+      statSync(join(dirname(dirname(real)), 'lcu', script)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The `bin/lcu` launcher `command` runs, for the two launch forms whose behavior the adapter knows, or
+ * undefined for any other command. A wrapper (`node`, `env`, a shell) can change the working directory,
+ * `PATH` or arguments before it starts a release, so a release-shaped argument does not show what runs.
+ *
+ * - `lcu ...`: the executable is the release launcher, found as the transport finds it.
+ * - `lcu-session --user ACCOUNT -- LCU ...` (also `--user=ACCOUNT`), the form `lcu setup` and the Linux
+ *   default write: lcu/session.mjs keeps the working directory and `PATH`, changes only the desktop
+ *   variables, and execs LCU as execvp finds it on that `PATH` (`/bin:/usr/bin` when unset).
+ */
+function launchedLauncher(command: string[]) {
+  const executable = resolveExecutable(command[0]);
+  if (isLauncher(executable, 'lcu', 'runtime.mjs')) return executable;
+  if (!isLauncher(executable, 'lcu-session', 'session.mjs')) return undefined;
+  const rest = command[1] === '--user' && typeof command[2] === 'string' ? command.slice(3)
+    : command[1]?.startsWith('--user=') ? command.slice(2) : undefined;
+  if (rest?.[0] !== '--' || !rest[1]) return undefined;
+  const path = childPath();
+  const target = resolveExecutable(rest[1], path === undefined ? '/bin:/usr/bin' : path);
+  return isLauncher(target, 'lcu', 'runtime.mjs') ? target : undefined;
+}
+
+const plistString = (plist: string, key: string) =>
+  new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(plist)?.[1];
+
+/**
+ * The LCU release the command runs and the app and CUA runtime it selects, read from files without
+ * starting anything: the release directory and its bundle.json stamp; on macOS the app's Info.plist
+ * versions and the CUA manifest, which change when the app updates itself in place; on Linux the CUA
+ * manifest and the app.asar stamp. Undefined when the command's launch form is not one the adapter knows
+ * (launchedLauncher) or the release's versions cannot be read.
+ */
+function releaseIdentity(command: string[]) {
+  const file = launchedLauncher(command);
+  if (file === undefined) return undefined;
+  try {
+    const root = dirname(dirname(realpathSync(file)));
+    const descriptor = JSON.parse(readFileSync(join(root, 'installation.json'), 'utf8'));
+    const release = { root, bundle: fileStamp(join(root, 'bundle.json')) };
+    const manifest = (resources: string) =>
+      JSON.parse(readFileSync(join(resources, 'cua_node', 'manifest.json'), 'utf8')).runtime_archive_version;
+    let app: Record<string, any>;
+    if (descriptor.platform === 'darwin') {
+      const plist = readFileSync(join(descriptor.app, 'Contents', 'Info.plist'), 'utf8');
+      app = { version: plistString(plist, 'CFBundleShortVersionString'), build: plistString(plist, 'CFBundleVersion'),
+        runtime: manifest(join(descriptor.app, 'Contents', 'Resources')) };
+    } else if (descriptor.platform === 'linux') {
+      const resources = join(root, 'app', 'resources');
+      app = { asar: fileStamp(join(resources, 'app.asar')), runtime: manifest(resources) };
+    } else {
+      return undefined;
+    }
+    if (typeof app.runtime !== 'string' || !app.runtime || !(app.version || app.asar)) return undefined;
+    return { release, app };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The surface record in LCU's per-account cache directory (lcu/check_record.mjs), beside `update.json`.
+ * Windows has no cache: the surface key does not yet read its launcher layout. A lost or unreadable
+ * record costs one connect. Concurrent writers share one write through the record's lock, then write
+ * themselves if that wait expires.
+ */
+const surfaceRecord = {
+  path: () => join(cacheDirectory(), SURFACE_FILE),
+  wait: 1_000,
+  lock: (path: string) => tryAcquire(path),
+};
+
+/**
+ * The cache key for this command, or undefined when the surface must not be cached: the cache is off,
+ * the platform is Windows, or the command is not a known launch form of an LCU release whose versions
+ * can be read. The key includes the launch command (so `--chrome` and the other flags count), the
+ * launcher environment (including `CUA_REPL_ENABLED_SURFACES`), the platform, Pi or OMP, and the
+ * per-account cache directory. The in-memory map is process-wide, so without that directory a surface
+ * learned for one home could be served to another home in the same process.
+ */
+export function surfaceKey(command: string[], allowedOrigins: string[], adapter: 'pi' | 'omp') {
+  if (process.env.LCU_SURFACE_CACHE === '0' || process.platform === 'win32') return undefined;
+  const installed = releaseIdentity(command);
+  if (!installed) return undefined;
+  const files = commandFiles(command);
+  const environment = Object.fromEntries(SURFACE_ENVIRONMENT.map(name => [name, process.env[name] ?? null]));
+  return createHash('sha256').update(JSON.stringify({
+    format: SURFACE_FORMAT, adapter, command, allowedOrigins, environment,
+    platform: process.platform, arch: process.arch, cache: cacheDirectory(),
+    files: files.map(fileStamp), installed,
+  })).digest('hex');
+}
+
+function readSurfaceFile(): Record<string, unknown> {
+  return readRecord(surfaceRecord.path());
+}
+
+/** The surface last seen for `key`, from this process or the cache file. */
+function lookupSurface(key: string) {
+  const remembered = knownSurfaces.get(key);
+  if (remembered) return remembered;
+  const stored = readSurfaceFile()[key];
+  if (!validSurface(stored)) return undefined;
+  knownSurfaces.set(key, stored);
+  return stored;
+}
+
+/**
+ * Remember `surface` for `key` in this process and in the cache file. `writeRecord` replaces the file
+ * atomically, mode 0600, and keeps the newer entries this call still wants. A failure leaves the
+ * in-memory entry; the next process connects as before.
+ */
+function storeSurface(key: string, surface: Surface) {
+  knownSurfaces.set(key, surface);
+  checkOnce(surfaceRecord, {
+    hit: (path) => {
+      const stored = readRecord(path)[key];
+      return validSurface(stored) && JSON.stringify(stored) === JSON.stringify(surface);
+    },
+    check: (path) => {
+      if (path === null) return;
+      const existing = Object.keys(readRecord(path)).filter(other => other !== key);
+      const retain = new Set(existing.slice(1 - SURFACE_ENTRIES));
+      writeRecord(path, key, JSON.stringify(surface), name => retain.has(name));
+    },
+  });
 }
 
 const PICK_RESULT_MARKER = 'LCU_PICK_RESULT:';
@@ -81,6 +304,9 @@ export default function (pi: ExtensionAPI, options: {
   let pendingPickerCleanup: { client: ReturnType<typeof createCuaClient>; turn: { sessionId: string; turnId: string } } | undefined;
   let cleanupInFlight: Promise<void> | undefined;
   let approvalContext: ExtensionContext | undefined;
+  // The surface this session registered its tools from, cached or live.
+  let surface: Surface | undefined;
+  const adapter = options.ompEssentialTools ? 'omp' : 'pi';
 
   function warnCleanup(ctx: ExtensionContext, error: unknown) {
     const message = `LCU turn cleanup is pending: ${error instanceof Error ? error.message : String(error)}`;
@@ -111,6 +337,12 @@ export default function (pi: ExtensionAPI, options: {
     }
     if (!ctx.hasUI || typeof ctx.ui.select !== 'function') {
       ctx.ui.notify('Stopping Computer Use requires Pi interactive selection.', 'warning');
+      return;
+    }
+    // Only a host this session started can have Computer Use apps active for its turn. Without one,
+    // do not start a host just to find nothing to stop.
+    if (!bridge && !pending) {
+      ctx.ui.notify('No active Computer Use app is available to stop.', 'info');
       return;
     }
     const turn = { ...active };
@@ -379,14 +611,14 @@ export default function (pi: ExtensionAPI, options: {
     }
   }
 
-  function registerTools(client: ReturnType<typeof createCuaClient>) {
+  function registerTools(descriptors: SurfaceTool[]) {
     // Pi refreshes tools registered during before_agent_start before its model call.
-    for (const descriptor of client.publicTools()) {
+    for (const descriptor of descriptors) {
       const name = descriptor.name;
       pi.registerTool({
         name,
         label: `LCU ${name}`,
-        description: descriptor.description ?? '',
+        description: descriptor.description,
         parameters: descriptor.inputSchema as TSchema,
         ...(options.ompEssentialTools ? { loadMode: 'essential' } : {}),
         async execute(id, args, signal, _onUpdate, ctx) {
@@ -413,14 +645,49 @@ export default function (pi: ExtensionAPI, options: {
     }
   }
 
+  /** Register `next`'s tools unless this session already registered the same ones. */
+  function useSurface(next: Surface) {
+    if (!surface || JSON.stringify(surface.tools) !== JSON.stringify(next.tools)) registerTools(next.tools);
+    surface = next;
+  }
+
+  function cacheKey() {
+    try {
+      return surfaceKey(commandFromEnvironment(options.command), originsFromEnvironment(), adapter);
+    } catch {
+      return undefined; // connect() reports the configuration error
+    }
+  }
+
+  /** The surface last seen for this configuration, without starting a host. */
+  function knownSurface() {
+    const key = cacheKey();
+    return key === undefined ? undefined : lookupSurface(key);
+  }
+
+  /** Keep a connected host's surface for later sessions; replace a different one and log that it changed. */
+  function rememberSurface(key: string | undefined, live: Surface, log: { event(type: string, fields?: object): void }) {
+    if (key === undefined) return;
+    const known = lookupSurface(key);
+    if (known && JSON.stringify(known) === JSON.stringify(live)) return;
+    storeSurface(key, live);
+    if (known) {
+      log.event('surface_changed', { tools_changed: JSON.stringify(known.tools) !== JSON.stringify(live.tools),
+        instructions_changed: known.instructions !== live.instructions });
+    }
+  }
+
   async function connected() {
     if (bridge) return bridge;
     if (!pending) {
       pending = (async () => {
+        const key = cacheKey();
+        const log = openDiagnosticLog({ adapter });
         const candidate = createCuaClient({
           command: commandFromEnvironment(options.command),
           cwd: process.cwd(),
-          adapter: options.ompEssentialTools ? 'omp' : 'pi',
+          adapter,
+          log,
           allowedOrigins: originsFromEnvironment(),
           onElicitation: async (params, { signal }) => {
             const ctx = approvalContext;
@@ -448,7 +715,9 @@ export default function (pi: ExtensionAPI, options: {
         });
         await candidate.connect();
         bridge = candidate;
-        registerTools(candidate);
+        const live = surfaceOf(candidate);
+        rememberSurface(key, live, log);
+        useSurface(live);
         return candidate;
       })().finally(() => { pending = undefined; });
     }
@@ -493,9 +762,26 @@ export default function (pi: ExtensionAPI, options: {
     }
   }
 
+  /**
+   * The tools and instructions for this turn. A connected host supplies them; otherwise a surface
+   * known for this configuration does, and the host starts on the first LCU tool call or command.
+   * Only an unknown configuration (a new install, app or runtime) starts the host here.
+   */
+  async function sessionSurface() {
+    if (!bridge && !pending) {
+      const known = knownSurface();
+      if (known) {
+        useSurface(known);
+        return known;
+      }
+    }
+    await connected();
+    return surface!;
+  }
+
   pi.on('before_agent_start', async (event, ctx) => {
     approvalContext = ctx;
-    const client = await connected();
+    const { instructions } = await sessionSurface();
     // Returning systemPrompt makes Pi force that prompt, collapsing its
     // structured prompt and tool-addition deltas into one head (breaking prompt
     // caching after tool_search). Pi hands us its mutable systemPromptOptions,
@@ -503,8 +789,8 @@ export default function (pi: ExtensionAPI, options: {
     const opts = event.systemPromptOptions;
     if (opts) {
       const current = typeof opts.appendSystemPrompt === 'string' ? opts.appendSystemPrompt : '';
-      if (!current.includes(client.instructions)) {
-        opts.appendSystemPrompt = current ? `${current}\n\n${client.instructions}` : client.instructions;
+      if (!current.includes(instructions)) {
+        opts.appendSystemPrompt = current ? `${current}\n\n${instructions}` : instructions;
       }
       return undefined;
     }
@@ -512,8 +798,8 @@ export default function (pi: ExtensionAPI, options: {
     // and append LCU's instructions as one additional section. Without Pi's
     // options, fall back to a string.
     return { systemPrompt: Array.isArray(event.systemPrompt)
-      ? [...event.systemPrompt, client.instructions]
-      : `${event.systemPrompt}\n\n${client.instructions}` };
+      ? [...event.systemPrompt, instructions]
+      : `${event.systemPrompt}\n\n${instructions}` };
   });
   pi.on('agent_start', async (_event, ctx) => {
     // A failed turn_ended must succeed before Pi starts another turn. Keep the
@@ -568,8 +854,16 @@ export default function (pi: ExtensionAPI, options: {
     },
   });
 
-  // OMP builds the initial provider tool list after extension loading. Connect
-  // during factory execution so LCU tools are registered before that snapshot.
-  if (options.connectOnLoad) return connected().then(() => undefined);
+  // OMP builds the initial provider tool list after extension loading. A known surface
+  // registers those tools now, and the runtime starts on the first call. An unknown surface
+  // still connects here, so the tools exist before that snapshot.
+  if (options.connectOnLoad) {
+    const known = knownSurface();
+    if (known) {
+      useSurface(known);
+      return;
+    }
+    return connected().then(() => undefined);
+  }
 
 }

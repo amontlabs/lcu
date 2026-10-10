@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url';
 import { openDiagnosticLog } from './diagnostics.mjs';
 import { declineAgentHostApp } from './host-guard.mjs';
 
-const MODEL_TOOLS = new Set(['js', 'js_reset']);
+export const MODEL_TOOLS = new Set(['js', 'js_reset']);
 
 /** Default cleanup/tool timeout; `js` extends past a longer requested run. */
 export const TURN_END_TIMEOUT_MS = 120_000;
