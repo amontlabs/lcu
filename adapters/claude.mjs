@@ -161,11 +161,15 @@ export async function runClaudeBridge({
   });
   const contexts = new Map();
   // One record per life of a turn key (session or agent, prompt id), created at bind and carried by every
-  // context and call of that life: { key, sessionId, turnId, subagent, upstreamId, endedUpstream, cleanup, ended }.
+  // context and call of that life: { key, sessionId, turnId, subagent, upstreamId, endedUpstream, cleanup, ended,
+  // worker }.
   // `upstreamId` is the turn id the original service sees for this life, so cleanup always targets its own life.
   // `endedUpstream` is set whenever that id is known or assumed ended (the host reported this life's end, a
   // parent's end cascaded to it, or it inherited a closed prompt id), whatever the cleanup answered.
+  // `worker` is the original trusted worker generation this life last ran `js` on (undefined if none since its
+  // last reset); `js_reset` stops that worker, and with it the turn-ended hook and pending turn data it holds.
   const lives = new Map();
+  let worker = 0;
   // Keys this relay bound whose last life ended, and prompts a main Stop or Interrupt closed; one entry each.
   const endedKeys = new Set();
   const endedPrompts = new Set();
@@ -211,7 +215,7 @@ export async function runClaudeBridge({
 
   const openLife = (key, sessionId, turnId, subagent, upstreamId) => {
     const life = { key, sessionId, turnId, subagent, upstreamId, endedUpstream: endedPrompts.has(upstreamId),
-      cleanup: null, ended: false };
+      cleanup: null, ended: false, worker: undefined };
     lives.set(key, life);
     endedKeys.delete(key);
     return life;
@@ -264,7 +268,7 @@ export async function runClaudeBridge({
       outcome = 'ok';
       return result;
     } finally {
-      log.event('turn_end', { hook_event: event, ms: Date.now() - started, outcome });
+      log.event('turn_end', { hook_event: event, ms: Date.now() - started, outcome, sky_hook: skyHook(life) });
       if (life.cleanup === cleanup && !life.ended) life.cleanup = null;
       // Only upstream is told about the children; their own Stop still cleans up the relay.
       for (const child of children) {
@@ -275,6 +279,39 @@ export async function runClaudeBridge({
         }
       }
     }
+  }
+
+  // Whether a turn end can reach Sky: 'live' when the worker this life ran js on still runs (its turn-ended hook
+  // gets the signal), 'reset' when that worker was reset since (nothing receives it, Sky keeps the turn's event
+  // taps), 'none' when the life ran no js on any worker since its last reset.
+  function skyHook(life) {
+    if (life.worker === undefined) return 'none';
+    return life.worker === worker ? 'live' : 'reset';
+  }
+
+  // js_reset stops the original trusted worker, which holds the turn-ended hook and the pending turn data of every
+  // turn that ran js on it: a later turn end would reach nobody and Sky would keep those turns' event taps. Each
+  // such life ends upstream first, while the worker still lives, then continues under a fresh upstream id so its
+  // later calls are not refused as calls of an ended turn. sendTurnEnded, not turnEnded: a main life's reset
+  // must not close the prompt for its subagents.
+  async function endWorkerTurns() {
+    const used = [...lives.values()].filter(life => life.worker === worker && !life.endedUpstream && !life.cleanup);
+    worker++;
+    await Promise.all(used.map(async life => {
+      const started = Date.now();
+      let outcome = 'error';
+      try {
+        const result = await sendTurnEnded('Interrupt', life.sessionId, life.upstreamId);
+        if (!result.isError) outcome = 'ok';
+      } catch (error) {
+        console.error('Claude MCP turn cleanup before js_reset failed:', asError(error));
+      } finally {
+        log.event('turn_end', { hook_event: 'Interrupt', cause: 'js_reset', ms: Date.now() - started, outcome,
+          sky_hook: 'live' });
+      }
+      life.upstreamId = randomUUID();
+      life.worker = undefined;
+    }));
   }
 
   // The life a Stop, SubagentStop or hook Interrupt ends: the key's current one.
@@ -416,6 +453,9 @@ export async function runClaudeBridge({
           'Missing exact Claude PreToolUse identity; LCU did not run this tool call.' }] };
       }
       contexts.delete(toolUseId);
+      // Before the metadata below, so a reset call already carries its life's fresh id.
+      if (name === 'js_reset') await endWorkerTurns();
+      else if (!context.life.endedUpstream) context.life.worker = worker;
       const metadata = _meta && typeof _meta === 'object' && !Array.isArray(_meta)
         ? { ..._meta } : {};
       const inheritedTurnMetadata = metadata[TURN_CONTEXT_META];

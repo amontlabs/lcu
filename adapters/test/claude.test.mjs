@@ -1565,3 +1565,72 @@ test('Claude relay reads a cross-turn setting that starts with a UTF-8 BOM', asy
     await bridge.close();
   }
 });
+
+test('Claude relay ends every turn that ran js before js_reset stops the worker holding their hooks', async () => {
+  for (const crossTurn of [false, true]) {
+    const bridge = await connectRelay({ crossTurn });
+    try {
+      const parent = 'strict-reset-parent';
+      const child = 'strict-reset-child';
+      const turnId = 'strict-reset-prompt';
+      const idle = 'strict-reset-idle';
+      await callWithContext(bridge.client, 'js', { code: 'p1' }, { sessionId: parent, turnId, toolUseId: 'rs-1' });
+      await callWithContext(bridge.client, 'js', { code: 'c1' }, { sessionId: parent, turnId, toolUseId: 'rs-2', agentId: child });
+      // A turn that only bound a context ran nothing on the worker and is left alone.
+      await bindContext(bridge.client, { sessionId: idle, turnId: 'idle-prompt', toolUseId: 'rs-idle' });
+      const reset = await callWithContext(bridge.client, 'js_reset', {}, { sessionId: parent, turnId, toolUseId: 'rs-3' });
+      assert.equal(reset.content[0].text, 'Original reset result.');
+
+      const records = bridge.logs();
+      const resetAt = records.findIndex(entry => entry.type === 'tool-call' && entry.name === 'js_reset');
+      const ends = records.slice(0, resetAt).filter(entry => entry.type === 'turn-ended');
+      assert.deepEqual(ends.map(entry => [entry.args.hook_event_name, entry.args.session_id, entry.args.turn_id]).sort(), [
+        ['Interrupt', child, subagentTurnId(child, turnId)],
+        ['Interrupt', parent, turnId],
+      ], `crossTurn=${crossTurn}: both turns end upstream before the reset is forwarded`);
+      const fresh = upstreamTurnOf(bridge, 'rs-3');
+      assert.notEqual(fresh, turnId, 'the reset call already carries the fresh id');
+
+      // The same turn keeps working after the reset, its subagent too: the prompt was not closed.
+      const after = await callWithContext(bridge.client, 'js', { code: 'p2' }, { sessionId: parent, turnId, toolUseId: 'rs-4' });
+      assert.equal(after.isError, undefined, `crossTurn=${crossTurn}`);
+      assert.equal(upstreamTurnOf(bridge, 'rs-4'), fresh);
+      const childAfter = await callWithContext(bridge.client, 'js', { code: 'c2' },
+        { sessionId: parent, turnId, toolUseId: 'rs-5', agentId: child });
+      assert.equal(childAfter.isError, undefined, `crossTurn=${crossTurn}`);
+      const childFresh = upstreamTurnOf(bridge, 'rs-5');
+      assert.ok(![turnId, fresh, subagentTurnId(child, turnId)].includes(childFresh));
+
+      await stop(bridge.client, child, turnId, 'SubagentStop');
+      await stop(bridge.client, parent, turnId);
+      const stops = bridge.logs().filter(entry => entry.type === 'turn-ended').slice(2);
+      assert.deepEqual(stops.map(entry => entry.args.turn_id), [childFresh, fresh]);
+
+      const turnEnds = bridge.diagnostics().filter(entry => entry.event === 'turn_end');
+      assert.deepEqual(turnEnds.filter(entry => entry.cause === 'js_reset').map(entry => [entry.outcome, entry.sky_hook]),
+        [['ok', 'live'], ['ok', 'live']]);
+      assert.deepEqual(turnEnds.filter(entry => !entry.cause).map(entry => [entry.hook_event, entry.sky_hook]),
+        [['SubagentStop', 'live'], ['Stop', 'live']]);
+    } finally {
+      await bridge.close();
+    }
+  }
+});
+
+test('Claude relay logs whether a turn end can reach the original hook', async () => {
+  const bridge = await connectRelay();
+  try {
+    // No js on the worker: nothing to reach.
+    await bindContext(bridge.client, { sessionId: 'hook-none', turnId: 'prompt-none', toolUseId: 'hk-1' });
+    await stop(bridge.client, 'hook-none', 'prompt-none');
+    // A reset with no turn on the worker ends nothing upstream.
+    await callWithContext(bridge.client, 'js_reset', {}, { sessionId: 'hook-reset', turnId: 'prompt-reset', toolUseId: 'hk-2' });
+    assert.equal(bridge.logs().filter(entry => entry.type === 'turn-ended').length, 1);
+    assert.equal(upstreamTurnOf(bridge, 'hk-2'), 'prompt-reset');
+    await stop(bridge.client, 'hook-reset', 'prompt-reset');
+    assert.deepEqual(bridge.diagnostics().filter(entry => entry.event === 'turn_end').map(entry => entry.sky_hook),
+      ['none', 'none']);
+  } finally {
+    await bridge.close();
+  }
+});
