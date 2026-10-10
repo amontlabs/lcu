@@ -195,10 +195,11 @@ function setupArguments(values, user) {
   const args = ['--prefix', values.prefix, ...(user ? ['--user', user] : []), '--scope', values.scope, '--session', values.session];
   for (const name of values.agent) args.push('--agent', name);
   for (const option of ['project', 'export']) if (values[option]) args.push(`--${option}`, values[option]);
-  for (const flag of ['yes', 'check-desktop', 'chrome', 'audio', 'no-chrome', 'no-audio', 'allow-missing']) {
+  for (const flag of ['yes', 'check-desktop', 'chrome', 'audio', 'no-chrome', 'no-audio', 'allow-missing', 'unattended']) {
     if (values[flag]) args.push(`--${flag}`);
   }
   if (values.approval) args.push('--approval', values.approval);
+  if (values['cross-turn']) args.push('--cross-turn', values['cross-turn']);
   return args;
 }
 
@@ -244,7 +245,7 @@ export async function main(argv) {
   const runtimeOnly = values['runtime-only'];
   if (runtimeOnly) {
     const setupOptions = ['export', 'project', 'check-desktop', 'chrome', 'audio', 'no-chrome', 'no-audio', 'approval', 'allow-missing',
-      ...(mac ? [] : ['browser-host'])];
+      'cross-turn', 'unattended', ...(mac ? [] : ['browser-host'])];
     if (values.agent.length || values.scope !== 'user' || setupOptions.some((name) => values[name]) ||
         (!mac && values.session !== 'discover')) {
       throw new Error('--runtime-only cannot include agent setup options');

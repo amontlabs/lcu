@@ -14,6 +14,7 @@ import { installHooks, requireCliHookSupport, exportFiles } from './codex_hooks.
 import { install as installApprovalMod } from './claude_mod.mjs';
 import { install as hideHostOnlyTools } from './claude_visibility.mjs';
 import { accountHome, isFile, lstat, real, shellQuote } from './fsutil.mjs';
+import { approvalNote, question as crossTurnQuestion, readCrossTurn, setCrossTurn } from './cross_turn.mjs';
 import { configureHermes, configureOmp } from './harness_setup.mjs';
 import { withLock } from './lock.mjs';
 import { ask, say, warn } from './terminal.mjs';
@@ -224,7 +225,7 @@ export function applyChanges(changes) {
 
 // Saved choices ----------------------------------------------------------------------------------------
 
-const stateDirectory = (home) => (windows() ? join(home, 'AppData/Local/LCU') : join(home, '.local/state/lcu'));
+export const stateDirectory = (home) => (windows() ? join(home, 'AppData/Local/LCU') : join(home, '.local/state/lcu'));
 
 /** Run `fn` holding the account's setup lock. */
 export function setupLock(home, fn) {
@@ -712,16 +713,18 @@ export const OPTIONS = {
   session: { type: 'string' },
   'allow-missing': { type: 'boolean', default: false },
   reconcile: { type: 'boolean', default: false },
+  'cross-turn': { type: 'string' },
+  unattended: { type: 'boolean', default: false },
   'browser-host': { type: 'boolean', default: false },
   'check-desktop': { type: 'boolean', default: false },
   'validate-only': { type: 'boolean', default: false },
   help: { type: 'boolean', short: 'h', default: false },
 };
-const CHOICES = { scope: ['user', 'project'], approval: ['ask', 'auto'], session: ['discover', 'direct'] };
+const CHOICES = { scope: ['user', 'project'], approval: ['ask', 'auto'], session: ['discover', 'direct'], 'cross-turn': ['on', 'off'] };
 
 export const USAGE = 'Usage: lcu setup [--agent ID ...] [--scope user|project] [--project PATH] [--yes] [--chrome | --no-chrome]\n' +
   '                 [--audio | --no-audio] [--approval ask|auto] [--session discover|direct] [--allow-missing]\n' +
-  '                 [--reconcile] [--check-desktop] [--export PATH] [--list-agents] [--user ACCOUNT] [--prefix PATH]';
+  '                 [--cross-turn on|off [--unattended]] [--reconcile] [--check-desktop] [--export PATH] [--list-agents] [--user ACCOUNT] [--prefix PATH]';
 const HELP = `${USAGE}
 
 Configure LCU tools, without requiring a running desktop.
@@ -743,6 +746,10 @@ Options:
                       entries and leaves harness defaults (the default, kept from the previous setup)
   --session discover|direct
                       discover attaches through lcu-session (XFCE); direct uses the current desktop account
+  --cross-turn on|off Keep Computer Use available across turns, including turns started by background events
+                      (macOS and Windows per-app approvals still apply). on asks the owner to authenticate on macOS. Without it,
+                      interactive setup asks once; --yes leaves the setting unchanged. Same as \`lcu cross-turn\`
+  --unattended        With --cross-turn on: skip the owner prompt; for disposable sandbox machines only
   --allow-missing     Skip pi, omp and hermes when their executable is not installed yet and record them as
                       pending (Codex and Claude Code still register); exit 0 when that is the only problem.
                       \`lcu setup --reconcile\` registers them once they appear
@@ -785,11 +792,13 @@ export function validate(args) {
   if (args.reconcile) {
     const used = [['--agent', args.agent.length], ['--export', args.export], ['--approval', args.approval], ['--chrome', args.chrome],
       ['--no-chrome', args['no-chrome']], ['--audio', args.audio], ['--no-audio', args['no-audio']], ['--project', args.project],
-      ['--check-desktop', args['check-desktop']], ['--allow-missing', args['allow-missing']], ['--scope', args.scope !== 'user']]
+      ['--check-desktop', args['check-desktop']], ['--allow-missing', args['allow-missing']], ['--cross-turn', args['cross-turn']], ['--unattended', args.unattended], ['--scope', args.scope !== 'user']]
       .filter(([, value]) => value).map(([flag]) => flag);
     if (used.length) throw new Error(`--reconcile uses the saved setup and cannot be combined with ${used.join(', ')}.`);
   }
   if (args['allow-missing'] && args.export) throw new Error('--allow-missing configures a harness; it cannot be combined with --export.');
+  if (args.unattended && args['cross-turn'] !== 'on') throw new Error('--unattended only applies together with --cross-turn on.');
+  if (args['cross-turn'] && args.export) throw new Error('--cross-turn configures this account; it cannot be combined with --export.');
   if (args.chrome && args['no-chrome']) throw new Error('Use either --chrome or --no-chrome, not both.');
   if (args.audio && args['no-audio']) throw new Error('Use either --audio or --no-audio, not both.');
   const prefix = args.prefix;
@@ -984,7 +993,7 @@ function becomeAccount(account) {
 }
 
 /** `lcu setup ARGV`; `configure` registers the selected harnesses (another one only in tests). Returns the exit status. */
-export async function main(argv, { configure: register = configure } = {}) {
+export async function main(argv, { configure: register = configure, crossTurn = {} } = {}) {
   let args;
   try {
     args = parse(argv);
@@ -1020,14 +1029,14 @@ export async function main(argv, { configure: register = configure } = {}) {
         return 1;
       }
     }
-    return await setup(args, account, home, names, register);
+    return await setup(args, account, home, names, register, crossTurn);
   } catch (error) {
     warn(`Setup failed: ${describe(error)}`);
     return 1;
   }
 }
 
-async function setup(args, account, home, names, register) {
+async function setup(args, account, home, names, register, crossTurn) {
   const { releaseRoot, runtime, launcher, desktopCommand, directRuntime } = runtimePaths(args, account);
   requireLaunchers(runtime, launcher);
   if (names.length === 1 && names[0] === 'auto') {
@@ -1059,13 +1068,13 @@ async function setup(args, account, home, names, register) {
   }
   const setupCommand = runtime;
   const outcome = await setupLock(home, () => registerLocked(args, account, home, names, missing, register,
-    { releaseRoot, desktopCommand, directRuntime, toolsRoot, setupCommand, setupEnvironment }));
+    { releaseRoot, desktopCommand, directRuntime, toolsRoot, setupCommand, setupEnvironment, crossTurn }));
   if (outcome === 'cancelled') return 0;
   return finish(args, outcome, { desktopCommand, directRuntime, setupCommand, home });
 }
 
 async function registerLocked(args, account, home, names, missing, register, paths) {
-  const { releaseRoot, desktopCommand, directRuntime, toolsRoot, setupCommand, setupEnvironment } = paths;
+  const { releaseRoot, desktopCommand, directRuntime, toolsRoot, setupCommand, setupEnvironment, crossTurn } = paths;
   const state = loadSetupState(home);
   // A saved choice, including a declined prompt, suppresses the prompt.
   const saved = existsSync(setupStatePath(home));
@@ -1092,6 +1101,14 @@ async function registerLocked(args, account, home, names, missing, register, pat
   else if (state.approval === 'auto') {
     approvalMode = 'auto';
     say('Keeping automatic approval of LCU tools from the previous setup (use --approval ask to restore harness defaults).');
+  }
+  // Cross-turn Computer Use has its own file. An explicit flag wins; otherwise the owner is asked once, and only
+  // when interactive and nothing is stored yet. A stored choice (even a damaged file) is kept as it is.
+  let crossTurnWanted = null;
+  const crossTurnState = args.export ? null : readCrossTurn(home);
+  if (args['cross-turn']) crossTurnWanted = args['cross-turn'] === 'on';
+  else if (crossTurnState && !crossTurnState.configured && !args.yes && seams.interactive()) {
+    crossTurnWanted = ['y', 'yes'].includes((await seams.ask(crossTurnQuestion(crossTurn.platform))).trim().toLowerCase());
   }
   const approvalAction = approvalMode === 'auto' ? 'auto' : args.approval === 'ask' ? 'ask' : null;
   const command = [...desktopCommand, ...runtimeFlags(chrome, audio)];
@@ -1123,6 +1140,17 @@ async function registerLocked(args, account, home, names, missing, register, pat
   } else if (approvalAction === 'ask' && !args.export) {
     say('Approval mode ask: remove only the entries `--approval auto` added, restoring harness defaults.');
   }
+  if (crossTurnState) {
+    if (crossTurnState.problem) warn(`lcu cross-turn: ${crossTurnState.problem}`);
+    if (crossTurnWanted === null) {
+      say(`Cross-turn Computer Use: ${crossTurnState.enabled ? 'on' : 'off'}, unchanged (\`lcu cross-turn on|off\` changes it).`);
+    } else if (crossTurnWanted === crossTurnState.enabled && crossTurnState.configured && !crossTurnState.problem) {
+      say(`Cross-turn Computer Use: already ${crossTurnWanted ? 'on' : 'off'}.`);
+    } else {
+      say(`Cross-turn Computer Use: turn ${crossTurnWanted ? 'on' : 'off'}${crossTurnWanted && !args.unattended && (crossTurn.platform ?? process.platform) === 'darwin'
+        ? ' (asks for Touch ID or your password)' : ''}. ${approvalNote(crossTurn.platform)}`);
+    }
+  }
   if (audio) say('Computer audio selected: enable the original optional recording API and its approval flow. A saved audio file is not model audio input.');
   if (windows() && names.includes('claude-code')) {
     say('Claude Code: original turn cleanup runs on normal Stop and active MCP-call cancellation. Esc during model wait after a tool completes has no cleanup event and may leave native helpers active.');
@@ -1152,6 +1180,16 @@ async function registerLocked(args, account, home, names, missing, register, pat
     .filter((name) => !names.includes(name) || failed.includes(name));
   saveSetupState(home, { chrome, audio, approval: approvalMode, pending, pendingContext: pending.length
     ? (missing.length ? { scope: args.scope, session: args.session, project: args.project ?? null } : state.pending_context) : null });
+  if (crossTurnWanted !== null) {
+    // A failed or cancelled owner authentication leaves the setting as it was and does not fail the rest of setup.
+    try {
+      const done = await setCrossTurn(home, crossTurnWanted, { root: releaseRoot, unattended: args.unattended, ...crossTurn });
+      if (done.note) warn(done.note);
+      say(done.changed ? `Cross-turn Computer Use is now ${done.enabled ? 'on' : 'off'}.` : `Cross-turn Computer Use stays ${done.enabled ? 'on' : 'off'}.`);
+    } catch (error) {
+      warn(`Cross-turn Computer Use unchanged: ${error.message}`, 'Retry with `lcu cross-turn on` or `lcu setup --cross-turn on`.');
+    }
+  }
   if (failures.length) {
     const retry = [setupCommand, 'setup', '--prefix', args.prefix, ...(args.user ? ['--user', account.name] : []), '--scope', args.scope,
       '--session', args.session, '--yes', ...(args.project ? ['--project', args.project] : []),
