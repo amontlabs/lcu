@@ -157,6 +157,25 @@ test('a second Pi session in the same process starts no host before its first LC
   });
 });
 
+test('a surface learned for one account is not served to another account in the same process', { skip }, async () => {
+  await withCache(async ({ home, spawns, session }) => {
+    const other = mkdtempSync(join(homedir(), '.lcu-pi-surface-'));
+    try {
+      await session().prompt();
+      assert.equal(spawns(), 1);
+      process.env.HOME = other;
+      process.env.USERPROFILE = other;
+      process.env.XDG_CACHE_HOME = join(other, '.cache');
+      await session().prompt();
+      assert.equal(spawns(), 2, 'another account must connect; the in-memory map is not a cross-account hit');
+      assert.equal(existsSync(cacheFile(other)), true, 'the second account writes its own cache file');
+      assert.equal(existsSync(cacheFile(home)), true, 'the first account keeps its own cache file');
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+});
+
 test('Pi uses the cache file after the in-memory copy is cleared and starts the host only for a tool call', { skip }, async () => {
   await withCache(async ({ home, spawns, session }) => {
     const first = session();
@@ -583,6 +602,17 @@ test('the surface key includes the launch command, enabled surfaces, platform an
       Object.defineProperty(process, 'platform', platform);
     }
     assert.notEqual(surfaceKey(command, [], 'omp'), base, 'Pi and OMP do not share a key');
+    const savedHome = process.env.HOME;
+    const other = mkdtempSync(join(homedir(), '.lcu-pi-surface-'));
+    process.env.HOME = other;
+    process.env.USERPROFILE = other;
+    try {
+      assert.notEqual(surfaceKey(command, [], 'pi'), base, 'the per-account cache directory is part of the key');
+    } finally {
+      process.env.HOME = savedHome;
+      process.env.USERPROFILE = savedHome;
+      rmSync(other, { recursive: true, force: true });
+    }
     assert.equal(surfaceKey(command, [], 'pi'), base);
   });
 });

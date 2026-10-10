@@ -214,7 +214,9 @@ const surfaceRecord = {
  * The cache key for this command, or undefined when the surface must not be cached: the cache is off,
  * the platform is Windows, or the command is not a known launch form of an LCU release whose versions
  * can be read. The key includes the launch command (so `--chrome` and the other flags count), the
- * launcher environment (including `CUA_REPL_ENABLED_SURFACES`), the platform, and Pi or OMP.
+ * launcher environment (including `CUA_REPL_ENABLED_SURFACES`), the platform, Pi or OMP, and the
+ * per-account cache directory. The in-memory map is process-wide, so without that directory a surface
+ * learned for one home could be served to another home in the same process.
  */
 export function surfaceKey(command: string[], allowedOrigins: string[], adapter: 'pi' | 'omp') {
   if (process.env.LCU_SURFACE_CACHE === '0' || process.platform === 'win32') return undefined;
@@ -224,7 +226,8 @@ export function surfaceKey(command: string[], allowedOrigins: string[], adapter:
   const environment = Object.fromEntries(SURFACE_ENVIRONMENT.map(name => [name, process.env[name] ?? null]));
   return createHash('sha256').update(JSON.stringify({
     format: SURFACE_FORMAT, adapter, command, allowedOrigins, environment,
-    platform: process.platform, arch: process.arch, files: files.map(fileStamp), installed,
+    platform: process.platform, arch: process.arch, cache: cacheDirectory(),
+    files: files.map(fileStamp), installed,
   })).digest('hex');
 }
 
