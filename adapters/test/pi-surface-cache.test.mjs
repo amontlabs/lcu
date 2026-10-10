@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync,
-  writeFileSync,
+  utimesSync, writeFileSync,
 } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
@@ -356,6 +356,24 @@ test('Pi replaces a cached surface that the host no longer reports and logs only
     const { t: _time, ...event } = events[0];
     assert.deepEqual(event, { event: 'surface_changed', tools_changed: true, instructions_changed: true });
     assert.doesNotMatch(text, /Stale|Original JS description|initialization guide/);
+  });
+});
+
+test('Pi rejects the first tool call cleanly when a known surface\'s host fails to start', { skip }, async () => {
+  await withCache(async ({ home, session }) => {
+    // The launcher's size and mtime are in the key: keep both so the surface stays known.
+    const lcu = join(home, 'r', 'bin', 'lcu');
+    utimesSync(lcu, 1e6, 1e6);
+    await session().prompt();
+    writeFileSync(lcu, '#!/bin/sh\nexit 1\n'.padEnd(statSync(lcu).size));
+    utimesSync(lcu, 1e6, 1e6);
+
+    const known = session();
+    assert.match(await known.prompt(), /Original CUA initialization guide/);
+    await known.handlers.get('agent_start')({}, known.ctx);
+    await assert.rejects(known.tools.get('js').execute('surface-fail', { code: 'x' }, undefined, undefined, known.ctx));
+    await known.handlers.get('agent_end')({ messages: [{ role: 'assistant', stopReason: 'stop' }] }, known.ctx);
+    await known.handlers.get('session_shutdown')();
   });
 });
 

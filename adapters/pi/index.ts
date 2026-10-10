@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { TSchema } from 'typebox';
 import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { createCuaClient, nativeAppApprovalOptions, nativeAppApprovalResponse } from '../client.mjs';
+import { createCuaClient, MODEL_TOOLS, nativeAppApprovalOptions, nativeAppApprovalResponse } from '../client.mjs';
 import { persistAudioContent } from '../audio-files.mjs';
 import { openDiagnosticLog } from '../diagnostics.mjs';
 import { cacheDirectory, checkOnce, readRecord, writeRecord } from '../../lcu/check_record.mjs';
@@ -55,9 +55,6 @@ type Surface = { tools: SurfaceTool[]; instructions: string };
 const SURFACE_FORMAT = 1;
 const SURFACE_FILE = 'pi-surfaces.json';
 const SURFACE_ENTRIES = 8;
-// The public tools the shared client requires and exposes; mirrors MODEL_TOOLS in ../client.mjs, which
-// does not export it.
-const SURFACE_TOOLS = ['js', 'js_reset'];
 // Environment the original launcher reads when it builds its instructions and tool descriptions.
 // CUA_REPL_ENABLED_SURFACES is in the cache key because it changes those instructions.
 const SURFACE_ENVIRONMENT = ['CUA_REPL_ENABLED_SURFACES', 'CUA_REPL_BROWSER_ENV', 'CUA_REPL_BROWSER_GUIDANCE',
@@ -84,8 +81,8 @@ function validSurface(value: any): value is Surface {
     return false;
   }
   const names = value.tools.map((tool: any) => tool?.name);
-  return value.tools.length === SURFACE_TOOLS.length && new Set(names).size === names.length &&
-    SURFACE_TOOLS.every(name => names.includes(name)) && value.tools.every((tool: any) =>
+  return value.tools.length === MODEL_TOOLS.size && new Set(names).size === names.length &&
+    names.every((name: string) => MODEL_TOOLS.has(name)) && value.tools.every((tool: any) =>
     typeof tool.description === 'string' && tool.inputSchema && typeof tool.inputSchema === 'object' &&
       !Array.isArray(tool.inputSchema));
 }
