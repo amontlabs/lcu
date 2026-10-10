@@ -431,6 +431,14 @@ def expected_renames(old):
     return [expected_renames(item) for item in old] if isinstance(old, list) else old
 
 
+# Data the port added on purpose: a NEW-only key whose path ends in the first item and whose value equals the
+# second is not a difference. Anything else under the key still shows.
+EXPECTED_ADDITIONS = (
+    # `lcu status --json` reports the cross-turn Computer Use setting, off by default (docs/releases/0.11.0.md).
+    ('/status-json-body/cross_turn', {'enabled': False, 'source': None}),
+)
+
+
 def diff(old, new, path='', out=None):
     out = [] if out is None else out
     if isinstance(old, dict) and isinstance(new, dict):
@@ -438,6 +446,8 @@ def diff(old, new, path='', out=None):
             if key not in new:
                 out.append(f'{path}/{key}: only OLD = {short(old[key])}')
             elif key not in old:
+                if any(f'{path}/{key}'.endswith(suffix) and new[key] == value for suffix, value in EXPECTED_ADDITIONS):
+                    continue
                 out.append(f'{path}/{key}: only NEW = {short(new[key])}')
             else:
                 diff(old[key], new[key], f'{path}/{key}', out)

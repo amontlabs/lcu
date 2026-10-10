@@ -405,6 +405,8 @@ export async function main(root, argv) {
       return (await command('status')).main(root, rest);
     case 'apps':
       return (await command('apps')).main(root, rest);
+    case 'cross-turn':
+      return (await command('cross_turn')).main(root, rest);
     case 'origins':
       return (await command('origins')).main(rest);
     case 'prune':

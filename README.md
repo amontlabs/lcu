@@ -68,6 +68,23 @@ lcu apps revoke Zed      # take it back
 
 [Details](docs/INSTALLATION.md#manage-approved-apps).
 
+## Keep Computer Use across turns (Claude Code)
+
+In Claude Code, Computer Use normally ends with the turn that started it. A background subagent still working after that turn ended, or a turn that reuses an ended turn id, is told "Computer Use is unavailable because the current turn ended." An opt-in setting keeps it available for every turn of the session:
+
+```sh
+lcu cross-turn           # status
+lcu cross-turn on        # Touch ID (or your password) on macOS
+lcu cross-turn off       # no prompt
+```
+
+- Off by default. `lcu setup --cross-turn on|off` sets it too; interactive setup asks once.
+- It affects only the Claude Code relay; Codex, Pi, Oh My Pi and Hermes ignore it. Per-app approvals (macOS and Windows) and your harness's tool approvals still apply.
+- A foreground subagent finishing no longer ends the parent's Computer Use, with the setting on or off.
+- A guard against accidents, not a security boundary: anything running as your account can edit the file or pass `--unattended` (for disposable sandbox machines, where nobody can answer the prompt).
+
+[Details](docs/INSTALLATION.md#cross-turn-computer-use).
+
 ## Permissions
 
 Your harness decides whether the agent may call LCU's tools (Claude's "don't ask again" on the first card, Codex's tool approval, and so on). LCU decides, per app, whether that agent may touch it, in every permission mode. `lcu setup --approval auto` is optional and meant for unattended machines (VMs, CI): it pre-allows LCU's two model tools in the harness, and leaves per-app approval in force. See [approval mode](docs/INSTALLATION.md#approval-mode).

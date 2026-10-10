@@ -12,5 +12,5 @@ Install LCU beside the locally installed ChatGPT app. Linux needs X11 and D-Bus;
   --skip-system         Linux: skip apt; system libraries must already exist
   --offline             never use the network; requires --skip-system
   --scope, --project, --export, --chrome, --no-chrome, --audio, --no-audio, --approval, --session,
-  --allow-missing, --check-desktop
+  --allow-missing, --check-desktop, --cross-turn, --unattended
                         passed to `lcu setup`; see `lcu setup --help`

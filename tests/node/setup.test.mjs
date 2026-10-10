@@ -5,6 +5,8 @@ import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { AppsError } from '../../lcu/apps.mjs';
+import { question } from '../../lcu/cross_turn.mjs';
 import * as setup from '../../lcu/setup.mjs';
 import { REPO, output, override, posixTests, result, temporary, write } from './fixtures.mjs';
 
@@ -36,9 +38,17 @@ function fixture(t) {
     state.registered.push({ names: [...names], command, ...options });
     return names.filter((name) => state.failing.has(name)).map((name) => [name, 'plugin', 'boom']);
   };
+  // Cross-turn owner authentication never reaches the real macOS helper: `auth` records and approves or refuses.
+  state.authCalls = [];
+  state.approve = true;
+  state.crossTurn = { platform: 'darwin', auth: async (_root, reason) => {
+    state.authCalls.push(reason);
+    if (!state.approve) throw new AppsError('authentication was cancelled or failed. Nothing was changed.');
+  } };
   state.raw = async (...argv) => {
     const seen = await output(t);
-    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--session', 'direct', ...argv], { configure: state.configure });
+    const code = await setup.main(['--prefix', prefix, '--user', 'fixture', '--session', 'direct', ...argv],
+      { configure: state.configure, crossTurn: state.crossTurn });
     return { code, out: seen.out, err: seen.err };
   };
   state.main = (...argv) => state.raw('--yes', '--no-chrome', ...argv);
@@ -142,7 +152,7 @@ test('a chrome opt-in is saved and reused; --no-chrome turns it off; a saved dec
     return 'y';
   });
   await f.raw('--agent', 'codex');
-  assert.deepEqual(prompts, ['Apply this setup? [y/N] ']);
+  assert.deepEqual(prompts, [CROSS_TURN_QUESTION, 'Apply this setup? [y/N] ']);
   assert.ok(!f.registered.at(-1).command.includes('--chrome'));
 });
 
@@ -610,4 +620,127 @@ test('a terminal question reads one line without spinning, and is empty at the e
   assert.equal(answer.answer, 'yes');
   assert.equal(answer.end, '');
   assert.ok(answer.cpu < 300, `${answer.cpu} ms of CPU while waiting`);
+});
+
+// Cross-turn Computer Use -------------------------------------------------------------------------------
+
+const CROSS_TURN_QUESTION = question('darwin');
+const crossTurnFile = (f) => join(f.home, '.local/state/lcu/cross-turn.json');
+const crossTurnState = (f) => JSON.parse(readFileSync(crossTurnFile(f), 'utf8'));
+
+test('setup validation: --cross-turn takes on|off; --unattended needs --cross-turn on; no export or reconcile', (t) => {
+  const root = temporary(t);
+  override(t, setup.seams, 'account', () => ({ name: 'fixture', uid: process.getuid(), gid: process.getgid(), home: root }));
+  const check = (...argv) => setup.validate(setup.parse(['--user', 'fixture', ...argv]));
+  assert.throws(() => setup.parse(['--cross-turn', 'maybe']), setup.UsageError);
+  assert.throws(() => check('--agent', 'codex', '--unattended'), /only applies together with --cross-turn on/);
+  assert.throws(() => check('--agent', 'codex', '--cross-turn', 'off', '--unattended'), /only applies together with --cross-turn on/);
+  assert.throws(() => check('--export', '/tmp/new-export', '--cross-turn', 'on'), /cannot be combined with --export/);
+  assert.throws(() => check('--reconcile', '--cross-turn', 'on'), /cannot be combined/);
+  assert.throws(() => check('--reconcile', '--unattended'), /cannot be combined/);
+  assert.deepEqual(check('--agent', 'codex', '--cross-turn', 'on', '--unattended').names, ['codex']);
+  assert.match(setup.USAGE, /--cross-turn on\|off \[--unattended\]/);
+});
+
+test('--cross-turn on authenticates once on macOS, records the owner, and is idempotent', async (t) => {
+  const f = fixture(t);
+  const first = await f.main('--agent', 'codex', '--cross-turn', 'on');
+  assert.equal(first.code, 0);
+  assert.equal(f.authCalls.length, 1);
+  assert.match(first.out, /Cross-turn Computer Use is now on/);
+  assert.deepEqual([crossTurnState(f).enabled, crossTurnState(f).source], [true, 'owner']);
+  const again = await f.main('--agent', 'codex', '--cross-turn', 'on');
+  assert.equal(f.authCalls.length, 1);
+  assert.match(again.out, /already on/);
+  await f.main('--agent', 'codex', '--cross-turn', 'off');
+  assert.equal(f.authCalls.length, 1);
+  assert.equal(crossTurnState(f).enabled, false);
+  // setup.json is untouched by the setting
+  assert.deepEqual(JSON.parse(readFileSync(join(f.home, '.local/state/lcu/setup.json'), 'utf8')), { chrome: false, audio: false, approval: 'ask' });
+});
+
+test('--cross-turn on --unattended skips the prompt with a warning; Linux records cli', async (t) => {
+  const f = fixture(t);
+  const unattended = await f.main('--agent', 'codex', '--cross-turn', 'on', '--unattended');
+  assert.equal(f.authCalls.length, 0);
+  assert.equal(crossTurnState(f).source, 'unattended');
+  assert.match(unattended.err, /disposable sandbox machines/);
+  await f.main('--agent', 'codex', '--cross-turn', 'off');
+  f.crossTurn.platform = 'linux';
+  await f.main('--agent', 'codex', '--cross-turn', 'on');
+  assert.equal(f.authCalls.length, 0);
+  assert.deepEqual([crossTurnState(f).enabled, crossTurnState(f).source], [true, 'cli']);
+});
+
+test('a cancelled owner authentication leaves the setting alone and does not fail the rest of setup', async (t) => {
+  const f = fixture(t);
+  f.approve = false;
+  const { code, err, out } = await f.main('--agent', 'codex', '--cross-turn', 'on');
+  assert.equal(code, 0);
+  assert.match(err, /Cross-turn Computer Use unchanged: authentication was cancelled/);
+  assert.equal(existsSync(crossTurnFile(f)), false);
+  assert.equal(f.registered.length, 1);
+  assert.match(out, /Configuration prepared/);
+});
+
+/** A fixture whose terminal is interactive: it records every question and answers the cross-turn one with `answers.crossTurn`. */
+function interactiveFixture(t, answers) {
+  const f = fixture(t);
+  override(t, setup.seams, 'interactive', () => true);
+  override(t, setup.seams, 'ask', (question) => {
+    f.prompts.push(question);
+    return question === CROSS_TURN_QUESTION ? answers.crossTurn : answers.apply;
+  });
+  f.prompts = [];
+  return f;
+}
+
+test('interactive setup asks about cross-turn once; yes authenticates, no is recorded, --yes leaves it unchanged', async (t) => {
+  const answers = { crossTurn: 'y', apply: 'y' };
+  let f = interactiveFixture(t, answers);
+  await f.raw('--agent', 'codex', '--no-chrome');
+  assert.deepEqual(f.prompts, [CROSS_TURN_QUESTION, 'Apply this setup? [y/N] ']);
+  assert.equal(f.authCalls.length, 1);
+  assert.equal(crossTurnState(f).enabled, true);
+  f.prompts.length = 0;
+  await f.raw('--agent', 'codex', '--no-chrome');
+  assert.deepEqual(f.prompts, ['Apply this setup? [y/N] ']);
+
+  answers.crossTurn = 'n';
+  f = interactiveFixture(t, answers);
+  await f.raw('--agent', 'codex', '--no-chrome');
+  assert.equal(f.authCalls.length, 0);
+  assert.equal(crossTurnState(f).enabled, false);
+  f.prompts.length = 0;
+  await f.raw('--agent', 'codex', '--no-chrome');
+  assert.deepEqual(f.prompts, ['Apply this setup? [y/N] ']);
+
+  f = interactiveFixture(t, answers);
+  const yes = await f.raw('--agent', 'codex', '--no-chrome', '--yes');
+  assert.deepEqual(f.prompts, []);
+  assert.equal(existsSync(crossTurnFile(f)), false);
+  assert.match(yes.out, /Cross-turn Computer Use: off, unchanged/);
+});
+
+test('declining "Apply this setup?" applies no cross-turn change, and a damaged file is neither asked about nor replaced', async (t) => {
+  const answers = { crossTurn: 'y', apply: 'n' };
+  let f = interactiveFixture(t, answers);
+  await f.raw('--agent', 'codex', '--no-chrome');
+  assert.equal(existsSync(crossTurnFile(f)), false);
+  assert.equal(f.authCalls.length, 0);
+  assert.deepEqual(f.registered, []);
+
+  f = interactiveFixture(t, answers);
+  write(crossTurnFile(f), '{broken');
+  const { err } = await f.raw('--agent', 'codex', '--no-chrome');
+  assert.ok(!f.prompts.includes(CROSS_TURN_QUESTION));
+  assert.match(err, /not a valid cross-turn setting/);
+  assert.equal(readFileSync(crossTurnFile(f), 'utf8'), '{broken');
+});
+
+test('the cross-turn question names per-app approvals only where they exist', () => {
+  assert.match(question('darwin'), /Per-app approvals still apply\. \[y\/N\] $/);
+  assert.match(question('win32'), /Per-app approvals still apply/);
+  assert.match(question('linux'), /has no per-app approval/);
+  assert.doesNotMatch(question('linux'), /Per-app approvals still apply/);
 });
