@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
+  accessSync, chmodSync, constants, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { TSchema } from 'typebox';
+import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { createCuaClient, nativeAppApprovalOptions, nativeAppApprovalResponse } from '../client.mjs';
 import { persistAudioContent } from '../audio-files.mjs';
 import { openDiagnosticLog } from '../diagnostics.mjs';
@@ -52,8 +54,12 @@ type SurfaceTool = { name: string; description: string; inputSchema: Record<stri
 type Surface = { tools: SurfaceTool[]; instructions: string };
 
 const SURFACE_FORMAT = 1;
-const SURFACE_FILE = 'pi-surfaces.json';
+const SURFACE_DIRECTORY = 'pi-surfaces';
+const SURFACE_FILE = 'surfaces.json';
 const SURFACE_ENTRIES = 8;
+// The public tools the shared client requires and exposes; mirrors MODEL_TOOLS in ../client.mjs, which
+// does not export it.
+const SURFACE_TOOLS = ['js', 'js_reset'];
 // Environment the original launcher reads when it builds its instructions and tool descriptions.
 const SURFACE_ENVIRONMENT = ['CUA_REPL_ENABLED_SURFACES', 'CUA_REPL_BROWSER_ENV', 'CUA_REPL_BROWSER_GUIDANCE',
   'NODE_REPL_TOOL_OVERRIDES', 'SKY_ENABLE_AUDIO', 'NODE_REPL_ENABLE_AUDIO'];
@@ -71,24 +77,31 @@ function surfaceOf(client: ReturnType<typeof createCuaClient>): Surface {
   }));
 }
 
+/** Exactly the supported public tools, once each, with a description and an object schema, plus instructions. */
 function validSurface(value: any): value is Surface {
-  return value && typeof value === 'object' && typeof value.instructions === 'string' &&
-    Array.isArray(value.tools) && value.tools.length > 0 && value.tools.every((tool: any) =>
-    tool && typeof tool.name === 'string' && tool.name && typeof tool.description === 'string' &&
-      tool.inputSchema && typeof tool.inputSchema === 'object' && !Array.isArray(tool.inputSchema));
+  if (!value || typeof value !== 'object' || typeof value.instructions !== 'string' || !Array.isArray(value.tools)) {
+    return false;
+  }
+  const names = value.tools.map((tool: any) => tool?.name);
+  return value.tools.length === SURFACE_TOOLS.length && new Set(names).size === names.length &&
+    SURFACE_TOOLS.every(name => names.includes(name)) && value.tools.every((tool: any) =>
+    typeof tool.description === 'string' && tool.inputSchema && typeof tool.inputSchema === 'object' &&
+      !Array.isArray(tool.inputSchema));
 }
 
-/** LCU's per-account cache directory, the one `lcu` keeps `update.json` in (lcu/check_record.mjs). */
+/**
+ * The adapter's own directory inside LCU's per-account cache directory, the one `lcu` keeps `update.json`
+ * in (lcu/check_record.mjs). Windows has no cache: the surface key does not yet read its launcher layout.
+ */
 function surfaceCacheFile() {
   const home = homedir();
-  const directory = process.platform === 'win32'
-    ? join(process.env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'LCU', 'cache')
-    : process.platform === 'darwin' ? join(home, 'Library', 'Caches', 'lcu')
-      : join(process.env.XDG_CACHE_HOME || join(home, '.cache'), 'lcu');
-  return join(directory, SURFACE_FILE);
+  const directory = process.platform === 'darwin' ? join(home, 'Library', 'Caches', 'lcu')
+    : join(process.env.XDG_CACHE_HOME || join(home, '.cache'), 'lcu');
+  return join(directory, SURFACE_DIRECTORY, SURFACE_FILE);
 }
 
-const fileStamp = (path: string) => {
+const fileStamp = (path: string | undefined) => {
+  if (path === undefined) return null;
   try {
     const stat = statSync(path);
     return [realpathSync(path), stat.size, stat.mtimeMs];
@@ -97,6 +110,33 @@ const fileStamp = (path: string) => {
   }
 };
 
+/**
+ * The file the MCP SDK's stdio transport starts for `name`: a name with a slash relative to the working
+ * directory, otherwise the first executable file on the PATH of the environment the child gets (the
+ * SDK's default environment overlaid with this process's, as the shared client passes it). Undefined when
+ * no such file is found.
+ */
+function resolveExecutable(name: string) {
+  if (name.includes('/')) return resolve(name);
+  const path = { ...getDefaultEnvironment(), ...process.env }.PATH;
+  if (!path) return undefined;
+  for (const directory of path.split(delimiter)) {
+    const candidate = resolve(directory || '.', name);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch { /* not here */ }
+  }
+  return undefined;
+}
+
+/** The files `command` names: the executable it starts and each later argument that is a path. */
+function commandFiles(command: string[]) {
+  return command.map((part, index) => index === 0 ? resolveExecutable(part)
+    : part.includes('/') ? resolve(part) : undefined);
+}
+
 const plistString = (plist: string, key: string) =>
   new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(plist)?.[1];
 
@@ -104,18 +144,18 @@ const plistString = (plist: string, key: string) =>
  * The LCU release the command runs and the app and CUA runtime it selects, read from files without
  * starting anything: the release directory and its bundle.json stamp; on macOS the app's Info.plist
  * versions and the CUA manifest, which change when the app updates itself in place; on Linux the CUA
- * manifest and the app.asar stamp; on Windows the private copy recorded in installation.json. Null when
- * the command is an LCU release whose app cannot be read; undefined when it is not an LCU release.
+ * manifest and the app.asar stamp. Undefined when the command does not run a release whose versions can
+ * be read.
  */
-function releaseIdentity(command: string[]) {
-  for (const part of [...command].reverse()) {
+function releaseIdentity(files: (string | undefined)[]) {
+  for (const file of [...files].reverse()) {
+    if (file === undefined) continue;
     let launcher;
-    try { launcher = realpathSync(part); } catch { continue; }
-    if (!['lcu', 'lcu.cmd'].includes(basename(launcher)) || basename(dirname(launcher)) !== 'bin') continue;
+    try { launcher = realpathSync(file); } catch { continue; }
+    if (basename(launcher) !== 'lcu' || basename(dirname(launcher)) !== 'bin') continue;
     const root = dirname(dirname(launcher));
-    let descriptor;
-    try { descriptor = JSON.parse(readFileSync(join(root, 'installation.json'), 'utf8')); } catch { continue; }
     try {
+      const descriptor = JSON.parse(readFileSync(join(root, 'installation.json'), 'utf8'));
       const release = { root, bundle: fileStamp(join(root, 'bundle.json')) };
       const manifest = (resources: string) =>
         JSON.parse(readFileSync(join(resources, 'cua_node', 'manifest.json'), 'utf8')).runtime_archive_version;
@@ -124,30 +164,34 @@ function releaseIdentity(command: string[]) {
         const plist = readFileSync(join(descriptor.app, 'Contents', 'Info.plist'), 'utf8');
         app = { version: plistString(plist, 'CFBundleShortVersionString'), build: plistString(plist, 'CFBundleVersion'),
           runtime: manifest(join(descriptor.app, 'Contents', 'Resources')) };
-      } else if (descriptor.platform === 'windows') {
-        app = { version: descriptor.package_version, runtime: descriptor.runtime, copy: descriptor.sha256 };
-      } else {
+      } else if (descriptor.platform === 'linux') {
         const resources = join(root, 'app', 'resources');
         app = { asar: fileStamp(join(resources, 'app.asar')), runtime: manifest(resources) };
+      } else {
+        return undefined;
       }
-      if (typeof app.runtime !== 'string' || !app.runtime || !(app.version || app.asar)) return null;
+      if (typeof app.runtime !== 'string' || !app.runtime || !(app.version || app.asar)) return undefined;
       return { release, app };
     } catch {
-      return null;
+      return undefined;
     }
   }
   return undefined;
 }
 
-/** The cache key for this adapter mode and command, or undefined when the surface must not be cached. */
-function surfaceKey(adapter: string, command: string[], allowedOrigins: string[]) {
-  if (process.env.LCU_SURFACE_CACHE === '0') return undefined;
-  const installed = releaseIdentity(command);
-  if (installed === null) return undefined;
+/**
+ * The cache key for this command, or undefined when the surface must not be cached: the cache is off,
+ * the platform is Windows, or the command does not run an LCU release whose versions can be read.
+ */
+function surfaceKey(command: string[], allowedOrigins: string[]) {
+  if (process.env.LCU_SURFACE_CACHE === '0' || process.platform === 'win32') return undefined;
+  const files = commandFiles(command);
+  const installed = releaseIdentity(files);
+  if (!installed) return undefined;
   const environment = Object.fromEntries(SURFACE_ENVIRONMENT.map(name => [name, process.env[name] ?? null]));
   return createHash('sha256').update(JSON.stringify({
-    format: SURFACE_FORMAT, adapter, command, allowedOrigins, environment,
-    platform: process.platform, arch: process.arch, files: command.map(fileStamp), installed: installed ?? null,
+    format: SURFACE_FORMAT, adapter: 'pi', command, allowedOrigins, environment,
+    platform: process.platform, arch: process.arch, files: files.map(fileStamp), installed,
   })).digest('hex');
 }
 
@@ -170,7 +214,11 @@ function lookupSurface(key: string) {
   return stored;
 }
 
-/** Remember `surface` for `key` in this process and in the cache file (0600, directory 0700, atomic). */
+/**
+ * Remember `surface` for `key` in this process and in the cache file: an atomic 0600 file in the
+ * adapter's own 0700 directory. LCU's shared cache directory is created as `lcu` creates it and never
+ * changed.
+ */
 function storeSurface(key: string, surface: Surface) {
   knownSurfaces.set(key, surface);
   const path = surfaceCacheFile();
@@ -179,9 +227,8 @@ function storeSurface(key: string, surface: Surface) {
     const directory = dirname(path);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const stat = lstatSync(directory);
-    if (typeof process.getuid === 'function' && stat.uid === process.getuid() && (stat.mode & 0o777) !== 0o700) {
-      chmodSync(directory, 0o700);
-    }
+    if (!stat.isDirectory() || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) return;
+    if ((stat.mode & 0o777) !== 0o700) chmodSync(directory, 0o700);
     const others = Object.entries(readSurfaceFile()).filter(([other]) => other !== key).slice(1 - SURFACE_ENTRIES);
     const entries = Object.fromEntries([...others, [key, surface]]);
     writeFileSync(temporary, JSON.stringify({ format: SURFACE_FORMAT, entries }), { mode: 0o600, flag: 'wx' });
@@ -236,6 +283,8 @@ export default function (pi: ExtensionAPI, options: {
   // The surface this session registered its tools from, cached or live.
   let surface: Surface | undefined;
   const adapter = options.ompEssentialTools ? 'omp' : 'pi';
+  // Only Pi uses the surface cache. OMP connects while its extension loads, as before.
+  const cacheable = !options.ompEssentialTools && !options.connectOnLoad;
 
   function warnCleanup(ctx: ExtensionContext, error: unknown) {
     const message = `LCU turn cleanup is pending: ${error instanceof Error ? error.message : String(error)}`;
@@ -581,8 +630,9 @@ export default function (pi: ExtensionAPI, options: {
   }
 
   function cacheKey() {
+    if (!cacheable) return undefined;
     try {
-      return surfaceKey(adapter, commandFromEnvironment(options.command), originsFromEnvironment());
+      return surfaceKey(commandFromEnvironment(options.command), originsFromEnvironment());
     } catch {
       return undefined; // connect() reports the configuration error
     }
@@ -783,15 +833,8 @@ export default function (pi: ExtensionAPI, options: {
     },
   });
 
-  // OMP builds the initial provider tool list after extension loading. Register a
-  // known surface, or connect, during factory execution so LCU tools are in that snapshot.
-  if (options.connectOnLoad) {
-    const known = knownSurface();
-    if (known) {
-      useSurface(known);
-      return Promise.resolve(undefined);
-    }
-    return connected().then(() => undefined);
-  }
+  // OMP builds the initial provider tool list after extension loading. Connect
+  // during factory execution so LCU tools are registered before that snapshot.
+  if (options.connectOnLoad) return connected().then(() => undefined);
 
 }
