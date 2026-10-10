@@ -1,10 +1,15 @@
-import { randomUUID } from 'node:crypto';
-import { userInfo } from 'node:os';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
+} from 'node:fs';
+import { homedir, userInfo } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { TSchema } from 'typebox';
 import { createCuaClient, nativeAppApprovalOptions, nativeAppApprovalResponse } from '../client.mjs';
 import { persistAudioContent } from '../audio-files.mjs';
+import { openDiagnosticLog } from '../diagnostics.mjs';
 
 type OriginalContent = { type: string; text?: string; data?: string; mimeType?: string };
 
@@ -38,6 +43,153 @@ function commandFromEnvironment(selected?: string[]) {
 function originsFromEnvironment() {
   const raw = process.env.LCU_APPROVED_ORIGINS;
   return raw ? JSON.parse(raw) : [];
+}
+
+// The original runtime's model-facing surface: the public tool descriptors and the initialization
+// instructions. Pi needs both before its model call, but they only change with LCU, the app or the CUA
+// runtime, so a session that knows them registers the tools and starts the runtime on the first call.
+type SurfaceTool = { name: string; description: string; inputSchema: Record<string, unknown> };
+type Surface = { tools: SurfaceTool[]; instructions: string };
+
+const SURFACE_FORMAT = 1;
+const SURFACE_FILE = 'pi-surfaces.json';
+const SURFACE_ENTRIES = 8;
+// Environment the original launcher reads when it builds its instructions and tool descriptions.
+const SURFACE_ENVIRONMENT = ['CUA_REPL_ENABLED_SURFACES', 'CUA_REPL_BROWSER_ENV', 'CUA_REPL_BROWSER_GUIDANCE',
+  'NODE_REPL_TOOL_OVERRIDES', 'SKY_ENABLE_AUDIO', 'NODE_REPL_ENABLE_AUDIO'];
+// Pi can load this module more than once in a process (one copy per session or subagent), so the
+// in-memory copy lives on globalThis.
+const knownSurfaces: Map<string, Surface> = (globalThis as any)[Symbol.for('lcu.pi.surfaces')] ??= new Map();
+
+/** The surface as plain JSON, the same shape the cache file holds, so both paths register identical bytes. */
+function surfaceOf(client: ReturnType<typeof createCuaClient>): Surface {
+  return JSON.parse(JSON.stringify({
+    tools: client.publicTools().map((tool: any) => ({
+      name: tool.name, description: tool.description ?? '', inputSchema: tool.inputSchema,
+    })),
+    instructions: client.instructions,
+  }));
+}
+
+function validSurface(value: any): value is Surface {
+  return value && typeof value === 'object' && typeof value.instructions === 'string' &&
+    Array.isArray(value.tools) && value.tools.length > 0 && value.tools.every((tool: any) =>
+    tool && typeof tool.name === 'string' && tool.name && typeof tool.description === 'string' &&
+      tool.inputSchema && typeof tool.inputSchema === 'object' && !Array.isArray(tool.inputSchema));
+}
+
+/** LCU's per-account cache directory, the one `lcu` keeps `update.json` in (lcu/check_record.mjs). */
+function surfaceCacheFile() {
+  const home = homedir();
+  const directory = process.platform === 'win32'
+    ? join(process.env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'LCU', 'cache')
+    : process.platform === 'darwin' ? join(home, 'Library', 'Caches', 'lcu')
+      : join(process.env.XDG_CACHE_HOME || join(home, '.cache'), 'lcu');
+  return join(directory, SURFACE_FILE);
+}
+
+const fileStamp = (path: string) => {
+  try {
+    const stat = statSync(path);
+    return [realpathSync(path), stat.size, stat.mtimeMs];
+  } catch {
+    return null;
+  }
+};
+
+const plistString = (plist: string, key: string) =>
+  new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(plist)?.[1];
+
+/**
+ * The LCU release the command runs and the app and CUA runtime it selects, read from files without
+ * starting anything: the release directory and its bundle.json stamp; on macOS the app's Info.plist
+ * versions and the CUA manifest, which change when the app updates itself in place; on Linux the CUA
+ * manifest and the app.asar stamp; on Windows the private copy recorded in installation.json. Null when
+ * the command is an LCU release whose app cannot be read; undefined when it is not an LCU release.
+ */
+function releaseIdentity(command: string[]) {
+  for (const part of [...command].reverse()) {
+    let launcher;
+    try { launcher = realpathSync(part); } catch { continue; }
+    if (!['lcu', 'lcu.cmd'].includes(basename(launcher)) || basename(dirname(launcher)) !== 'bin') continue;
+    const root = dirname(dirname(launcher));
+    let descriptor;
+    try { descriptor = JSON.parse(readFileSync(join(root, 'installation.json'), 'utf8')); } catch { continue; }
+    try {
+      const release = { root, bundle: fileStamp(join(root, 'bundle.json')) };
+      const manifest = (resources: string) =>
+        JSON.parse(readFileSync(join(resources, 'cua_node', 'manifest.json'), 'utf8')).runtime_archive_version;
+      let app: Record<string, any>;
+      if (descriptor.platform === 'darwin') {
+        const plist = readFileSync(join(descriptor.app, 'Contents', 'Info.plist'), 'utf8');
+        app = { version: plistString(plist, 'CFBundleShortVersionString'), build: plistString(plist, 'CFBundleVersion'),
+          runtime: manifest(join(descriptor.app, 'Contents', 'Resources')) };
+      } else if (descriptor.platform === 'windows') {
+        app = { version: descriptor.package_version, runtime: descriptor.runtime, copy: descriptor.sha256 };
+      } else {
+        const resources = join(root, 'app', 'resources');
+        app = { asar: fileStamp(join(resources, 'app.asar')), runtime: manifest(resources) };
+      }
+      if (typeof app.runtime !== 'string' || !app.runtime || !(app.version || app.asar)) return null;
+      return { release, app };
+    } catch {
+      return null;
+    }
+  }
+  return undefined;
+}
+
+/** The cache key for this adapter mode and command, or undefined when the surface must not be cached. */
+function surfaceKey(adapter: string, command: string[], allowedOrigins: string[]) {
+  if (process.env.LCU_SURFACE_CACHE === '0') return undefined;
+  const installed = releaseIdentity(command);
+  if (installed === null) return undefined;
+  const environment = Object.fromEntries(SURFACE_ENVIRONMENT.map(name => [name, process.env[name] ?? null]));
+  return createHash('sha256').update(JSON.stringify({
+    format: SURFACE_FORMAT, adapter, command, allowedOrigins, environment,
+    platform: process.platform, arch: process.arch, files: command.map(fileStamp), installed: installed ?? null,
+  })).digest('hex');
+}
+
+function readSurfaceFile(): Record<string, unknown> {
+  try {
+    const record = JSON.parse(readFileSync(surfaceCacheFile(), 'utf8'));
+    if (record?.format === SURFACE_FORMAT && record.entries && typeof record.entries === 'object' &&
+        !Array.isArray(record.entries)) return record.entries;
+  } catch { /* missing or corrupt: a miss */ }
+  return {};
+}
+
+/** The surface last seen for `key`, from this process or the cache file. */
+function lookupSurface(key: string) {
+  const remembered = knownSurfaces.get(key);
+  if (remembered) return remembered;
+  const stored = readSurfaceFile()[key];
+  if (!validSurface(stored)) return undefined;
+  knownSurfaces.set(key, stored);
+  return stored;
+}
+
+/** Remember `surface` for `key` in this process and in the cache file (0600, directory 0700, atomic). */
+function storeSurface(key: string, surface: Surface) {
+  knownSurfaces.set(key, surface);
+  const path = surfaceCacheFile();
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    const directory = dirname(path);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const stat = lstatSync(directory);
+    if (typeof process.getuid === 'function' && stat.uid === process.getuid() && (stat.mode & 0o777) !== 0o700) {
+      chmodSync(directory, 0o700);
+    }
+    const others = Object.entries(readSurfaceFile()).filter(([other]) => other !== key).slice(1 - SURFACE_ENTRIES);
+    const entries = Object.fromEntries([...others, [key, surface]]);
+    writeFileSync(temporary, JSON.stringify({ format: SURFACE_FORMAT, entries }), { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, path);
+  } catch {
+    // The cache is an optimisation: without it the next session connects as before.
+    try { unlinkSync(temporary); } catch { /* not created */ }
+  }
 }
 
 const PICK_RESULT_MARKER = 'LCU_PICK_RESULT:';
@@ -81,6 +233,9 @@ export default function (pi: ExtensionAPI, options: {
   let pendingPickerCleanup: { client: ReturnType<typeof createCuaClient>; turn: { sessionId: string; turnId: string } } | undefined;
   let cleanupInFlight: Promise<void> | undefined;
   let approvalContext: ExtensionContext | undefined;
+  // The surface this session registered its tools from, cached or live.
+  let surface: Surface | undefined;
+  const adapter = options.ompEssentialTools ? 'omp' : 'pi';
 
   function warnCleanup(ctx: ExtensionContext, error: unknown) {
     const message = `LCU turn cleanup is pending: ${error instanceof Error ? error.message : String(error)}`;
@@ -111,6 +266,12 @@ export default function (pi: ExtensionAPI, options: {
     }
     if (!ctx.hasUI || typeof ctx.ui.select !== 'function') {
       ctx.ui.notify('Stopping Computer Use requires Pi interactive selection.', 'warning');
+      return;
+    }
+    // Only a host this session started can have Computer Use apps active for its turn. Without one,
+    // do not start a host just to find nothing to stop.
+    if (!bridge && !pending) {
+      ctx.ui.notify('No active Computer Use app is available to stop.', 'info');
       return;
     }
     const turn = { ...active };
@@ -379,14 +540,14 @@ export default function (pi: ExtensionAPI, options: {
     }
   }
 
-  function registerTools(client: ReturnType<typeof createCuaClient>) {
+  function registerTools(descriptors: SurfaceTool[]) {
     // Pi refreshes tools registered during before_agent_start before its model call.
-    for (const descriptor of client.publicTools()) {
+    for (const descriptor of descriptors) {
       const name = descriptor.name;
       pi.registerTool({
         name,
         label: `LCU ${name}`,
-        description: descriptor.description ?? '',
+        description: descriptor.description,
         parameters: descriptor.inputSchema as TSchema,
         ...(options.ompEssentialTools ? { loadMode: 'essential' } : {}),
         async execute(id, args, signal, _onUpdate, ctx) {
@@ -413,14 +574,49 @@ export default function (pi: ExtensionAPI, options: {
     }
   }
 
+  /** Register `next`'s tools unless this session already registered the same ones. */
+  function useSurface(next: Surface) {
+    if (!surface || JSON.stringify(surface.tools) !== JSON.stringify(next.tools)) registerTools(next.tools);
+    surface = next;
+  }
+
+  function cacheKey() {
+    try {
+      return surfaceKey(adapter, commandFromEnvironment(options.command), originsFromEnvironment());
+    } catch {
+      return undefined; // connect() reports the configuration error
+    }
+  }
+
+  /** The surface last seen for this configuration, without starting a host. */
+  function knownSurface() {
+    const key = cacheKey();
+    return key === undefined ? undefined : lookupSurface(key);
+  }
+
+  /** Keep a connected host's surface for later sessions; replace a different one and log that it changed. */
+  function rememberSurface(key: string | undefined, live: Surface, log: { event(type: string, fields?: object): void }) {
+    if (key === undefined) return;
+    const known = lookupSurface(key);
+    if (known && JSON.stringify(known) === JSON.stringify(live)) return;
+    storeSurface(key, live);
+    if (known) {
+      log.event('surface_changed', { tools_changed: JSON.stringify(known.tools) !== JSON.stringify(live.tools),
+        instructions_changed: known.instructions !== live.instructions });
+    }
+  }
+
   async function connected() {
     if (bridge) return bridge;
     if (!pending) {
       pending = (async () => {
+        const key = cacheKey();
+        const log = openDiagnosticLog({ adapter });
         const candidate = createCuaClient({
           command: commandFromEnvironment(options.command),
           cwd: process.cwd(),
-          adapter: options.ompEssentialTools ? 'omp' : 'pi',
+          adapter,
+          log,
           allowedOrigins: originsFromEnvironment(),
           onElicitation: async (params, { signal }) => {
             const ctx = approvalContext;
@@ -448,7 +644,9 @@ export default function (pi: ExtensionAPI, options: {
         });
         await candidate.connect();
         bridge = candidate;
-        registerTools(candidate);
+        const live = surfaceOf(candidate);
+        rememberSurface(key, live, log);
+        useSurface(live);
         return candidate;
       })().finally(() => { pending = undefined; });
     }
@@ -493,9 +691,26 @@ export default function (pi: ExtensionAPI, options: {
     }
   }
 
+  /**
+   * The tools and instructions for this turn. A connected host supplies them; otherwise a surface
+   * known for this configuration does, and the host starts on the first LCU tool call or command.
+   * Only an unknown configuration (a new install, app or runtime) starts the host here.
+   */
+  async function sessionSurface() {
+    if (!bridge && !pending) {
+      const known = knownSurface();
+      if (known) {
+        useSurface(known);
+        return known;
+      }
+    }
+    await connected();
+    return surface!;
+  }
+
   pi.on('before_agent_start', async (event, ctx) => {
     approvalContext = ctx;
-    const client = await connected();
+    const { instructions } = await sessionSurface();
     // Returning systemPrompt makes Pi force that prompt, collapsing its
     // structured prompt and tool-addition deltas into one head (breaking prompt
     // caching after tool_search). Pi hands us its mutable systemPromptOptions,
@@ -503,8 +718,8 @@ export default function (pi: ExtensionAPI, options: {
     const opts = event.systemPromptOptions;
     if (opts) {
       const current = typeof opts.appendSystemPrompt === 'string' ? opts.appendSystemPrompt : '';
-      if (!current.includes(client.instructions)) {
-        opts.appendSystemPrompt = current ? `${current}\n\n${client.instructions}` : client.instructions;
+      if (!current.includes(instructions)) {
+        opts.appendSystemPrompt = current ? `${current}\n\n${instructions}` : instructions;
       }
       return undefined;
     }
@@ -512,8 +727,8 @@ export default function (pi: ExtensionAPI, options: {
     // and append LCU's instructions as one additional section. Without Pi's
     // options, fall back to a string.
     return { systemPrompt: Array.isArray(event.systemPrompt)
-      ? [...event.systemPrompt, client.instructions]
-      : `${event.systemPrompt}\n\n${client.instructions}` };
+      ? [...event.systemPrompt, instructions]
+      : `${event.systemPrompt}\n\n${instructions}` };
   });
   pi.on('agent_start', async (_event, ctx) => {
     // A failed turn_ended must succeed before Pi starts another turn. Keep the
@@ -568,8 +783,15 @@ export default function (pi: ExtensionAPI, options: {
     },
   });
 
-  // OMP builds the initial provider tool list after extension loading. Connect
-  // during factory execution so LCU tools are registered before that snapshot.
-  if (options.connectOnLoad) return connected().then(() => undefined);
+  // OMP builds the initial provider tool list after extension loading. Register a
+  // known surface, or connect, during factory execution so LCU tools are in that snapshot.
+  if (options.connectOnLoad) {
+    const known = knownSurface();
+    if (known) {
+      useSurface(known);
+      return Promise.resolve(undefined);
+    }
+    return connected().then(() => undefined);
+  }
 
 }
