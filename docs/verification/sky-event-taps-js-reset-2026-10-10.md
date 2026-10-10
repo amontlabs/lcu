@@ -55,5 +55,23 @@ Sky. This check did not reproduce the doubled per-pid taps.
 - The macOS lifetime host learns each turn at its first Sky request, and when it stops it runs the original
   `turn-ended` command (8 s bound) for every turn no turn-ended request named.
 
-Verified with unit tests only (`adapters/test/{claude,client,codex}.test.mjs`, `tests/node/macos_host.test.mjs`,
-`tests/macos_control_service.mjs`). No live run of the fixed relays has been made yet.
+Unit tests: `adapters/test/{claude,client,codex}.test.mjs`, `tests/node/macos_host.test.mjs` and
+`tests/macos_control_service.mjs`. `tests/run.sh linux/arm64` passed.
+
+## Live run of the fixed Claude relay
+
+This run was approved by the user. The repository's `adapters/claude.mjs` ran in front of the installed `lcu`
+(0.11.1), with cross-turn off. All steps were in one turn on Calculator, and each `js` call ran
+`get_app_state` and then `press_key` Escape.
+
+| Step | Sky taps | Relay log |
+| --- | --- | --- |
+| `js` | 6 (the same set as above) | `call_end` ok |
+| `js_reset` (+1.5 s) | 0 | `turn_end` Interrupt, `cause: js_reset`, ok, `sky_hook: live` (51 ms) |
+| `js` again, same turn | 6; the call was not refused | `call_end` ok |
+| `Stop` (+2 s) | 0 | `turn_end` Stop, ok, `sky_hook: live` |
+
+Before the fix, a `js_reset` left these taps in place until the service exited. In this run they were removed
+at the reset, and the turn went on working under its fresh upstream id. Not run live: the Codex relay, the
+shared client relay, and the lifetime host's cleanup at stop. The host change is in `lcu/`, which the installed
+0.11.1 did not include.
