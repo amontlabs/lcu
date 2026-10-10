@@ -608,14 +608,19 @@ test('the surface key includes the launch command, enabled surfaces, platform an
       surfaceKey([sessionLauncher, '--user', 'bob', '--', command[0]], [], 'pi'),
       '--user is part of the launch command, so two accounts do not share a key');
     const savedHome = process.env.HOME;
+    const savedCache = process.env.XDG_CACHE_HOME;
     const other = mkdtempSync(join(homedir(), '.lcu-pi-surface-'));
+    // Linux cacheDirectory() follows XDG_CACHE_HOME. macOS follows HOME. Change both.
     process.env.HOME = other;
     process.env.USERPROFILE = other;
+    process.env.XDG_CACHE_HOME = join(other, '.cache');
     try {
       assert.notEqual(surfaceKey(command, [], 'pi'), base, 'the per-account cache directory is part of the key');
     } finally {
       process.env.HOME = savedHome;
       process.env.USERPROFILE = savedHome;
+      if (savedCache === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = savedCache;
       rmSync(other, { recursive: true, force: true });
     }
     assert.equal(surfaceKey(command, [], 'pi'), base);
