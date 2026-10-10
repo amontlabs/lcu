@@ -602,6 +602,11 @@ test('the surface key includes the launch command, enabled surfaces, platform an
       Object.defineProperty(process, 'platform', platform);
     }
     assert.notEqual(surfaceKey(command, [], 'omp'), base, 'Pi and OMP do not share a key');
+    const sessionLauncher = join(home, 'r', 'bin', 'lcu-session');
+    assert.notEqual(
+      surfaceKey([sessionLauncher, '--user', 'alice', '--', command[0]], [], 'pi'),
+      surfaceKey([sessionLauncher, '--user', 'bob', '--', command[0]], [], 'pi'),
+      '--user is part of the launch command, so two accounts do not share a key');
     const savedHome = process.env.HOME;
     const other = mkdtempSync(join(homedir(), '.lcu-pi-surface-'));
     process.env.HOME = other;
