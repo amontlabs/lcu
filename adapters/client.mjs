@@ -486,6 +486,51 @@ export function drainUpstreamStderr(stream, log, { limit = UPSTREAM_STDERR_EVENT
   };
 }
 
+/** Host turns a relay remembers for js_reset, oldest evicted first. */
+export const MAX_WORKER_TURNS = 1024;
+
+/**
+ * js_reset stops the original trusted worker, which holds the turn-ended hook and pending turn data of every turn
+ * that ran js on it: a later turn end reaches nobody, and Sky keeps those turns' event taps (on macOS, keyboard
+ * focus taps that can double keystrokes system-wide). `reset(end)` ends each such turn upstream first, while the
+ * worker still lives, then gives it a fresh upstream id so its later calls are not refused as calls of an ended
+ * turn. Host turns are keyed by (session, turn); `upstreamId` maps one to the id the original server sees.
+ */
+export function createWorkerTurns({ limit = MAX_WORKER_TURNS } = {}) {
+  let worker = 0;
+  // key -> { sessionId, upstreamId, worker }; `worker` is the generation the turn last ran js on, if any.
+  const turns = new Map();
+  const key = (sessionId, turnId) => JSON.stringify([sessionId, turnId]);
+  return {
+    upstreamId(sessionId, turnId) { return turns.get(key(sessionId, turnId))?.upstreamId ?? turnId; },
+    ranJs(sessionId, turnId) {
+      const id = key(sessionId, turnId);
+      const turn = turns.get(id) ?? { sessionId, upstreamId: turnId };
+      turn.worker = worker;
+      turns.delete(id);
+      turns.set(id, turn);
+      if (turns.size > limit) turns.delete(turns.keys().next().value);
+    },
+    /** 'live': the hook can be reached; 'reset': its worker was reset since; 'none': no js since the last reset. */
+    skyHook(sessionId, turnId) {
+      const turn = turns.get(key(sessionId, turnId));
+      if (turn?.worker === undefined) return 'none';
+      return turn.worker === worker ? 'live' : 'reset';
+    },
+    ended(sessionId, turnId) { turns.delete(key(sessionId, turnId)); },
+    async reset(end) {
+      const used = [...turns.values()].filter(turn => turn.worker === worker);
+      worker++;
+      await Promise.all(used.map(async turn => {
+        // `end` reports its own outcome; the reset goes ahead either way.
+        try { await end(turn.sessionId, turn.upstreamId); } catch {}
+        turn.upstreamId = randomUUID();
+        turn.worker = undefined;
+      }));
+    },
+  };
+}
+
 /** Code of the error `turnEnded` throws when the original host gave up waiting for cleanup. */
 export const TURN_CLEANUP_TIMEOUT_CODE = 'LCU_TURN_CLEANUP_TIMEOUT';
 
@@ -535,6 +580,7 @@ export function createCuaClient({
   const callSignals = new Set();
   const calls = createCallTracker(log);
   const approvalLog = createApprovalLogger(log, calls);
+  const workerTurns = createWorkerTurns();
   client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
     const params = request.params;
     // The approval log records the refusal (`agent_host_refused`); nothing is written to the TUI.
@@ -558,6 +604,21 @@ export function createCuaClient({
     return { action: 'cancel' };
   }
 
+  async function endTurnUpstream(sessionId, upstreamId, event, fields) {
+    const started = Date.now();
+    let result;
+    try {
+      result = await client.callTool({ name: 'turn_ended', arguments: {
+        hook_event_name: event, session_id: sessionId, turn_id: upstreamId,
+      } }, undefined, { timeout: TURN_END_TIMEOUT_MS });
+    } catch (error) {
+      log.event('turn_end', { hook_event: event, ...fields, ms: Date.now() - started, outcome: 'error' });
+      throw error;
+    }
+    log.event('turn_end', { hook_event: event, ...fields, ms: Date.now() - started,
+      outcome: result.isError ? 'error' : 'ok' });
+    return result;
+  }
   return {
     async connect() {
       if (connected) return this;
@@ -602,6 +663,11 @@ export function createCuaClient({
       if (!MODEL_TOOLS.has(name)) throw new Error(`Tool is reserved for host use: ${name}`);
       if (!sessionId || !turnId) throw new Error('A real host session and active turn are required');
       const timeout = callTimeout(name, args);
+      // Before the metadata below, so a reset call already carries its turn's fresh id.
+      if (name === 'js_reset') {
+        await workerTurns.reset((session, upstreamId) => endTurnUpstream(session, upstreamId, 'Interrupt',
+          { cause: 'js_reset', sky_hook: 'live' }));
+      } else workerTurns.ranJs(sessionId, turnId);
       const inherited = metadata?.['x-codex-turn-metadata'];
       const original = typeof inherited === 'string' ? (() => {
         try { return JSON.parse(inherited); } catch { return undefined; }
@@ -610,7 +676,7 @@ export function createCuaClient({
         ? { ...original } : {};
       Object.assign(turnMetadata, {
         session_id: sessionId,
-        turn_id: turnId,
+        turn_id: workerTurns.upstreamId(sessionId, turnId),
         ...(toolCallId ? { call_id: toolCallId } : {}),
         ...(itemId ? { item_id: itemId } : {}),
         ...(threadId ? { thread_id: threadId } : {}),
@@ -637,17 +703,8 @@ export function createCuaClient({
       if (!sessionId || !turnId || !['Stop', 'Interrupt', 'SubagentStop'].includes(event)) {
         throw new Error('Invalid original CUA lifecycle event');
       }
-      const started = Date.now();
-      let result;
-      try {
-        result = await client.callTool({ name: 'turn_ended', arguments: {
-          hook_event_name: event, session_id: sessionId, turn_id: turnId,
-        } }, undefined, { timeout: TURN_END_TIMEOUT_MS });
-      } catch (error) {
-        log.event('turn_end', { hook_event: event, ms: Date.now() - started, outcome: 'error' });
-        throw error;
-      }
-      log.event('turn_end', { hook_event: event, ms: Date.now() - started, outcome: result.isError ? 'error' : 'ok' });
+      const result = await endTurnUpstream(sessionId, workerTurns.upstreamId(sessionId, turnId), event,
+        { sky_hook: workerTurns.skyHook(sessionId, turnId) });
       if (result.isError) {
         const detail = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
         if (/turn-ended handlers timed out/i.test(detail)) {
@@ -661,6 +718,7 @@ export function createCuaClient({
         }
         throw new Error(`Original CUA turn cleanup failed: ${detail || 'unknown error'}`);
       }
+      workerTurns.ended(sessionId, turnId);
       return result;
     },
     get hasHostControl() { return connected && Boolean(controlSocketPath); },
@@ -669,7 +727,7 @@ export function createCuaClient({
       if (!controlSocketPath) throw new Error('LCU host control is unavailable on this platform');
       if (!sessionId || !turnId) throw new Error('Host control requires the active session and turn IDs');
       const result = await sendControlRequest(controlSocketPath, {
-        type: 'status', session_id: sessionId, turn_id: turnId,
+        type: 'status', session_id: sessionId, turn_id: workerTurns.upstreamId(sessionId, turnId),
       });
       if (!result || typeof result !== 'object' ||
           !Array.isArray(result.computerUse?.activeApplications)) {
@@ -682,7 +740,7 @@ export function createCuaClient({
       if (!controlSocketPath) throw new Error('LCU host control is unavailable on this platform');
       if (!sessionId || !turnId || !app) throw new Error('Host Stop requires the active session, turn, and app IDs');
       const result = await sendControlRequest(controlSocketPath, {
-        type: 'stop', session_id: sessionId, turn_id: turnId, app,
+        type: 'stop', session_id: sessionId, turn_id: workerTurns.upstreamId(sessionId, turnId), app,
       });
       if (!result || result.accepted !== true || result.applicationId !== app) {
         throw new Error('Original host did not confirm Computer Use Stop for the selected app');

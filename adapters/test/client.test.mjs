@@ -10,7 +10,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
-  callWithDeadline, createApprovalGate, createCuaClient, nativeAppApprovalOptions,
+  callWithDeadline, createApprovalGate, createCuaClient, createWorkerTurns, nativeAppApprovalOptions,
   nativeAppApprovalResponse, relayElicitation, sendControlRequest, TURN_CLEANUP_TIMEOUT_CODE,
 } from '../client.mjs';
 
@@ -357,4 +357,59 @@ test('an approval for an app hosting the agent is declined without asking the ho
     assert.deepEqual(JSON.parse(result.content[0].text), { action: 'decline' });
     assert.equal(seen.length, 0);
   } finally { await bridge.close(); }
+});
+
+test('js_reset ends every turn that ran js upstream first, then continues it under a fresh id', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-client-reset-'));
+  const oldLog = process.env.LCU_FIXTURE_LOG;
+  const log = join(directory, 'mcp.jsonl');
+  process.env.LCU_FIXTURE_LOG = log;
+  const bridge = createCuaClient({ command });
+  try {
+    await bridge.connect();
+    const records = () => readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+    await bridge.call('js', { code: 'a' }, { sessionId: 's', turnId: 'used' });
+    await bridge.call('js', { code: 'b' }, { sessionId: 's2', turnId: 'other' });
+    await bridge.call('js_reset', {}, { sessionId: 's', turnId: 'used' });
+    const resetAt = records().findIndex(entry => entry.name === 'js_reset');
+    assert.deepEqual(records().slice(2, resetAt).map(entry => [entry.name, entry.args.hook_event_name,
+      entry.args.session_id, entry.args.turn_id]).sort(),
+    [['turn_ended', 'Interrupt', 's', 'used'], ['turn_ended', 'Interrupt', 's2', 'other']]);
+    const fresh = records()[resetAt].meta['x-codex-turn-metadata'].turn_id;
+    assert.notEqual(fresh, 'used');
+    await bridge.call('js', { code: 'c' }, { sessionId: 's', turnId: 'used' });
+    assert.equal(records().at(-1).meta['x-codex-turn-metadata'].turn_id, fresh);
+    await bridge.turnEnded({ sessionId: 's', turnId: 'used' });
+    assert.equal(records().at(-1).args.turn_id, fresh);
+    // A second reset ends only turns that ran js since the first.
+    const before = records().length;
+    await bridge.call('js_reset', {}, { sessionId: 's3', turnId: 'idle' });
+    assert.deepEqual(records().slice(before).map(entry => entry.name), ['js_reset']);
+    assert.equal(records().at(-1).meta['x-codex-turn-metadata'].turn_id, 'idle');
+  } finally {
+    await bridge.close();
+    if (oldLog === undefined) delete process.env.LCU_FIXTURE_LOG;
+    else process.env.LCU_FIXTURE_LOG = oldLog;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('worker turns report whether a turn end can reach the original hook, and stay bounded', async () => {
+  const turns = createWorkerTurns({ limit: 2 });
+  assert.equal(turns.skyHook('s', 't'), 'none');
+  turns.ranJs('s', 't');
+  assert.equal(turns.skyHook('s', 't'), 'live');
+  const ended = [];
+  await turns.reset(async (session, id) => { ended.push([session, id]); throw new Error('cleanup failed'); });
+  assert.deepEqual(ended, [['s', 't']], 'a failed end does not stop the reset');
+  assert.equal(turns.skyHook('s', 't'), 'none');
+  const fresh = turns.upstreamId('s', 't');
+  assert.notEqual(fresh, 't');
+  turns.ranJs('s', 't');
+  assert.equal(turns.upstreamId('s', 't'), fresh);
+  turns.ranJs('s', 'u');
+  turns.ranJs('s', 'v');
+  assert.equal(turns.upstreamId('s', 't'), 't', 'the oldest turn is evicted past the limit');
+  turns.ended('s', 'v');
+  assert.equal(turns.skyHook('s', 'v'), 'none');
 });
