@@ -372,3 +372,47 @@ test('Codex relay logs calls and approvals as metadata only', { timeout: 20_000 
     await bridge.close();
   }
 });
+
+test('Codex relay ends turns that ran js before js_reset and maps their later calls and Stop to a fresh id', { timeout: 20_000 }, async () => {
+  const bridge = await connectCodexRelay();
+  const meta = (session_id, turn_id) => ({ 'x-codex-turn-metadata': { session_id, turn_id, caller: 'kept' } });
+  try {
+    await bridge.client.callTool({ name: 'js', arguments: { code: 'a' }, _meta: meta('thread-a', 'turn-a') });
+    // Metadata may arrive as JSON text.
+    await bridge.client.callTool({ name: 'js', arguments: { code: 'b' },
+      _meta: { 'x-codex-turn-metadata': JSON.stringify({ session_id: 'thread-b', turn_id: 'turn-b' }) } });
+    const reset = await bridge.client.callTool({ name: 'js_reset', arguments: {}, _meta: meta('thread-a', 'turn-a') });
+    assert.equal(reset.content[0].text, 'Synthetic reset complete.');
+    const calls = () => bridge.logs().filter(entry => entry.type === 'call');
+    const resetAt = calls().findIndex(entry => entry.name === 'js_reset');
+    assert.deepEqual(calls().slice(2, resetAt).map(entry => [entry.args.hook_event_name, entry.args.session_id,
+      entry.args.turn_id]).sort(), [['Interrupt', 'thread-a', 'turn-a'], ['Interrupt', 'thread-b', 'turn-b']]);
+    const fresh = calls()[resetAt].meta['x-codex-turn-metadata'];
+    assert.notEqual(fresh.turn_id, 'turn-a');
+    assert.equal(fresh.caller, 'kept');
+
+    await bridge.client.callTool({ name: 'js', arguments: { code: 'c' }, _meta: meta('thread-a', 'turn-a') });
+    assert.equal(calls().at(-1).meta['x-codex-turn-metadata'].turn_id, fresh.turn_id);
+    await bridge.client.callTool({ name: 'js', arguments: { code: 'd' },
+      _meta: { 'x-codex-turn-metadata': JSON.stringify({ session_id: 'thread-b', turn_id: 'turn-b' }) } });
+    const freshB = JSON.parse(calls().at(-1).meta['x-codex-turn-metadata']).turn_id;
+    assert.ok(![fresh.turn_id, 'turn-b'].includes(freshB));
+    await bridge.client.callTool({ name: 'turn_ended', arguments: {
+      hook_event_name: 'Stop', session_id: 'thread-a', turn_id: 'turn-a',
+    } });
+    assert.equal(calls().at(-1).args.turn_id, fresh.turn_id);
+    // An unrelated Stop passes through unchanged.
+    await bridge.client.callTool({ name: 'turn_ended', arguments: {
+      hook_event_name: 'Stop', session_id: 'thread-c', turn_id: 'turn-c',
+    } });
+    assert.equal(calls().at(-1).args.turn_id, 'turn-c');
+
+    const ends = bridge.diagnostics().filter(entry => entry.event === 'turn_end');
+    assert.deepEqual(ends.map(entry => [entry.hook_event, entry.cause, entry.outcome, entry.sky_hook]), [
+      ['Interrupt', 'js_reset', 'ok', 'live'], ['Interrupt', 'js_reset', 'ok', 'live'],
+      ['Stop', undefined, 'ok', 'live'], ['Stop', undefined, 'ok', 'none'],
+    ]);
+  } finally {
+    await bridge.close();
+  }
+});
