@@ -96,6 +96,22 @@ test('stopping the host ends its turn-ended commands and waiting control request
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the turn-ended command was killed');
 });
 
+test('stopping the host first ends the turns the Sky wrapper reported and no turn-ended request named', async (t) => {
+  const capture = join(temporary(t), 'ended');
+  mockWrite(t, process.stderr, () => true);
+  const host = await startOriginalHost({ client: client(t, `printf '%s\\n' "$2" >> "${capture}"`) });
+  t.after(() => host.stop());
+  for (const turn of ['open', 'ended', 'open']) {
+    assert.deepEqual(await request(host.address, { type: 'turn', session_id: 'session', turn_id: turn }), { ok: true });
+  }
+  const malformed = await request(host.address, { type: 'turn', session_id: 'session' });
+  assert.match(malformed.error, /turn IDs are missing/);
+  assert.deepEqual(await request(host.address, { session_id: 'session', turn_id: 'ended' }), { notified: true });
+  await host.stop();
+  const ended = readFileSync(capture, 'utf8').trim().split('\n').map((line) => JSON.parse(line)['turn-id']);
+  assert.deepEqual(ended, ['ended', 'open'], 'the open turn ended once at stop, the ended one was not repeated');
+});
+
 async function turnEnded(t, path, options) {
   let log = '';
   const stderr = mockWrite(t, process.stderr, (text) => { log += text; return true; });

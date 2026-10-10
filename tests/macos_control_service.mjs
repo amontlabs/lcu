@@ -24,6 +24,7 @@ let failTurnEndedOnce = false;
 const pending = new Map();
 const observedContexts = [];
 const lifetimeMessages = [];
+const turnAnnouncements = [];
 const recoverRequests = [];
 const recoverClosed = [];
 let recoverReply;
@@ -131,6 +132,11 @@ const lifetimeServer = createServer(socket => consumeLines(socket, message => {
       try { if (JSON.parse(recoverReply).recovered === true) globalThis.hostRecovered = true; } catch {}
       socket.end(`${recoverReply}\n`);
     }, recoverDelayMs));
+    return;
+  }
+  if (message.type === 'turn') {
+    turnAnnouncements.push(message);
+    socket.end('{"ok":true}\n');
     return;
   }
   lifetimeMessages.push(message);
@@ -302,6 +308,8 @@ try {
     metadata: {session_id: sessionId, turn_id: turnId, call_id: 'call-fixture-B'},
     timeoutSeconds: 15});
   assert.deepEqual(lifetimeMessages, [{session_id: sessionId, turn_id: turnId}]);
+  assert.deepEqual(turnAnnouncements, [{type: 'turn', session_id: sessionId, turn_id: turnId}],
+    'the host learns of the open turn once, at its first Sky request');
 
   const oldServiceSocket = serviceSocket;
   let oldServiceClosed = false;

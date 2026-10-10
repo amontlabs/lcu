@@ -80,6 +80,21 @@ function lifetimeSignal(runtime, session_id, turn_id) {
   }));
 }
 
+// Tell the private host that a turn is open, so it can still end the turn when this worker is gone before the
+// turn's end (js_reset, server exit). Best effort: never waits, never throws.
+function announceTurn(runtime, session_id, turn_id) {
+  const address = runtime?.env?.LCU_MAC_LIFETIME_SOCKET;
+  if (!address || typeof runtime.nativePipe?.createConnection !== 'function') return;
+  Promise.resolve().then(() => runtime.nativePipe.createConnection(address)).then(socket => {
+    const timer = setTimeout(() => { try { socket.end(); } catch {} }, 2000);
+    const done = () => { clearTimeout(timer); try { socket.end(); } catch {} };
+    socket.on('data', done);
+    socket.on('error', done);
+    socket.on('close', () => clearTimeout(timer));
+    socket.write(Buffer.from(JSON.stringify({type: 'turn', session_id, turn_id}) + '\n'));
+  }).catch(() => {});
+}
+
 // The exact message of the original transport error; a longer message that merely contains
 // these words (a validation or approval error) is not a native pipe failure.
 const NATIVE_PIPE_FAILURE = 'Sky Computer Use native pipe startup failed';
@@ -534,6 +549,7 @@ export async function handleRpc(request) {
       if (!turnMetadata.has(key) && turnMetadata.size >= TURN_METADATA_LIMIT) {
         throw Error('Too many active macOS turn metadata contexts; refusing a new Sky request until turn cleanup completes');
       }
+      if (!turnMetadata.has(key)) announceTurn(runtime, metadata.session_id, metadata.turn_id);
       turnMetadata.set(key, metadata);
     }
     const context = blocked() ? undefined : controlContext(runtime, request);

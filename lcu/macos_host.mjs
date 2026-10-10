@@ -476,6 +476,10 @@ export function recoverResponse(waiting = () => false, env = process.env) {
 // The original helper starts the CUAService app and its XPC transport waits up to 5 s to connect, so a healthy
 // run takes about 5.2 s. Allow for a slower launch. lcu/macos_sky_service.mjs derives its own wait from this value.
 export const TURN_ENDED_CLI_TIMEOUT_SECONDS = 10;
+// Turns still open when the host stops get this long, together, for their turn-ended commands.
+export const STOP_TURN_ENDED_TIMEOUT_SECONDS = 8;
+// Open turns the host remembers, oldest dropped first: as many as the Sky wrapper keeps turn metadata for.
+const OPEN_TURN_LIMIT = 128;
 // Log successful runs only when they are close to the helper's own 5 s deadline.
 const TURN_ENDED_CLI_SLOW_SECONDS = 4.5;
 const STDERR_LOG_BYTES = 512;
@@ -745,8 +749,8 @@ class TrustedControlBridge {
 }
 
 /**
- * Serve the private lifetime socket for one MCP connection: turn-ended IDs run the original client, a
- * `recover` request runs (or joins) the stale-service recovery off the request path. With `controlAddress`,
+ * Serve the private lifetime socket for one MCP connection: turn-ended IDs run the original client, a `turn`
+ * request records a turn as open until then (see stop()), a `recover` request runs (or joins) the stale-service recovery off the request path. With `controlAddress`,
  * human control is routed through the trusted Sky service; a control socket that cannot start is reported and
  * the lifetime host keeps working. Resolves with `{address, stop()}` once the socket accepts connections.
  */
@@ -761,6 +765,10 @@ export async function startOriginalHost({ client, env = process.env, controlAddr
   const folder = fs.mkdtempSync(join(base, 'lcu-ml-'));
   const address = join(folder, 'lifetime.sock');
   const recovery = singleFlight((waiting) => recover(waiting, env), { waitSeconds: RECOVERY_WAIT_SECONDS });
+  // Turns the Sky wrapper reported and no turn-ended request has named since. The wrapper's worker does not
+  // survive js_reset or the server's exit, so a turn it held can end with no hook left to signal Sky, which then
+  // keeps that turn's event taps; stop() runs the original command for each.
+  const openTurns = new Map();
   let server;
   let bridge = null;
   try {
@@ -802,6 +810,16 @@ export async function startOriginalHost({ client, env = process.env, controlAddr
       if (typeof sessionId !== 'string' || !sessionId.trim() || typeof turnId !== 'string' || !turnId.trim()) {
         throw new Error('Original macOS turn IDs are missing.');
       }
+      const key = JSON.stringify([sessionId, turnId]);
+      if (request.type === 'turn') {
+        openTurns.delete(key);
+        openTurns.set(key, { sessionId, turnId });
+        if (openTurns.size > OPEN_TURN_LIMIT) openTurns.delete(openTurns.keys().next().value);
+        await send(socket, { ok: true });
+        socket.end();
+        return;
+      }
+      openTurns.delete(key);
       socket.setTimeout(0);
       await runTurnEnded(client, turnEndedPayload(sessionId, turnId));
       response = { notified: true };
@@ -816,10 +834,18 @@ export async function startOriginalHost({ client, env = process.env, controlAddr
   return {
     address,
     /**
-     * End everything this host started: turn-ended commands and system tools are killed, waiting control
+     * End everything this host started: turns still open get their turn-ended command, bounded by
+     * STOP_TURN_ENDED_TIMEOUT_SECONDS, then turn-ended commands and system tools are killed, waiting control
      * requests are answered, and recovery waits hold no timer, so `lcu` exits promptly after its server.
      */
     async stop() {
+      const open = [...openTurns.values()];
+      openTurns.clear();
+      if (open.length) {
+        process.stderr.write(`LCU macOS host: ending ${open.length} turn(s) still open at exit\n`);
+        await Promise.allSettled(open.map(({ sessionId, turnId }) => runTurnEnded(client,
+          turnEndedPayload(sessionId, turnId), { timeout: STOP_TURN_ENDED_TIMEOUT_SECONDS })));
+      }
       for (const child of running) child.kill('SIGKILL');
       await Promise.all([closeServer(server, address), bridge?.close()]);
       fs.rmSync(folder, { recursive: true, force: true });
