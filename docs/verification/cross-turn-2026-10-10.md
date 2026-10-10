@@ -35,6 +35,10 @@ Headless stream-json sessions with this branch's relay registered, the installed
 
 The foreground case fails on 0.10.0 (second main call refused) and passes with either setting after the change. The final code (after review rounds) was rerun with the same four results. `on` was set with `lcu cross-turn on --unattended` from the worktree (no Touch ID prompt); `off` by removing the file or `lcu cross-turn off`.
 
+## Owner prompt on the released 0.11.0 (2026-10-10)
+
+On the same Mac, after `lcu update` from 0.10.0 to the published 0.11.0 archive (`lcu --version`: ChatGPT darwin 26.930.61225, CUA 0.0.27), the owner ran `lcu cross-turn on` from a terminal in the desktop session. It printed "Waiting for Touch ID or your password...", the system Touch ID prompt appeared, and after the owner approved it the command reported the setting on. `cross-turn.json` then held `"enabled": true, "source": "owner"`, and `lcu status --json` reported `cross_turn: {"enabled": true, "source": "owner"}`. `lcu cross-turn off` then turned it off with no prompt. A cancelled or failed prompt and `lcu setup --cross-turn on` were not exercised live.
+
 ## Tests added
 
 - `adapters/test/claude.test.mjs`: the relay (including the fail-closed parent end, per-life records and the bounded history) against a fixture that refuses ended ids as the service does: fresh id with the setting on and prompt id with it off, subagents under the child identity, renewal after `Interrupt` (also with the `Interrupt` in flight, and a re-bind landing during cleanup), shutdown ending a renewed turn with its fresh id, a foreground subagent never ending the parent (on or off), and a background subagent after the parent's `Stop` (refused off, works on); the setting path and parser.
@@ -45,7 +49,7 @@ On the macOS machine above, with the final code: `node --test tests/node/` passe
 
 ## Not verified
 
-- The live Touch ID prompt for `lcu cross-turn on` (and `lcu setup --cross-turn on`). Tests use an injected authenticator and stand-in helpers; the shipped helper's prompt for this wording was not shown. The `--unattended` path was run live.
+- A cancelled or failed live Touch ID prompt, and the prompt reached through `lcu setup --cross-turn on` or the interactive setup question. Tests cover these with an injected authenticator and stand-in helpers. An approved prompt for `lcu cross-turn on` was verified live (above).
 - The interactive Claude Code TUI and the Claude desktop app. Only headless stream-json sessions were run.
 - Linux and Windows desktops. The Linux and Windows behavior (no owner prompt, state path, Windows per-app approval note) is covered by unit tests only.
 - `tests/run.sh` (the full container gate) and a native Linux desktop run were not run for this change; the Docker runs above are unit tests with skips, not desktop evidence.
