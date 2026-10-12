@@ -1,5 +1,6 @@
-// Forward the original Sky service unchanged and relay its original lifecycle
-// hook to the signed macOS client through an LCU-owned, short-lived socket.
+// Relay the original lifecycle hook to the signed macOS client. For text the
+// native keyboard path cannot represent, reuse the original policy-checked
+// paste implementation; do not synthesize another input backend.
 import {pathToFileURL} from 'node:url';
 import {Buffer} from 'node:buffer';
 
@@ -522,6 +523,31 @@ async function gateOnCleanup() {
   } while ([...pendingCleanup.values()].some(item => item.metadata && !item.nativeNotified));
 }
 
+// The original macOS type_text sends keyboard input that silently drops Korean
+// and other unmapped characters. Paste already inserts Unicode text at the live
+// selection and restores the clipboard. Route the entire payload once, before
+// sending any text, so mixed ASCII/Unicode is neither split nor duplicated.
+function unicodeTextRequest(request) {
+  if (request?.type !== 'execute' || request.method !== 'type_text' ||
+      !Array.isArray(request.args) || request.args.length !== 1) return request;
+  const input = request.args[0];
+  if (!input || typeof input !== 'object') return request;
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  // Leave invalid accessor inputs to the original app-policy validator; never
+  // evaluate an accessor while adapting a request in the trusted worker.
+  if (Object.values(descriptors).some(property => !('value' in property))) return request;
+  const text = descriptors.text?.value;
+  if (typeof text !== 'string') return request;
+  for (const character of text) {
+    if (character.codePointAt(0) > 127) {
+      const pasteInput = Object.defineProperties({}, {...descriptors,
+        format: {value: 'text', enumerable: true}});
+      return {...request, method: 'paste', args: [pasteInput]};
+    }
+  }
+  return request;
+}
+
 export async function handleRpc(request) {
   register();
   const runtime = globalThis.nodeRepl;
@@ -568,7 +594,7 @@ export async function handleRpc(request) {
     // The retry, like any request, first waits for pending turn cleanup.
     return await withStaleServiceRecovery(runtime, () => {
       if (state.recoveryError) state.resent = true;
-      return service.handleRpc(request);
+      return service.handleRpc(unicodeTextRequest(request));
     }, async error => {
       if (!(await retryIfActive(error))) return false;
       await gateOnCleanup();
