@@ -51,11 +51,28 @@ Segments are sent strictly in order, each through the existing dispatch with its
 
 Each segment goes through the original app policy and approval request. With once-scoped approvals each segment asks again, and declining a later one stops after the text already delivered. Session or always approvals (what Claude's lcu-approve offers) are per app, so they ask once.
 
-## Live results (2026-10-12)
+## Live run of the patched wrapper (2026-10-12)
 
-ChatGPT 26.1007.30912, helper 26.1005.1001425, macOS with the French AZERTY layout, about 11:00-11:10 CEST. The calls were made by hand, through LCU's `js` tool (installed LCU 0.11.2), calling the original `typeText` and `paste` in routed order, and checked by field readback in TextEdit, Safari (textarea, single-line input inside a form, contenteditable, a React-like controlled input and a password field) and VS Code. The patched wrapper itself has not run live.
+About 12:03-12:09 CEST. The patched wrapper from commit a7bd3eb ran from a throwaway copy of installed LCU 0.11.2 (`cp -R` of the release; only `lcu/macos_sky_service.mjs` differed, its SHA-256 matching the commit, and `app` still linked to `/Applications/ChatGPT.app`) on ChatGPT 26.1007.30912, CUA 0.0.29, helper 26.1005.1001425, French AZERTY. The harness was headless Claude Code (`claude -p`) with an MCP configuration identical to the user's LCU registration except for the prefix, and the user's existing turn hooks. Safari is always allowed and TextEdit is not, so only Safari was tested. The fixture was a local page whose field event logs were sent to a local server. The original high-level `typeText` was called and the wrapper did the routing.
 
-These calls used an earlier, finer split, in which ASCII inside a line was typed and only the non-ASCII runs were pasted. The current rule pastes whole lines that contain such characters, so a short live re-check of the new call order is pending. The key-semantics results below are unaffected, since control characters are typed under both rules.
+All results were as expected:
+
+- Chat textarea, `안녕 ñ\n`: one paste then Enter; submitted once with `안녕 ñ`.
+- Single-line input in a form, `2024년 3월 15일 오후 3시 abc\n`: one paste then Enter; the form was submitted once with the exact text.
+- `é1\tñ2`: Tab moved focus; the fields read `é1` and `ñ2`.
+- React-like controlled input, `Hello 😀 wörld 한글`: exact, with `insertFromPaste` input events.
+- Contenteditable, ``LCU: 한글 입력 OK\nñü ^~` fin\tend😀 é``: the text up to `fin` was exact, Enter made a real paragraph, and Tab moved focus to the next field, where `end😀 é` landed.
+- Pure ASCII, ``plain ascii ^~`'"``: typed as `keydown`/`insertText` with no paste and no dead-key corruption.
+- A typed `X` after each step landed at the caret.
+- Eight pastes in total; `\n` and `\t` always arrived as Enter and Tab `keydown`s.
+- The helper log had no `Could not find key code` line in the interval.
+- The clipboard `changeCount` rose by exactly 16 (one write and one restore per paste), with no write after the run. Byte identity was not proven in this run, because another process wrote to the clipboard after the "before" snapshot; the earlier ten-segment run below proved it.
+
+## Live results with the earlier split (2026-10-12)
+
+ChatGPT 26.1007.30912, helper 26.1005.1001425, macOS with the French AZERTY layout, about 11:00-11:10 CEST. The calls were made by hand, through LCU's `js` tool (installed LCU 0.11.2), calling the original `typeText` and `paste` in routed order, and checked by field readback in TextEdit, Safari (textarea, single-line input inside a form, contenteditable, a React-like controlled input and a password field) and VS Code. The wrapper itself was not involved.
+
+These calls used an earlier, finer split, in which ASCII inside a line was typed and only the non-ASCII runs were pasted. The current rule pastes whole chunks that contain such characters; its call order was checked live in Safari only, in the run above. The key-semantics results below hold under both rules, since control characters are typed under both.
 
 - Original typing dropped `ñ` on AZERTY, as it drops Korean and emoji. `ü`, a dead-key character on AZERTY, is modelled, not observed.
 - Whole-text paste breaks key semantics: `안녕 ñ\n` in a chat textarea kept the newline and did not submit; `한글 abc\n` in a single-line input did not submit its form; `é1\tñ2` put a literal tab in the first field instead of acting as a key.
@@ -106,7 +123,7 @@ Without the explicit app environment variable, the original-JS integration check
 
 ## Unverified boundaries
 
-The patched wrapper has not run live; the live results above were original calls made by hand through `js`, with the earlier, finer split. No new Linux or Windows verification is claimed. A live check of the patched wrapper should repeat the targets above with the current call order, independent field readback, submission and focus counters, clipboard comparison and app-policy denial. The helper's log is a second oracle: a passing run leaves no `Could not find key code` message in the test interval. Other typing clients must not share that interval, since the message alone has no per-request attribution.
+The patched wrapper ran live in Safari only. TextEdit, VS Code and the password field were checked only with the earlier, finer split, by hand through `js`. Clipboard byte identity was proven only in that earlier run. App-policy denial and once-scoped approval prompts were not exercised live. Non-Latin layouts and IMEs are modelled, not observed. No new Linux or Windows verification is claimed. The helper's log is a second oracle: a passing run leaves no `Could not find key code` message in the test interval. Other typing clients must not share that interval, since the message alone has no per-request attribution.
 
 ## Removal criterion
 
