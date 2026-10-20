@@ -36,6 +36,23 @@ request, so every per-app approval was answered `cancel` and the runtime reporte
 and shows the once scope as "Allow for this session" only when the runtime offers no session scope, as
 the Claude approval card does.
 
+## Findings from the first upstream review
+
+Four review findings on the pull request were fixed and covered by tests:
+
+- `scripts/provision_agent_tools.py` copied a fixed list of adapter files, so a release install would
+  have reported the relay missing. `deepseek.mjs` and `deepseek-approval.mjs` are in that list now.
+- `LCU_DEEPSEEK_APPROVAL=deny` was checked after the elicitation-forwarding branch, so a client that
+  could present the request itself could still approve it. The refusal is checked first, and a test
+  runs a client that advertises elicitation with `deny` set.
+- A cancelled request left its dialog open: `Promise.race` stopped waiting without telling the
+  `osascript` child. The signal now reaches the child (SIGTERM closes the dialog), a cancelled request
+  never has its printed answer read, and relay shutdown aborts every open dialog.
+- Registration wrote the capability store and its backup with the account umask (0644 under 022),
+  widening a private 0600 store whose entries can hold values in `env`. Both writes go through the
+  shared `atomicWrite`, which keeps the existing mode and creates new files 0600; a test registers
+  into a 0600 store and checks both files.
+
 ## Not verified
 
 - Linux and Windows: the adapter was not run on either. The dialog is macOS-only, and both platforms have

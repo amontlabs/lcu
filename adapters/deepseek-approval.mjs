@@ -67,13 +67,33 @@ export function buildApprovalScript({ message, resource, choices }) {
     ' with icon caution';
 }
 
-/** Run an AppleScript source file through `osascript -` and return its stdout. */
-function runOsascript(script, { execFileImpl = execFile, timeout = 0 } = {}) {
+/**
+ * Run an AppleScript source file through `osascript -` and return its stdout.
+ *
+ * `signal` closes the dialog: the child is terminated, which takes its window down with it. A
+ * cancelled approval must not leave a question on screen for a request that already ended.
+ */
+function runOsascript(script, { execFileImpl = execFile, timeout = 0, signal } = {}) {
   return new Promise((resolve, reject) => {
-    const child = execFileImpl('osascript', ['-'], { timeout }, (error, stdout) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error('the approval was cancelled'));
+      return;
+    }
+    let settled = false;
+    const finish = (error, stdout) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
       if (error) reject(error);
       else resolve(stdout);
-    });
+    };
+    const child = execFileImpl('osascript', ['-'], { timeout }, (error, stdout) => finish(error, stdout));
+    const onAbort = () => {
+      // Terminating osascript dismisses the dialog it is showing.
+      try { child.kill('SIGTERM'); } catch { /* the child is already gone */ }
+      finish(signal.reason ?? new Error('the approval was cancelled'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
     child.stdin?.end(script, 'utf8');
   });
 }
@@ -85,17 +105,21 @@ function runOsascript(script, { execFileImpl = execFile, timeout = 0 } = {}) {
  * platform without this dialog answers `cancel` too, so an unanswered request never becomes an
  * approval. `run` and `platform` exist for tests.
  */
-export async function promptForApproval({ message, resource, choices }, { run, platform = process.platform } = {}) {
+export async function promptForApproval({ message, resource, choices }, { run, platform = process.platform, signal } = {}) {
   if (platform !== 'darwin') return 'cancel';
+  if (signal?.aborted) return 'cancel';
   const script = buildApprovalScript({ message, resource, choices });
   let stdout;
   try {
-    stdout = await (run ?? runOsascript)(script);
+    stdout = await (run ? run(script, { signal }) : runOsascript(script, { signal }));
   } catch (error) {
+    if (signal?.aborted) return 'cancel';
     // A dialog that cannot be shown must never become an approval.
     console.error('LCU DeepSeek approval dialog failed:', error instanceof Error ? error.message : String(error));
     return 'cancel';
   }
+  // A child that was terminated can still have printed: never read an answer from a cancelled request.
+  if (signal?.aborted) return 'cancel';
   const label = /button returned:(.*)$/m.exec(String(stdout ?? ''))?.[1]?.trim();
   const choice = dialogChoices(choices).find(item => item.label === label);
   return choice ? choice.value : 'cancel';

@@ -75,6 +75,8 @@ export async function runDeepseekBridge({
   // Unattended machines (CI, a headless run) get a refusal instead of a question. Nothing is
   // approved implicitly: `deny` answers every approval request with the runtime's own cancellation.
   const approvalMode = String((env ?? process.env).LCU_DEEPSEEK_APPROVAL ?? '').trim().toLowerCase();
+  // Dialogs that are open right now, so shutdown can close them instead of leaving a question behind.
+  const liveDialogs = new Set();
   const approvals = createApprovalGate();
   const calls = createCallTracker(log);
   const approvalLog = createApprovalLogger(log, calls);
@@ -104,20 +106,27 @@ export async function runDeepseekBridge({
 
   /** Forward the request when the harness can present it, else present it here. */
   async function answerElicitation(params, approval, signal) {
+    // A refusal configured here outranks every other path, including a harness that could answer for
+    // itself: on an unattended machine nothing may approve, whoever is attached.
+    if (approvalMode === 'deny') return { action: 'cancel' };
     if (clientCanElicit()) return relayElicitation(server, approvals, params, signal);
     // Only a native-app approval has a question this relay knows how to ask. A browser-origin or an
     // unknown form is cancelled, never guessed: LCU keeps no permission cache.
-    if (!approval || approvalMode === 'deny') return { action: 'cancel' };
-    const signalOrNever = signal ?? new AbortController().signal;
-    if (signalOrNever.aborted) return { action: 'cancel' };
-    const aborted = new Promise(resolve => {
-      signalOrNever.addEventListener('abort', () => resolve('cancel'), { once: true });
-    });
-    const chosen = await approvals.track(() => Promise.race([
-      (prompt ?? promptForApproval)(approval),
-      aborted,
-    ]));
-    return nativeAppApprovalResponse(params, chosen);
+    if (!approval) return { action: 'cancel' };
+    if (signal?.aborted) return { action: 'cancel' };
+    // The dialog is closed, not just abandoned, when the request ends or the relay shuts down.
+    const stopping = new AbortController();
+    const stop = () => stopping.abort();
+    signal?.addEventListener('abort', stop, { once: true });
+    liveDialogs.add(stopping);
+    try {
+      const chosen = await approvals.track(() =>
+        (prompt ?? promptForApproval)(approval, { signal: stopping.signal }));
+      return nativeAppApprovalResponse(params, chosen);
+    } finally {
+      liveDialogs.delete(stopping);
+      signal?.removeEventListener('abort', stop);
+    }
   }
 
   /** Start one original server with this relay's handlers; one that fails is closed. */
@@ -251,6 +260,7 @@ export async function runDeepseekBridge({
     const closeUpstream = () => {
       if (shutdown) return shutdown;
       shutdown = (async () => {
+        for (const dialog of [...liveDialogs]) dialog.abort();
         // A restart still starting its fresh server closes that one itself once it sees the shutdown.
         if (connected) {
           connected = false;

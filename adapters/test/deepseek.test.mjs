@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -80,6 +83,24 @@ test('refuses the app hosting the agent before asking anyone', async () => {
   }
 });
 
+test('the refusal setting outranks a harness that could answer the request itself', async () => {
+  // An unattended run must not be approved by whichever client happens to be attached.
+  const asked = [];
+  const client = new Client({ name: 'ds-test', version: '0.0.0' }, { capabilities: { elicitation: { form: {} } } });
+  client.setRequestHandler(ElicitRequestSchema, async request => {
+    asked.push(request.params.message);
+    return { action: 'accept', content: {}, _meta: { persist: 'always' } };
+  });
+  await connect(client, { LCU_DEEPSEEK_APPROVAL: 'deny' });
+  try {
+    const result = await client.callTool({ name: 'js', arguments: { code: 'elicit-native' } });
+    assert.deepEqual(asked, []);
+    assert.match(textOf(result), /"action":"cancel"/);
+  } finally {
+    await client.close();
+  }
+});
+
 test('a harness without elicitation gets a refusal in unattended mode, never an implicit approval', async () => {
   const client = await connect(new Client({ name: 'ds-test', version: '0.0.0' }, { capabilities: {} }),
     { LCU_DEEPSEEK_APPROVAL: 'deny' });
@@ -126,6 +147,30 @@ test('an AppleScript-quoted message keeps quotes and backslashes literal', () =>
   assert.match(script, /Allow \\"X\\" to use a\\\\b/);
 });
 
+test('a cancelled request closes the dialog rather than leaving it open', async () => {
+  const controller = new AbortController();
+  let handedSignal;
+  const run = (script, { signal } = {}) => new Promise(resolve => {
+    handedSignal = signal;
+    signal?.addEventListener('abort', () => resolve('button returned:Decline'), { once: true });
+  });
+  const pending = promptForApproval({ message: 'Allow?', resource: 'X',
+    choices: [{ value: 'decline', label: 'Decline' }] }, { platform: 'darwin', run, signal: controller.signal });
+  controller.abort();
+  assert.equal(await pending, 'cancel');
+  assert.equal(handedSignal.aborted, true);
+});
+
+test('an already-cancelled request never opens the dialog', async () => {
+  let ran = false;
+  const controller = new AbortController();
+  controller.abort();
+  assert.equal(await promptForApproval({ message: 'Allow?', resource: 'X',
+    choices: [{ value: 'decline', label: 'Decline' }] },
+  { platform: 'darwin', run: async () => { ran = true; return 'button returned:Decline'; }, signal: controller.signal }), 'cancel');
+  assert.equal(ran, false);
+});
+
 test('the dialog choice maps back to the runtime value', async () => {
   const request = { message: 'Allow Computer Use to use "Muse"?', resource: 'Muse',
     choices: [{ value: 'once', label: 'Allow once' }, { value: 'decline', label: 'Decline' }] };
@@ -134,4 +179,26 @@ test('the dialog choice maps back to the runtime value', async () => {
   assert.equal(await promptForApproval(request, { platform: 'darwin',
     run: async () => { throw new Error('User canceled.'); } }), 'cancel');
   assert.equal(await promptForApproval(request, { platform: 'linux' }), 'cancel');
+});
+
+
+test('registration keeps a private capability store private', async () => {
+  const { configureDeepseek } = await import('../../lcu/harness_setup.mjs');
+  const home = mkdtempSync(join(fileURLToPath(new URL('.', import.meta.url)), '.tmp-home-'));
+  try {
+    mkdirSync(join(home, '.dsh', 'bot'), { recursive: true });
+    const store = join(home, '.dsh', 'bot', 'state.json');
+    writeFileSync(store, JSON.stringify({ capabilities: { items: {} } }));
+    // A store the harness wrote 0600 must not become 0644 because setup ran under umask 022.
+
+    (await import('node:fs')).chmodSync(store, 0o600);
+    configureDeepseek(home, ['/usr/bin/node', '/r/adapters/deepseek.mjs', '/r/bin/lcu'], { clock: () => 1 });
+    assert.equal(statSync(store).mode & 0o777, 0o600);
+    assert.equal(statSync(`${store}.lcu-backup`).mode & 0o777, 0o600);
+    const saved = JSON.parse(readFileSync(store, 'utf8'));
+    assert.equal(saved.capabilities.items.lcu.command, '/usr/bin/node');
+    assert.deepEqual(saved.capabilities.items.lcu.args, ['/r/adapters/deepseek.mjs', '/r/bin/lcu']);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

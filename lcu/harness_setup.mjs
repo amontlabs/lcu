@@ -1,10 +1,10 @@
 // Local harness packages for Oh My Pi and Hermes; host configuration remains with their native installers.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { real } from './fsutil.mjs';
-import { checked, json, regularPath, seams, spacedJson } from './setup.mjs';
+import { atomicWrite, checked, json, regularPath, seams, spacedJson } from './setup.mjs';
 
 const MARKER = '.lcu-generated.json';
 
@@ -155,9 +155,12 @@ export function configureDeepseek(home, mcpCommand, { clock = Date.now, scope = 
     createdAt: previous.createdAt ?? stamp,
     updatedAt: stamp,
   };
-  writeFileSync(`${stateFile}.lcu-backup`, before);
-  const temporary = `${stateFile}.lcu-${stamp}`;
-  writeFileSync(temporary, json(state));
-  renameSync(temporary, stateFile);
+  // Keep the store exactly as private as it was: `atomicWrite` preserves an existing mode and creates
+  // new files 0600, where a bare write would follow the account umask (0644 under 022). Capability
+  // entries can carry private values in `env`, and the backup holds the same content as the store.
+  const mode = statSync(stateFile).mode & 0o777;
+  atomicWrite(`${stateFile}.lcu-backup`, before);
+  atomicWrite(stateFile, json(state));
+  chmodSync(`${stateFile}.lcu-backup`, mode);
   return stateFile;
 }
