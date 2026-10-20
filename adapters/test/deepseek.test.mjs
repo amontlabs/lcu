@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { buildApprovalScript, promptForApproval } from '../deepseek-approval.mjs';
+import { buildApprovalScript, dialogChoices, promptForApproval } from '../deepseek-approval.mjs';
 
 const relay = fileURLToPath(new URL('../deepseek.mjs', import.meta.url));
 const fixture = fileURLToPath(new URL('./deepseek-fixture.mjs', import.meta.url));
@@ -98,10 +98,27 @@ test('the approval dialog offers the runtime choices and defaults to Decline', (
     choices: [{ value: 'once', label: 'Allow once' }, { value: 'session', label: 'Allow for this session' },
       { value: 'decline', label: 'Decline' }],
   });
-  assert.match(script, /buttons \{"Allow once", "Allow for this session", "Decline"\}/);
+  assert.match(script, /buttons \{"Allow for this session", "Decline"\}/);
   assert.match(script, /default button "Decline"/);
   assert.match(script, /cancel button "Decline"/);
   assert.match(script, /App: Muse \(com\.meta\.endo\)/);
+});
+
+test('a four-scope runtime request stays within the three-button limit', () => {
+  // `display dialog` rejects a fourth button with -50, which would read as a cancelled approval.
+  const choices = [{ value: 'once', label: 'Allow once' }, { value: 'session', label: 'Allow for this session' },
+    { value: 'always', label: 'Always allow' }, { value: 'decline', label: 'Decline' }];
+  const buttons = dialogChoices(choices);
+  assert.equal(buttons.length, 3);
+  assert.deepEqual(buttons.map(button => button.value), ['session', 'always', 'decline']);
+  const script = buildApprovalScript({ message: 'Allow?', resource: 'X', choices });
+  assert.equal((script.match(/Allow/g) ?? []).length, 2);
+  assert.match(script, /default button "Decline"/);
+});
+
+test('only the once scope is offered when the runtime offers no session', () => {
+  assert.deepEqual(dialogChoices([{ value: 'once', label: 'Allow once' }, { value: 'decline', label: 'Decline' }]),
+    [{ value: 'once', label: 'Allow once' }, { value: 'decline', label: 'Decline' }]);
 });
 
 test('an AppleScript-quoted message keeps quotes and backslashes literal', () => {

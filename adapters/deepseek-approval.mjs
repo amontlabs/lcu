@@ -23,15 +23,41 @@ export function appleScriptString(value) {
 }
 
 /**
- * The `display dialog` script for one native-app approval. Choices render in the order the runtime
- * offered them; the decline choice, when present, is both the default and the cancel button.
+ * At most this many buttons: `display dialog` rejects a fourth (`-50`), and a rejected script would
+ * read as a cancelled request. The runtime may offer once, session, always and decline.
+ */
+export const MAX_DIALOG_BUTTONS = 3;
+
+/**
+ * The buttons to show for the choices the runtime offered.
+ *
+ * "Allow this session" stands for the once choice when the runtime offers no session scope, as the
+ * Claude approval card does: four scopes do not fit in one dialog, and a per-session grant is the
+ * closest visible equivalent of "allow once" for the person answering. Never invents a scope the
+ * runtime did not offer.
+ */
+export function dialogChoices(choices) {
+  if (!Array.isArray(choices) || choices.length === 0) throw new TypeError('an approval needs at least one choice');
+  const offered = new Set(choices.map(choice => choice.value));
+  const buttons = [];
+  if (offered.has('session')) buttons.push({ value: 'session', label: 'Allow for this session' });
+  else if (offered.has('once')) buttons.push({ value: 'once', label: 'Allow once' });
+  if (offered.has('always')) buttons.push({ value: 'always', label: 'Always allow' });
+  const decline = choices.find(choice => choice.value === 'decline');
+  if (decline) buttons.push({ value: 'decline', label: decline.label });
+  return buttons.slice(0, MAX_DIALOG_BUTTONS);
+}
+
+/**
+ * The `display dialog` script for one native-app approval; the decline choice, when present, is both
+ * the default and the cancel button.
  */
 export function buildApprovalScript({ message, resource, choices }) {
   if (typeof message !== 'string' || !message) throw new TypeError('an approval needs the runtime message');
-  if (!Array.isArray(choices) || choices.length === 0) throw new TypeError('an approval needs at least one choice');
-  const labels = choices.map(choice => choice.label);
-  const decline = choices.find(choice => choice.value === 'decline');
-  const fallback = decline ?? choices[choices.length - 1];
+  const buttons = dialogChoices(choices);
+  const labels = buttons.map(choice => choice.label);
+  const decline = buttons.find(choice => choice.value === 'decline');
+  const fallback = decline ?? buttons[buttons.length - 1];
   const body = resource ? `${message}\n\nApp: ${resource}` : message;
   return 'display dialog ' + appleScriptString(body) +
     ` with title ${appleScriptString(DIALOG_TITLE)}` +
@@ -65,10 +91,12 @@ export async function promptForApproval({ message, resource, choices }, { run, p
   let stdout;
   try {
     stdout = await (run ?? runOsascript)(script);
-  } catch {
+  } catch (error) {
+    // A dialog that cannot be shown must never become an approval.
+    console.error('LCU DeepSeek approval dialog failed:', error instanceof Error ? error.message : String(error));
     return 'cancel';
   }
   const label = /button returned:(.*)$/m.exec(String(stdout ?? ''))?.[1]?.trim();
-  const choice = choices.find(item => item.label === label);
+  const choice = dialogChoices(choices).find(item => item.label === label);
   return choice ? choice.value : 'cancel';
 }
