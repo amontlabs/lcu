@@ -98,7 +98,7 @@ test('agent options are refused with --runtime-only, and an agent or export is r
   const app = linuxApp(join(base, 'chatgpt'), { arch: ARCH });
   await assert.rejects(main([...USER, '--prefix', join(base, 'lcu'), '--existing-app', app, '--skip-system', '--runtime-only', '--agent', 'codex']),
     /--runtime-only cannot include agent setup options/);
-  for (const flags of [['--cross-turn', 'off'], ['--cross-turn', 'on', '--unattended']]) {
+  for (const flags of [['--cross-turn', 'off'], ['--cross-turn', 'on', '--unattended'], ['--dsh-profile', 'web']]) {
     await assert.rejects(main([...USER, '--prefix', join(base, 'lcu'), '--existing-app', app, '--skip-system', '--runtime-only', ...flags]),
       /--runtime-only cannot include agent setup options/);
   }
@@ -154,6 +154,9 @@ test('agent setup runs from the new release with the forwarded options, and its 
   const off = calls.at(-1)[2];
   assert.equal(off[off.indexOf('--cross-turn') + 1], 'off');
   assert.ok(!off.includes('--unattended'));
+  calls = stubbed(t, { base });
+  assert.equal(await main([...argv, '--agent', 'dsh', '--dsh-profile', 'web']), 0);
+  assert.deepEqual(calls.at(-1)[2].slice(-2), ['--dsh-profile', 'web']);
   calls = stubbed(t, { setupStatus: 5 });
   const errors = [];
   mockWrite(t, process.stderr, (text) => errors.push(text));

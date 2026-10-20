@@ -26,9 +26,9 @@ settings = home / '.pi/agent/settings.json'
 
 first = lcu('setup', '--agent', 'all', '--allow-missing', '--session', 'direct', '--yes', '--approval', 'auto')
 assert 'Pi: not installed; will register when it appears' in first.stdout, first.stdout
-assert 'Pending (not installed): pi, omp, hermes.' in first.stdout, first.stdout
+assert 'Pending (not installed): pi, omp, hermes, dsh.' in first.stdout, first.stdout
 state = json.loads(state_path.read_text())
-assert (state['approval'], state['pending']) == ('auto', ['pi', 'omp', 'hermes']), state
+assert (state['approval'], state['pending']) == ('auto', ['pi', 'omp', 'hermes', 'dsh']), state
 assert not settings.exists(), 'Pi must not be registered before it is installed'
 # Codex and Claude Code register without their CLIs, with the approval mode applied.
 registered = tomllib.loads((home / '.codex/config.toml').read_text())['mcp_servers']['lcu']
@@ -38,7 +38,7 @@ assert 'lcu' in json.loads((home / '.claude.json').read_text())['mcpServers']
 allowed = json.loads((home / '.claude/settings.json').read_text())['permissions']['allow']
 assert 'mcp__lcu__js' in allowed and 'mcp__lcu__js_reset' in allowed and 'mcp__lcu' not in allowed, allowed
 status = json.loads(lcu('status', '--json').stdout)
-assert status['pending'] == ['pi', 'omp', 'hermes'], status
+assert status['pending'] == ['pi', 'omp', 'hermes', 'dsh'], status
 
 # Nothing installed: reconcile is silent and changes nothing.
 before = state_path.read_bytes()
@@ -59,8 +59,8 @@ extension = home / '.local/share/lcu/pi/extension.mjs'
 assert any((settings.parent / item).resolve() == extension.resolve() for item in packages if isinstance(item, str)), packages
 assert json.loads((home / '.local/share/lcu/pi/commands.json').read_text())['user'] == [command]
 state = json.loads(state_path.read_text())
-assert (state['approval'], state['pending']) == ('auto', ['omp', 'hermes']), state
-assert json.loads(lcu('status', '--json').stdout)['pending'] == ['omp', 'hermes']
+assert (state['approval'], state['pending']) == ('auto', ['omp', 'hermes', 'dsh']), state
+assert json.loads(lcu('status', '--json').stdout)['pending'] == ['omp', 'hermes', 'dsh']
 
 # Idempotent: the next run is a silent no-op.
 settled = state_path.read_bytes()

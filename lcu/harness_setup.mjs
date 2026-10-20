@@ -1,7 +1,8 @@
-// Local harness packages for Oh My Pi and Hermes; host configuration remains with their native installers.
+// Local harness packages for Oh My Pi, Hermes and DeepSeek Harness; host configuration remains with their native installers.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { real } from './fsutil.mjs';
 import { checked, json, regularPath, seams, spacedJson } from './setup.mjs';
@@ -95,3 +96,105 @@ export function configureHermes(home, command, node, release, { scope, env }) {
     () => checked('installer', executable, ['plugins', 'enable', 'lcu-cua'], { cwd: home, env: { ...env, HERMES_HOME: root }, timeout: 120_000 }));
 }
 
+
+// DeepSeek Harness ------------------------------------------------------------------------------------------
+
+export const DSH_PACKAGE = 'lcu-computer-use';
+export const DSH_DEFAULT_PROFILE = 'desktop';
+// The DSH runtimes LCU's plugin was written against; DSH refuses the bundle elsewhere unless the user exempts it.
+const DSH_ENGINES = '>=0.2.1-rc.2 <0.3';
+const DSH_CLI = 'Contents/Resources/runtime/cli/bin/dsh';
+// DSH Desktop's main executable. Its `dsh` CLI runs the same binary on `dsh-desktop-host/lib/cli.js`.
+const DSH_DESKTOP = /\/DeepSeek Harness\.app\/Contents\/MacOS\/DeepSeek Harness(?: |$)/;
+
+/** DSH's own profile names: one path segment. */
+export const validDshProfile = (name) => typeof name === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name);
+
+/** The `dsh` CLI: `dsh` on `path`, else the launcher inside an installed DeepSeek Harness app (macOS). */
+export function dshExecutable(home, path) {
+  const found = seams.which('dsh', path);
+  if (found) return found;
+  for (const app of seams.dshApps(home)) {
+    const candidate = join(app, DSH_CLI);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // not here
+    }
+  }
+  return null;
+}
+
+/** Whether a `ps -axww -o command=` listing shows DSH Desktop (not only the `dsh` CLI on the same binary). */
+export const dshDesktopListed = (listing) => listing.split('\n')
+  .some((line) => DSH_DESKTOP.test(line) && !line.includes('/dsh-desktop-host/lib/cli.js'));
+
+function dshDesktopRunning() {
+  if (process.platform !== 'darwin') return false;
+  const result = seams.run('/bin/ps', ['-axww', '-o', 'command='], { timeout: 20_000 });
+  if (result.error || result.status !== 0) throw new Error('Could not check whether DeepSeek Harness Desktop is running.');
+  return dshDesktopListed(result.stdout ?? '');
+}
+
+// An original mark: a pointer over a window.
+const DSH_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+  '<rect x="6" y="10" width="52" height="40" rx="6" fill="#1f2937"/><rect x="6" y="10" width="52" height="8" rx="4" fill="#4b5563"/>' +
+  '<path d="M26 24 L26 50 L32 44 L37 55 L42 53 L37 42 L45 42 Z" fill="#f9fafb" stroke="#111827" stroke-width="2" stroke-linejoin="round"/>' +
+  '</svg>\n';
+
+/**
+ * Generate LCU's DSH bundle for one profile and install it with DSH's own `dsh plugin --profile P add DIR`, which
+ * links the directory into the profile. Its `index.js` imports DSH's MCP tool helper: DSH resolves its own packages
+ * for a linked bundle's files that declare them as peers, not for LCU's release files.
+ */
+export function configureDsh(home, command, release, { scope, env, profile = DSH_DEFAULT_PROFILE }) {
+  if (scope !== 'user') {
+    throw new Error('DeepSeek Harness plugins are profile-scoped. Use --scope user with --dsh-profile; project scope is not supported.');
+  }
+  if (!validDshProfile(profile)) throw new Error(`Invalid DeepSeek Harness profile name: ${profile}`);
+  const executable = dshExecutable(home, env.PATH);
+  if (!executable) {
+    throw new Error('DeepSeek Harness was not found: no `dsh` on the target account PATH and no DeepSeek Harness app. ' +
+      'Install it, then rerun `lcu setup --agent dsh`.');
+  }
+  const root = env.DSH_HOME || join(home, '.dsh');
+  if (!isAbsolute(root)) throw new Error('DSH_HOME must be absolute.');
+  if (profile === DSH_DEFAULT_PROFILE && dshDesktopRunning()) {
+    throw new Error('DeepSeek Harness Desktop is running. DSH changes its desktop profile only while the app is closed: ' +
+      'quit DeepSeek Harness, rerun `lcu setup --agent dsh`, then open it again.');
+  }
+  const adapter = join(release, 'adapters/dsh/plugin.mjs');
+  if (!existsSync(adapter)) throw new Error(`LCU DSH plugin missing: ${adapter}`);
+  const suffix = createHash('sha256').update(spacedJson([profile, real(root)])).digest('hex').slice(0, 16);
+  const data = join(home, process.platform === 'win32' ? 'AppData/Local/LCU' : '.local/share/lcu');
+  const destination = join(data, 'dsh', `${profile}-${suffix}`);
+  let specifier = relative(destination, adapter).replaceAll('\\', '/');
+  if (isAbsolute(specifier)) specifier = pathToFileURL(adapter).href;
+  else if (!specifier.startsWith('.')) specifier = `./${specifier}`;
+  const manifest = {
+    name: DSH_PACKAGE, version: '0.1.0', private: true, type: 'module',
+    description: 'LCU: computer use through the installed OpenAI computer-use runtime.',
+    exports: { '.': './index.js', './locale/*.json': './locale/*.json', './icon': './icon.svg' },
+    files: ['index.js', 'cordis.patch.yml', 'locale/*.json', 'icon.svg'],
+    engines: { dsh: DSH_ENGINES },
+    peerDependencies: { '@deepseek-ai/dsh-mcp-client': '*' },
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  };
+  // JSON is YAML: the row's config is the runtime command, as the other generated packages carry it.
+  const patch = `- insert:\n    - id: ${DSH_PACKAGE}\n      name: ${DSH_PACKAGE}\n      config: ${JSON.stringify({ command })}\n`;
+  const wrapper = '// Generated by `lcu setup --agent dsh`; rerun setup instead of editing.\n' +
+    "import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client';\n" +
+    `import * as lcu from ${JSON.stringify(specifier)};\n\n` +
+    'export const name = lcu.name;\nexport const inject = lcu.inject;\n' +
+    // Async: Cordis 4 constructs a plugin function that has a prototype instead of awaiting it, so the first agent
+    // request could start before LCU's tools are registered.
+    'export async function apply(ctx, config) {\n  return lcu.apply(ctx, config, { createMcpToolDefinition });\n}\n';
+  const locale = { meta: { title: 'LCU Computer Use',
+    description: 'Controls desktop apps through the computer-use runtime of the installed ChatGPT app.' } };
+  withPackage(destination, 'dsh', { 'package.json': json(manifest), 'cordis.patch.yml': patch, 'index.js': wrapper,
+    'locale/en.json': json(locale), 'icon.svg': DSH_ICON },
+  (pkg) => checked('installer', executable, ['plugin', '--profile', profile, 'add', pkg], { cwd: home, env, timeout: 300_000 }));
+  return { profile, destination };
+}

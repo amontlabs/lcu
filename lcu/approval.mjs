@@ -30,6 +30,7 @@ const CODEX_VALUE = 'approve';
 const NOTHING_TO_CONFIGURE = {
   pi: 'Pi has no permission system; nothing to configure',
   hermes: 'Hermes gates only plugin tools through a pre_tool_call hook, which LCU does not register; nothing to configure',
+  dsh: 'DeepSeek Harness gates plugin tools only through tools/pre-execute listeners, which LCU does not register; nothing to configure',
 };
 const KEEP = 'keep'; // codexPlan: leave the stored record as it is
 

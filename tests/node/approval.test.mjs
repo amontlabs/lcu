@@ -262,9 +262,12 @@ test('Codex: project scope reads and records the project config; the policy merg
   assert.deepEqual(approval.mergeCodexPolicy(host, {}), host);
 });
 
-test('Pi and Hermes have nothing to configure; an unknown mode is refused; the record is sorted JSON', (t) => {
+test('Pi, Hermes and DeepSeek Harness have nothing to configure; an unknown mode is refused; the record is sorted JSON', (t) => {
   assert.match(approval.apply('auto', 'pi', '/h', { scope: 'user', project: null, env: {} }), /no permission system/);
   assert.match(approval.apply('ask', 'hermes', '/h', { scope: 'user', project: null, env: {} }), /pre_tool_call/);
+  for (const mode of ['auto', 'ask']) {
+    assert.match(approval.apply(mode, 'dsh', '/h', { scope: 'user', project: null, env: {} }), /tools\/pre-execute .*nothing to configure/);
+  }
   assert.throws(() => approval.apply('yolo', 'pi', '/h', { scope: 'user', project: null, env: {} }), /Unknown approval mode/);
   const home = temporary(t);
   approval.saveRecord(home, { b: { z: 1, a: 2 }, a: {} });
@@ -302,7 +305,7 @@ test('setup remembers the approval mode: default ask leaves harnesses alone, aut
   seen = await drive('--agent', 'codex', '--agent', 'pi', '--approval', 'auto');
   assert.equal(configured.at(-1), 'auto');
   assert.match(seen.out, /Codex: `approval_mode = "approve"` for the `js` and `js_reset` tools/);
-  assert.match(seen.out, /Pi and Hermes have no such gate/);
+  assert.match(seen.out, /Pi, Hermes and DeepSeek Harness have no such gate/);
   seen = await drive('--agent', 'codex');
   assert.equal(configured.at(-1), 'auto');
   assert.match(seen.out, /Keeping automatic approval/);

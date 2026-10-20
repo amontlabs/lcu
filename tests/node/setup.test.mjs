@@ -28,6 +28,7 @@ function fixture(t) {
   override(t, setup.seams, 'account', () => account);
   override(t, setup.seams, 'interactive', () => false);
   override(t, setup.seams, 'which', (name) => ([...state.installed].some((client) => setup.CLIENTS[client].executable === name) ? `/fixture/${name}` : null));
+  override(t, setup.seams, 'dshApps', () => []);
   override(t, setup.seams, 'spawn', (command, args) => {
     state.spawned.push([command, ...args]);
     return { status: 0, signal: null };
@@ -104,9 +105,13 @@ test('validation: conflicts, scopes, agents and reconcile', (t) => {
   assert.throws(() => check('--browser-host'), /setup --agent AGENT --chrome/);
   assert.throws(() => check('--chrome', '--no-chrome', '--agent', 'codex'), /not both/);
   assert.throws(() => check('--audio', '--no-audio', '--agent', 'codex'), /not both/);
-  for (const name of ['omp', 'hermes']) {
+  for (const name of ['omp', 'hermes', 'dsh']) {
     assert.throws(() => check('--scope', 'project', '--project', root, '--agent', name), /project scope is not supported/);
   }
+  assert.deepEqual(check('--agent', 'deepseek-harness', '--dsh-profile', 'web').names, ['dsh']);
+  assert.throws(() => check('--agent', 'dsh', '--dsh-profile', '../x'), /Invalid --dsh-profile/);
+  assert.throws(() => check('--export', join(root, 'export'), '--dsh-profile', 'web'), /cannot be combined with --export/);
+  assert.throws(() => check('--reconcile', '--dsh-profile', 'web'), /cannot be combined/);
   assert.throws(() => check('--export', '/tmp/x', '--allow-missing'), /cannot be combined with --export/);
   for (const flag of [['--approval', 'auto'], ['--agent', 'pi'], ['--chrome'], ['--allow-missing'], ['--scope', 'project']]) {
     assert.throws(() => check('--reconcile', ...flag), /cannot be combined/);
@@ -124,6 +129,7 @@ test('--list-agents shows the scopes, and usage errors exit 2', async (t) => {
   assert.equal(await setup.main(['--list-agents']), 0);
   assert.match(seen.out, /omp .*\(user\)/);
   assert.match(seen.out, /hermes .*\(user\)/);
+  assert.match(seen.out, /dsh .*DeepSeek Harness \(user\)/);
   assert.match(seen.out, /codex .*\(user, project\)/);
   assert.equal(await setup.main(['--bogus']), 2);
   assert.equal(await setup.main(['--scope', 'x']), 2);
@@ -743,4 +749,29 @@ test('the cross-turn question names per-app approvals only where they exist', ()
   assert.match(question('win32'), /Per-app approvals still apply/);
   assert.match(question('linux'), /has no per-app approval/);
   assert.doesNotMatch(question('linux'), /Per-app approvals still apply/);
+});
+
+test('--dsh-profile reaches DeepSeek Harness registration and a pending DSH keeps it for reconcile', async (t) => {
+  const f = fixture(t);
+  const done = await f.main('--agent', 'dsh', '--dsh-profile', 'web');
+  assert.equal(done.code, 0, done.err);
+  assert.deepEqual([f.registered[0].names, f.registered[0].dshProfile], [['dsh'], 'web']);
+  assert.match(done.out, /DeepSeek Harness: install LCU's plugin into profile web/);
+  assert.equal((await f.main('--agent', 'dsh')).code, 0);
+  assert.equal(f.registered[1].dshProfile, 'desktop');
+  const missing = await f.main('--agent', 'dsh', '--dsh-profile', 'web', '--allow-missing');
+  assert.equal(missing.code, 0, missing.err);
+  assert.deepEqual(setup.loadSetupState(f.home).pending, ['dsh']);
+  assert.equal(setup.loadSetupState(f.home).pending_context.dsh_profile, 'web');
+  f.installed = new Set(['dsh']);
+  f.registered.length = 0;
+  const reconciled = await f.reconcile();
+  assert.equal(reconciled.code, 0, reconciled.err);
+  assert.deepEqual([f.registered[0].names, f.registered[0].dshProfile], [['dsh'], 'web']);
+  assert.deepEqual(setup.loadSetupState(f.home).pending, []);
+  f.failing = new Set(['dsh']);
+  assert.match((await f.main('--agent', 'dsh', '--dsh-profile', 'web')).err, /--dsh-profile web --agent dsh/);
+  writeFileSync(setup.setupStatePath(f.home), JSON.stringify({ chrome: false, audio: false, pending: ['dsh'],
+    pending_context: { scope: 'user', project: null, session: 'direct', dsh_profile: '../x' } }));
+  assert.throws(() => setup.loadSetupState(f.home), /Malformed LCU setup state/);
 });

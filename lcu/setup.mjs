@@ -15,7 +15,7 @@ import { install as installApprovalMod } from './claude_mod.mjs';
 import { install as hideHostOnlyTools } from './claude_visibility.mjs';
 import { accountHome, isFile, lstat, real, shellQuote } from './fsutil.mjs';
 import { approvalNote, question as crossTurnQuestion, readCrossTurn, setCrossTurn } from './cross_turn.mjs';
-import { configureHermes, configureOmp } from './harness_setup.mjs';
+import { configureDsh, configureHermes, configureOmp, DSH_DEFAULT_PROFILE, dshExecutable, validDshProfile } from './harness_setup.mjs';
 import { withLock } from './lock.mjs';
 import { ask, say, warn } from './terminal.mjs';
 
@@ -39,13 +39,14 @@ export const CLIENTS = {
   pi: { label: 'Pi', executable: 'pi', detectPath: '.pi/agent', mcpAgent: 'pi' },
   omp: { label: 'Oh My Pi', executable: 'omp', detectPath: '.omp', mcpAgent: '' },
   hermes: { label: 'Hermes', executable: 'hermes', detectPath: '.hermes', mcpAgent: '' },
+  dsh: { label: 'DeepSeek Harness', executable: 'dsh', detectPath: '.dsh', mcpAgent: '' },
 };
-export const ALIASES = { claude: 'claude-code', 'oh-my-pi': 'omp', 'hermes-agent': 'hermes' };
+export const ALIASES = { claude: 'claude-code', 'oh-my-pi': 'omp', 'hermes-agent': 'hermes', 'deepseek-harness': 'dsh' };
 // Harnesses whose native registration needs their own executable; Codex and Claude Code register through
 // add-mcp and their config files without the CLI installed.
-const NEEDS_BINARY = ['pi', 'omp', 'hermes'];
+const NEEDS_BINARY = ['pi', 'omp', 'hermes', 'dsh'];
 // Native harness plugins are profile-scoped; project scope is unsupported.
-const USER_ONLY_AGENTS = ['omp', 'hermes'];
+const USER_ONLY_AGENTS = ['omp', 'hermes', 'dsh'];
 
 // Shell and Windows command-line quoting for the commands LCU prints and registers.
 export const shellJoin = (args) => args.map(shellQuote).join(' ');
@@ -109,6 +110,9 @@ export const seams = {
   /** Run a child on this terminal: `{status, signal, error}`. */
   spawn: (command, args, options) => spawnSync(...capture.batchCommand(command, args, { stdio: 'inherit', ...options })),
   which,
+  /** Installed DeepSeek Harness app bundles, whose `dsh` CLI setup uses when none is on PATH. */
+  dshApps: (home) => (process.platform === 'darwin'
+    ? ['/Applications', join(home, 'Applications')].map((root) => join(root, 'DeepSeek Harness.app')) : []),
   account: lookupAccount,
   interactive: () => process.stdin.isTTY === true,
   ask,
@@ -255,7 +259,8 @@ export function loadSetupState(home) {
   const context = parsed.pending_context ?? null;
   const validContext = context === null || (typeof context === 'object' && !Array.isArray(context) &&
     ['user', 'project'].includes(context.scope) && ['discover', 'direct'].includes(context.session) &&
-    (context.project === null || context.project === undefined || typeof context.project === 'string'));
+    (context.project === null || context.project === undefined || typeof context.project === 'string') &&
+    (context.dsh_profile === undefined || validDshProfile(context.dsh_profile)));
   if (typeof parsed.chrome !== 'boolean' || typeof parsed.audio !== 'boolean' || !['ask', 'auto'].includes(parsed.approval ?? 'ask') ||
       !Array.isArray(pending) || !pending.every((item) => NEEDS_BINARY.includes(item)) || !validContext) throw malformed();
   return { chrome: parsed.chrome, audio: parsed.audio, approval: parsed.approval ?? 'ask', pending: [...new Set(pending)],
@@ -276,7 +281,8 @@ function harnessSearchPath(home, path = process.env.PATH ?? '') {
   return [...new Set([...path.split(delimiter).filter(Boolean), ...extra])].join(delimiter);
 }
 
-export const harnessInstalled = (name, home, path) => Boolean(seams.which(CLIENTS[name].executable, harnessSearchPath(home, path)));
+export const harnessInstalled = (name, home, path) => Boolean(name === 'dsh' ? dshExecutable(home, harnessSearchPath(home, path))
+  : seams.which(CLIENTS[name].executable, harnessSearchPath(home, path)));
 
 // Installers ---------------------------------------------------------------------------------------------
 
@@ -294,6 +300,7 @@ export function installerEnvironment(home, names, environ = process.env) {
   if (names.includes('codex')) supported.push('CODEX_HOME');
   if (names.includes('hermes')) supported.push('HERMES_HOME');
   if (names.includes('omp')) supported.push('PI_CODING_AGENT_DIR');
+  if (names.includes('dsh')) supported.push('DSH_HOME');
   if (['opencode', 'vscode', 'copilot-cli'].some((name) => names.includes(name))) supported.push('XDG_CONFIG_HOME');
   for (const variable of supported) {
     if (env[variable] && !isAbsolute(env[variable])) throw new Error(`${variable} must be absolute.`);
@@ -502,7 +509,7 @@ const describe = (error) => ([TypeError, ReferenceError, RangeError, SyntaxError
  * harness approval settings alone), `auto` or `ask` (see approval.mjs).
  */
 export async function configure(names, home, command, toolsRoot, releaseRoot,
-  { scope = 'user', project = null, setupCommand = null, environ, approval = null } = {}) {
+  { scope = 'user', project = null, setupCommand = null, environ, approval = null, dshProfile = DSH_DEFAULT_PROFILE } = {}) {
   const env = installerEnvironment(home, names, environ);
   const [node, skills, mcp] = await installerPaths(toolsRoot);
   const resources = await installedAppResources(releaseRoot);
@@ -526,11 +533,13 @@ export async function configure(names, home, command, toolsRoot, releaseRoot,
 
   for (const name of names) {
     const client = CLIENTS[name];
-    if (name === 'omp' || name === 'hermes') {
+    if (name === 'omp' || name === 'hermes' || name === 'dsh') {
       try {
         if (name === 'omp') configureOmp(home, command, releaseRoot, { scope, project, env });
-        else configureHermes(home, command, node, releaseRoot, { scope, project, env });
-        say(`${client.label}: plugin registered.`);
+        else if (name === 'hermes') configureHermes(home, command, node, releaseRoot, { scope, project, env });
+        else configureDsh(home, command, releaseRoot, { scope, env, profile: dshProfile });
+        say(name === 'dsh' ? `${client.label}: plugin registered in profile ${dshProfile} ` +
+          `(remove it with \`dsh plugin --profile ${dshProfile} remove lcu-computer-use\`).` : `${client.label}: plugin registered.`);
       } catch (error) {
         fail(name, 'plugin', error);
         continue;
@@ -704,6 +713,7 @@ export const OPTIONS = {
   project: { type: 'string' },
   yes: { type: 'boolean', default: false },
   'list-agents': { type: 'boolean', default: false },
+  'dsh-profile': { type: 'string' },
   export: { type: 'string' },
   chrome: { type: 'boolean', default: false },
   'no-chrome': { type: 'boolean', default: false },
@@ -724,7 +734,8 @@ const CHOICES = { scope: ['user', 'project'], approval: ['ask', 'auto'], session
 
 export const USAGE = 'Usage: lcu setup [--agent ID ...] [--scope user|project] [--project PATH] [--yes] [--chrome | --no-chrome]\n' +
   '                 [--audio | --no-audio] [--approval ask|auto] [--session discover|direct] [--allow-missing]\n' +
-  '                 [--cross-turn on|off [--unattended]] [--reconcile] [--check-desktop] [--export PATH] [--list-agents] [--user ACCOUNT] [--prefix PATH]';
+  '                 [--cross-turn on|off [--unattended]] [--reconcile] [--check-desktop] [--export PATH] [--list-agents] [--user ACCOUNT] [--prefix PATH]\n' +
+  '                 [--dsh-profile NAME]';
 const HELP = `${USAGE}
 
 Configure LCU tools, without requiring a running desktop.
@@ -750,7 +761,9 @@ Options:
                       (macOS and Windows per-app approvals still apply). on asks the owner to authenticate on macOS. Without it,
                       interactive setup asks once; --yes leaves the setting unchanged. Same as \`lcu cross-turn\`
   --unattended        With --cross-turn on: skip the owner prompt; for disposable sandbox machines only
-  --allow-missing     Skip pi, omp and hermes when their executable is not installed yet and record them as
+  --dsh-profile NAME  DeepSeek Harness profile to install the LCU plugin into (default: desktop, the app's; quit the
+                      app first)
+  --allow-missing     Skip pi, omp, hermes and dsh when their executable is not installed yet and record them as
                       pending (Codex and Claude Code still register); exit 0 when that is the only problem.
                       \`lcu setup --reconcile\` registers them once they appear
   --reconcile         Register pending harnesses that are now installed, using the saved opt-ins and approval
@@ -792,7 +805,8 @@ export function validate(args) {
   if (args.reconcile) {
     const used = [['--agent', args.agent.length], ['--export', args.export], ['--approval', args.approval], ['--chrome', args.chrome],
       ['--no-chrome', args['no-chrome']], ['--audio', args.audio], ['--no-audio', args['no-audio']], ['--project', args.project],
-      ['--check-desktop', args['check-desktop']], ['--allow-missing', args['allow-missing']], ['--cross-turn', args['cross-turn']], ['--unattended', args.unattended], ['--scope', args.scope !== 'user']]
+      ['--check-desktop', args['check-desktop']], ['--allow-missing', args['allow-missing']], ['--cross-turn', args['cross-turn']], ['--unattended', args.unattended], ['--scope', args.scope !== 'user'],
+      ['--dsh-profile', args['dsh-profile']]]
       .filter(([, value]) => value).map(([flag]) => flag);
     if (used.length) throw new Error(`--reconcile uses the saved setup and cannot be combined with ${used.join(', ')}.`);
   }
@@ -843,6 +857,10 @@ export function validate(args) {
   }
   if (names.length === 1 && names[0] === 'all') names = Object.keys(CLIENTS);
   if (!(names.length === 1 && names[0] === 'auto')) validateAgentScope(names, args.scope);
+  if (args['dsh-profile'] !== undefined) {
+    if (args.export) throw new Error('--dsh-profile configures DeepSeek Harness; it cannot be combined with --export.');
+    if (!validDshProfile(args['dsh-profile'])) throw new Error(`Invalid --dsh-profile name: ${args['dsh-profile']}`);
+  }
   return { account, names };
 }
 
@@ -850,12 +868,13 @@ const agentScopes = (name) => (USER_ONLY_AGENTS.includes(name) ? 'user' : 'user,
 
 function validateAgentScope(names, scope) {
   if (scope === 'project' && names.some((name) => USER_ONLY_AGENTS.includes(name))) {
-    throw new Error('Oh My Pi and Hermes native plugins are profile-scoped. Use --scope user with the intended profile; project scope is not supported.');
+    throw new Error('Oh My Pi, Hermes and DeepSeek Harness native plugins are profile-scoped. Use --scope user with the intended profile; project scope is not supported.');
   }
 }
 
 export const detect = (home) => Object.entries(CLIENTS)
-  .filter(([, client]) => seams.which(client.executable) || existsSync(join(home, client.detectPath))).map(([name]) => name);
+  .filter(([name, client]) => (name === 'dsh' ? dshExecutable(home) : seams.which(client.executable)) ||
+    existsSync(join(home, client.detectPath))).map(([name]) => name);
 
 async function chooseAgents(home) {
   const detected = detect(home);
@@ -968,7 +987,7 @@ async function reconcile(args, account, home, register) {
     say(`LCU: registering ${names.map((name) => CLIENTS[name].label).join(', ')} (installed since setup) with the saved settings.`);
     const failures = await register(names, home, [...desktopCommand, ...runtimeFlags(state.chrome, state.audio)], toolsRoot,
       releaseRoot, { scope: context.scope, project, setupCommand: runtime, environ: environment,
-        approval: state.approval === 'auto' ? 'auto' : null });
+        approval: state.approval === 'auto' ? 'auto' : null, dshProfile: context.dsh_profile ?? DSH_DEFAULT_PROFILE });
     const failed = new Set(failures.map(([name]) => name));
     const remaining = state.pending.filter((name) => !names.includes(name) || failed.has(name));
     saveSetupState(home, { chrome: state.chrome, audio: state.audio, approval: state.approval, pending: remaining, pendingContext: context });
@@ -1121,6 +1140,10 @@ async function registerLocked(args, account, home, names, missing, register, pat
     if (names.length) say(`Configure ${names.join(', ')} for ${account.name} (${args.scope} scope).`);
     say('Existing LCU MCP entries will be updated and any old LCU skill removed; unrelated configuration is preserved.');
     if (names.includes('codex')) say('Codex: install and trust the original Stop, Interrupt, and SubagentStop cleanup hooks for LCU.');
+    if (names.includes('dsh')) {
+      say(`DeepSeek Harness: install LCU's plugin into profile ${args['dsh-profile'] ?? DSH_DEFAULT_PROFILE} with \`dsh plugin add\` ` +
+        '(experimental; quit DeepSeek Harness Desktop first).');
+    }
   }
   if (chrome) {
     say('Chrome control selected: register the original extension connector for this desktop account and include Chrome guidance.');
@@ -1135,7 +1158,7 @@ async function registerLocked(args, account, home, names, missing, register, pat
     const chosen = names.filter((name) => entries[name]).map((name) => entries[name]);
     say('Approval mode auto: add only LCU\'s own entries so its tools run without a per-call harness prompt' +
       (chosen.length ? `: ${chosen.join('; ')}` : '') + '. ' +
-      (names.some((name) => name === 'pi' || name === 'hermes') ? 'Pi and Hermes have no such gate. ' : '') +
+      (names.some((name) => name === 'pi' || name === 'hermes' || name === 'dsh') ? 'Pi, Hermes and DeepSeek Harness have no such gate. ' : '') +
       'Native-app and Chrome approvals from the original runtime are unchanged.');
   } else if (approvalAction === 'ask' && !args.export) {
     say('Approval mode ask: remove only the entries `--approval auto` added, restoring harness defaults.');
@@ -1170,7 +1193,8 @@ async function registerLocked(args, account, home, names, missing, register, pat
   if (args.export) await exportBundle(args.export, command, releaseRoot, { chrome, audio });
   else if (names.length) {
     failures = await register(names, home, command, toolsRoot, releaseRoot, { scope: args.scope,
-      project: args.project ?? null, setupCommand, approval: approvalAction, environ: setupEnvironment });
+      project: args.project ?? null, setupCommand, approval: approvalAction, environ: setupEnvironment,
+      dshProfile: args['dsh-profile'] ?? DSH_DEFAULT_PROFILE });
   }
   // Remember opt-ins even when registration failed, so a retry or `--reconcile` keeps them. Harnesses registered
   // now leave the pending set; a later reconcile applies the saved chrome, audio and approval mode to the rest.
@@ -1178,8 +1202,11 @@ async function registerLocked(args, account, home, names, missing, register, pat
   const failed = [...new Set(failures.map(([name]) => name))];
   const pending = args.export ? [] : [...new Set([...state.pending, ...missing])]
     .filter((name) => !names.includes(name) || failed.includes(name));
+  // A DSH profile other than the default is kept for the reconcile that registers a pending DSH.
+  const dshContext = missing.includes('dsh') && args['dsh-profile'] && args['dsh-profile'] !== DSH_DEFAULT_PROFILE
+    ? { dsh_profile: args['dsh-profile'] } : {};
   saveSetupState(home, { chrome, audio, approval: approvalMode, pending, pendingContext: pending.length
-    ? (missing.length ? { scope: args.scope, session: args.session, project: args.project ?? null } : state.pending_context) : null });
+    ? (missing.length ? { scope: args.scope, session: args.session, project: args.project ?? null, ...dshContext } : state.pending_context) : null });
   if (crossTurnWanted !== null) {
     // A failed or cancelled owner authentication leaves the setting as it was and does not fail the rest of setup.
     try {
@@ -1196,7 +1223,8 @@ async function registerLocked(args, account, home, names, missing, register, pat
       chrome ? '--chrome' : '--no-chrome', audio ? '--audio' : '--no-audio',
       // A defaulted `ask` must not be passed: it would remove approval entries.
       ...(args.approval || approvalMode === 'auto' ? ['--approval', approvalMode] : []),
-      ...(args['allow-missing'] ? ['--allow-missing'] : []), ...failed.flatMap((name) => ['--agent', name])];
+      ...(args['allow-missing'] ? ['--allow-missing'] : []), ...(args['dsh-profile'] && failed.includes('dsh') ? ['--dsh-profile', args['dsh-profile']] : []),
+      ...failed.flatMap((name) => ['--agent', name])];
     throw new Error(`${failures.length} registration step(s) failed (${failures.map(([name, phase]) => `${name}: ${phase}`).join(', ')}). ` +
       `Choices were saved; completed steps remain installed. After resolving the errors, retry: ${shellJoin(retry)}`);
   }

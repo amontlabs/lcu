@@ -1,12 +1,13 @@
-// Registration boundaries for the Oh My Pi and Hermes native harness packages.
+// Registration boundaries for the Oh My Pi, Hermes and DeepSeek Harness native harness packages.
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
+import { DSH_PACKAGE, dshDesktopListed } from '../../lcu/harness_setup.mjs';
 import { join, resolve } from 'node:path';
 
 import * as setup from '../../lcu/setup.mjs';
 import { output, override, posixTests, result, temporary, write } from './fixtures.mjs';
 
-const test = posixTests('the fake OMP and Hermes CLIs are sh scripts');
+const test = posixTests('the fake OMP, Hermes and DSH CLIs are sh scripts');
 
 function fixture(t) {
   const root = temporary(t);
@@ -17,6 +18,7 @@ function fixture(t) {
   const release = join(root, 'release');
   write(join(release, 'adapters/pi/index.ts'), 'export default function () {}');
   for (const name of ['plugin.yaml', '__init__.py', 'bridge.mjs']) write(join(release, 'adapters/hermes', name), `fixture ${name}`);
+  write(join(release, 'adapters/dsh/plugin.mjs'), 'export function apply() {}');
   const tools = join(root, 'tools');
   write(join(tools, 'node/bin/node'), '#!/bin/sh\n', 0o755);
   write(join(tools, 'node_modules/skills/bin/cli.mjs'));
@@ -24,15 +26,18 @@ function fixture(t) {
   write(join(release, 'installation.json'), '{"app":"app"}');
   mkdirSync(join(release, 'app/resources'), { recursive: true });
   const f = { root, home, project, release, tools, command: ['/opt/lcu/current/bin/lcu', '--audio', '--chrome'], calls: [] };
-  f.configure = async (name, { scope = 'user', run, executable = `/bin/${name}`, env = {} } = {}) => {
+  f.listing = '';
+  f.configure = async (name, { scope = 'user', run, executable = `/bin/${name}`, env = {}, dshProfile, apps = [] } = {}) => {
     override(t, setup.seams, 'which', () => executable);
+    override(t, setup.seams, 'dshApps', () => apps);
     override(t, setup.seams, 'run', (command, args, options) => {
       f.calls.push({ argv: [command, ...args], options });
+      if (command === '/bin/ps') return result(0, f.listing);
       return run ? run(command, args, options) : result(0);
     });
-    await output(t);
+    f.seen = await output(t);
     return setup.configure([name], home, f.command, tools, release, { scope, project: scope === 'project' ? project : null,
-      environ: { PATH: '/bin', ...env } });
+      environ: { PATH: '/bin', ...env }, ...(dshProfile ? { dshProfile } : {}) });
   };
   return f;
 }
@@ -41,9 +46,16 @@ const files = (root) => Object.fromEntries(readdirSync(root, { recursive: true }
   .filter((name) => { try { readFileSync(join(root, name)); return true; } catch { return false; } })
   .map((name) => [name, readFileSync(join(root, name), 'utf8')]));
 
-test('detect finds a harness by its executable', (t) => {
+test('detect finds a harness by its executable, and DeepSeek Harness also by its app', (t) => {
   override(t, setup.seams, 'which', (name) => (name === 'omp' ? '/mock/bin/omp' : null));
-  assert.deepEqual(setup.detect(temporary(t)), ['omp']);
+  override(t, setup.seams, 'dshApps', () => []);
+  const home = temporary(t);
+  assert.deepEqual(setup.detect(home), ['omp']);
+  const app = join(home, 'Applications/DeepSeek Harness.app');
+  write(join(app, 'Contents/Resources/runtime/cli/bin/dsh'), '#!/bin/sh\n', 0o755);
+  override(t, setup.seams, 'dshApps', () => [app]);
+  assert.deepEqual(setup.detect(home), ['omp', 'dsh']);
+  assert.equal(setup.harnessInstalled('dsh', home, '/bin'), true);
 });
 
 test('OMP links a per-profile package that imports the adapter relatively, with the command and no skill', async (t) => {
@@ -121,4 +133,94 @@ test('a failed re-registration restores the previous package', async (t) => {
   const failures = await f.configure('hermes', { run: () => result(1, '', 'enable failed') });
   assert.match(failures[0][2], /enable failed/);
   assert.deepEqual(files(pkg), previous);
+});
+
+const dshCall = (f) => f.calls.filter(({ argv }) => argv[0] !== '/bin/ps').at(-1);
+
+test('DSH links a generated bundle per profile through `dsh plugin add`, importing the adapter and DSH helper', async (t) => {
+  const f = fixture(t);
+  assert.deepEqual(await f.configure('dsh'), []);
+  const { argv, options } = dshCall(f);
+  assert.deepEqual(argv.slice(0, 4), ['/bin/dsh', 'plugin', '--profile', 'desktop']);
+  assert.equal(argv[4], 'add');
+  const pkg = argv[5];
+  assert.equal(pkg, join(f.home, '.local/share/lcu/dsh', pkg.split('/').at(-1)));
+  assert.match(pkg.split('/').at(-1), /^desktop-[0-9a-f]{16}$/);
+  assert.equal(options.cwd, f.home);
+  assert.equal(options.env.HOME, f.home);
+  const manifest = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8'));
+  assert.equal(manifest.name, DSH_PACKAGE);
+  assert.equal(manifest.type, 'module');
+  assert.equal(manifest.engines.dsh, '>=0.2.1-rc.2 <0.3');
+  assert.deepEqual(manifest.peerDependencies, { '@deepseek-ai/dsh-mcp-client': '*' });
+  assert.deepEqual(manifest.dsh, { bundle: { patch: './cordis.patch.yml' } });
+  assert.deepEqual(manifest.exports, { '.': './index.js', './locale/*.json': './locale/*.json', './icon': './icon.svg' });
+  for (const name of manifest.files) assert.ok(existsSync(join(pkg, name.replace('*', 'en'))), name);
+  const patch = readFileSync(join(pkg, 'cordis.patch.yml'), 'utf8');
+  assert.equal(patch, `- insert:\n    - id: lcu-computer-use\n      name: lcu-computer-use\n      config: ${JSON.stringify({ command: f.command })}\n`);
+  const wrapper = readFileSync(join(pkg, 'index.js'), 'utf8');
+  assert.match(wrapper, /import \{ createMcpToolDefinition \} from '@deepseek-ai\/dsh-mcp-client';/);
+  const specifier = JSON.parse(wrapper.split('import * as lcu from ')[1].split(';')[0]);
+  assert.ok(specifier.startsWith('.'));
+  assert.equal(realpathSync(resolve(pkg, specifier)), join(f.release, 'adapters/dsh/plugin.mjs'));
+  assert.match(wrapper, /export async function apply\(ctx, config\) \{\n  return lcu\.apply\(ctx, config, \{ createMcpToolDefinition \}\);/);
+  assert.equal(JSON.parse(readFileSync(join(pkg, 'locale/en.json'), 'utf8')).meta.title, 'LCU Computer Use');
+  assert.match(readFileSync(join(pkg, 'icon.svg'), 'utf8'), /^<svg xmlns="http:\/\/www.w3.org\/2000\/svg"/);
+  assert.match(f.seen.out, /DeepSeek Harness: plugin registered in profile desktop \(remove it with `dsh plugin --profile desktop remove lcu-computer-use`\)/);
+  // A rerun replaces the same package; another profile or DSH_HOME gets its own.
+  const before = files(pkg);
+  assert.deepEqual(await f.configure('dsh'), []);
+  assert.equal(dshCall(f).argv[5], pkg);
+  assert.deepEqual(files(pkg), before);
+  assert.deepEqual(await f.configure('dsh', { dshProfile: 'web' }), []);
+  assert.deepEqual(dshCall(f).argv.slice(2, 4), ['--profile', 'web']);
+  assert.match(dshCall(f).argv[5], /\/web-[0-9a-f]{16}$/);
+  assert.deepEqual(await f.configure('dsh', { env: { DSH_HOME: join(f.root, 'other dsh home') } }), []);
+  assert.notEqual(dshCall(f).argv[5], pkg);
+  assert.equal(dshCall(f).options.env.DSH_HOME, join(f.root, 'other dsh home'));
+});
+
+test('DSH uses the CLI inside the installed app when no dsh is on PATH, and refuses without either', async (t) => {
+  const f = fixture(t);
+  const app = join(f.root, 'Applications/DeepSeek Harness.app');
+  const cli = write(join(app, 'Contents/Resources/runtime/cli/bin/dsh'), '#!/bin/sh\n', 0o755);
+  assert.deepEqual(await f.configure('dsh', { executable: null, apps: [join(f.root, 'missing.app'), app] }), []);
+  assert.equal(dshCall(f).argv[0], cli);
+  const g = fixture(t);
+  const failures = await g.configure('dsh', { executable: null });
+  assert.deepEqual(failures[0].slice(0, 2), ['dsh', 'plugin']);
+  assert.match(failures[0][2], /DeepSeek Harness was not found/);
+  assert.equal(existsSync(join(g.home, '.local/share/lcu/dsh')), false);
+});
+
+test('DSH refuses project scope, bad profiles, a relative DSH_HOME and a failed install without leaving a package', async (t) => {
+  const f = fixture(t);
+  assert.match((await f.configure('dsh', { scope: 'project' }))[0][2], /project scope is not supported/);
+  assert.match((await f.configure('dsh', { dshProfile: '../desktop' }))[0][2], /Invalid DeepSeek Harness profile/);
+  await assert.rejects(f.configure('dsh', { env: { DSH_HOME: 'relative' } }), /DSH_HOME must be absolute/);
+  assert.equal(f.calls.filter(({ argv }) => argv[0] === '/bin/dsh').length, 0);
+  const failures = await f.configure('dsh', { run: () => result(1, '', 'dsh: plugin command failed') });
+  assert.match(failures[0][2], /plugin command failed/);
+  assert.deepEqual(readdirSync(join(f.home, '.local/share/lcu/dsh')), []);
+});
+
+test('DSH setup refuses the desktop profile while DeepSeek Harness Desktop runs', { skip: process.platform !== 'darwin' && 'macOS only' }, async (t) => {
+  const f = fixture(t);
+  f.listing = '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness\n';
+  const failures = await f.configure('dsh');
+  assert.match(failures[0][2], /DeepSeek Harness Desktop is running/);
+  assert.equal(f.calls.filter(({ argv }) => argv[0] === '/bin/dsh').length, 0);
+  assert.equal(existsSync(join(f.home, '.local/share/lcu/dsh')), false);
+  // Other profiles do not touch the app's profile.
+  assert.deepEqual(await f.configure('dsh', { dshProfile: 'web' }), []);
+});
+
+test('the DSH Desktop check matches the app, not the dsh CLI that runs on the same binary', () => {
+  const binary = '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness';
+  assert.equal(dshDesktopListed(`/usr/bin/login\n${binary}\n`), true);
+  assert.equal(dshDesktopListed(`${binary} --expose-internals /x/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js /x\n`), true);
+  assert.equal(dshDesktopListed(`/Users/me/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness\n`), true);
+  assert.equal(dshDesktopListed(`${binary} --expose-internals /x/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js plugin\n`), false);
+  assert.equal(dshDesktopListed(`/Applications/DeepSeek Harness.app/Contents/Frameworks/DeepSeek Harness Helper.app/Contents/MacOS/DeepSeek Harness Helper\n`), false);
+  assert.equal(dshDesktopListed('grep DeepSeek Harness\n'), false);
 });

@@ -200,6 +200,7 @@ function setupArguments(values, user) {
   }
   if (values.approval) args.push('--approval', values.approval);
   if (values['cross-turn']) args.push('--cross-turn', values['cross-turn']);
+  if (values['dsh-profile']) args.push('--dsh-profile', values['dsh-profile']);
   return args;
 }
 
@@ -245,7 +246,7 @@ export async function main(argv) {
   const runtimeOnly = values['runtime-only'];
   if (runtimeOnly) {
     const setupOptions = ['export', 'project', 'check-desktop', 'chrome', 'audio', 'no-chrome', 'no-audio', 'approval', 'allow-missing',
-      'cross-turn', 'unattended', ...(mac ? [] : ['browser-host'])];
+      'cross-turn', 'unattended', 'dsh-profile', ...(mac ? [] : ['browser-host'])];
     if (values.agent.length || values.scope !== 'user' || setupOptions.some((name) => values[name]) ||
         (!mac && values.session !== 'discover')) {
       throw new Error('--runtime-only cannot include agent setup options');

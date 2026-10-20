@@ -195,6 +195,7 @@ class BuildPlatformTests(unittest.TestCase):
             self.assertTrue((release / 'adapters/audio-files.mjs').is_file())
             self.assertTrue((release / 'adapters/codex.mjs').is_file())
             self.assertTrue((release / 'adapters/pi/index.ts').is_file())
+            self.assertEqual([path.name for path in (release / 'adapters/dsh').iterdir()], ['plugin.mjs'])
             mod = release / 'adapters/claude-mod/lcu-approve'
             for name in ('.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.tsx'):
                 self.assertTrue((mod / name).is_file(), name)
