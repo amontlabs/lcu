@@ -64,7 +64,7 @@ test('findHostApps returns nothing for missing processes, cycles, absent bundle 
 test('known agent hosts and the detected host are refused, other apps are not', () => {
   for (const id of ['com.anthropic.claudefordesktop', 'com.anthropic.claude-code', 'com.openai.codex', 'com.apple.Terminal', 'com.googlecode.iterm2',
     'com.mitchellh.ghostty', 'dev.warp.Warp-Stable', 'com.github.wez.wezterm', 'org.alacritty',
-    'net.kovidgoyal.kitty', 'co.zeit.hyper']) {
+    'net.kovidgoyal.kitty', 'co.zeit.hyper', 'com.deepseek.dsh']) {
     assert.ok(agentHostReason(id, { hosts: [], env: {} }), id);
   }
   assert.ok(agentHostReason('COM.APPLE.TERMINAL', { hosts: [], env: {} }));
