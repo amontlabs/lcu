@@ -24,6 +24,7 @@ export const KNOWN_AGENT_HOSTS = new Map([
   ['ai.opencode.desktop', 'OpenCode'],
   ['com.electron.factory', 'Factory'],
   ['com.nousresearch.hermes', 'Hermes'],
+  ['com.deepseek.dsh', 'DeepSeek Harness'],
   ['com.apple.Terminal', 'Terminal'],
   ['com.googlecode.iterm2', 'iTerm2'],
   ['com.mitchellh.ghostty', 'Ghostty'],

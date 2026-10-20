@@ -31,7 +31,7 @@ claude plugin install lcu@lcu
 
 - **Desktop apps:** read windows, click, type, and take screenshots.
 - **Chrome, when enabled:** read and control tabs through the official extension, with site approval.
-- **In your harness:** adapters are available for Pi, Codex CLI, and Claude Code, with experimental Oh My Pi and Hermes integrations. See [setup and verification limits](docs/ADAPTERS.md).
+- **In your harness:** adapters are available for Pi, Codex CLI, Claude Code and DeepSeek Harness, with experimental Oh My Pi and Hermes integrations. See [setup and verification limits](docs/ADAPTERS.md).
 
 ## Approve apps from Claude, natively
 

@@ -95,3 +95,69 @@ export function configureHermes(home, command, node, release, { scope, env }) {
     () => checked('installer', executable, ['plugins', 'enable', 'lcu-cua'], { cwd: home, env: { ...env, HERMES_HOME: root }, timeout: 120_000 }));
 }
 
+
+/** Where the DeepSeek Harness keeps its capability store, relative to the account home. */
+export const DEEPSEEK_STATE = ['.dsh', 'bot', 'state.json'];
+
+/**
+ * Register LCU as a DeepSeek Harness MCP capability.
+ *
+ * The harness has no installer or registration CLI for MCP servers: its desktop app owns the
+ * capability store in `~/.dsh/bot/state.json`. Setup therefore writes that one entry itself,
+ * preserving every other value, keeping a backup of the previous file and publishing the result by
+ * rename. The harness reads the store at start, so the person restarts it afterwards.
+ */
+export function configureDeepseek(home, mcpCommand, { clock = Date.now, scope = 'user' } = {}) {
+  // The store is one file per account; the harness has no project-level capability scope.
+  if (scope !== 'user') throw new Error('DeepSeek Harness capabilities are account-wide. Use --scope user.');
+  if (!Array.isArray(mcpCommand) || mcpCommand.length < 2) {
+    throw new TypeError('DeepSeek Harness registration needs the relay command');
+  }
+  const stateFile = join(home, ...DEEPSEEK_STATE);
+  const stamp = clock();
+  let before;
+  try {
+    before = readFileSync(stateFile, 'utf8');
+  } catch {
+    throw new Error(`DeepSeek Harness has no capability store at ${stateFile}. ` +
+      'Start DeepSeek Harness once so it creates its profile, then rerun `lcu setup --agent deepseek`.');
+  }
+  let state;
+  try {
+    state = JSON.parse(before);
+  } catch {
+    throw new Error(`Refusing to edit a capability store that is not plain JSON: ${stateFile}`);
+  }
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error(`Refusing to edit an unexpected capability store: ${stateFile}`);
+  }
+  const objectAt = (parent, key) => {
+    const current = parent[key];
+    if (current === undefined) return (parent[key] = {});
+    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+      throw new Error(`Refusing to edit ${stateFile}: ${key} is not an object`);
+    }
+    return current;
+  };
+  const items = objectAt(objectAt(state, 'capabilities'), 'items');
+  const previous = items.lcu && typeof items.lcu === 'object' && !Array.isArray(items.lcu) ? items.lcu : {};
+  items.lcu = {
+    ...previous,
+    name: 'lcu',
+    kind: 'mcp',
+    description: typeof previous.description === 'string' && previous.description
+      ? previous.description : 'LCU: Codex computer-use runtime (control Mac desktop apps via ChatGPT.app CUA)',
+    transport: 'stdio',
+    command: mcpCommand[0],
+    args: mcpCommand.slice(1),
+    env: previous.env && typeof previous.env === 'object' && !Array.isArray(previous.env) ? previous.env : {},
+    approved: true,
+    createdAt: previous.createdAt ?? stamp,
+    updatedAt: stamp,
+  };
+  writeFileSync(`${stateFile}.lcu-backup`, before);
+  const temporary = `${stateFile}.lcu-${stamp}`;
+  writeFileSync(temporary, json(state));
+  renameSync(temporary, stateFile);
+  return stateFile;
+}

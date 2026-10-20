@@ -15,7 +15,7 @@ import { install as installApprovalMod } from './claude_mod.mjs';
 import { install as hideHostOnlyTools } from './claude_visibility.mjs';
 import { accountHome, isFile, lstat, real, shellQuote } from './fsutil.mjs';
 import { approvalNote, question as crossTurnQuestion, readCrossTurn, setCrossTurn } from './cross_turn.mjs';
-import { configureHermes, configureOmp } from './harness_setup.mjs';
+import { configureDeepseek, configureHermes, configureOmp } from './harness_setup.mjs';
 import { withLock } from './lock.mjs';
 import { ask, say, warn } from './terminal.mjs';
 
@@ -39,8 +39,9 @@ export const CLIENTS = {
   pi: { label: 'Pi', executable: 'pi', detectPath: '.pi/agent', mcpAgent: 'pi' },
   omp: { label: 'Oh My Pi', executable: 'omp', detectPath: '.omp', mcpAgent: '' },
   hermes: { label: 'Hermes', executable: 'hermes', detectPath: '.hermes', mcpAgent: '' },
+  deepseek: { label: 'DeepSeek Harness', executable: 'dsh', detectPath: '.dsh/bot/state.json', mcpAgent: '' },
 };
-export const ALIASES = { claude: 'claude-code', 'oh-my-pi': 'omp', 'hermes-agent': 'hermes' };
+export const ALIASES = { claude: 'claude-code', 'oh-my-pi': 'omp', 'hermes-agent': 'hermes', dsh: 'deepseek' };
 // Harnesses whose native registration needs their own executable; Codex and Claude Code register through
 // add-mcp and their config files without the CLI installed.
 const NEEDS_BINARY = ['pi', 'omp', 'hermes'];
@@ -561,6 +562,11 @@ export async function configure(names, home, command, toolsRoot, releaseRoot,
         continue;
       }
     }
+    if (name === 'deepseek') {
+      const adapter = join(releaseRoot, 'adapters/deepseek.mjs');
+      if (!existsSync(adapter)) mcpSetupError = `DeepSeek Harness relay missing: ${adapter}. Reinstall LCU into this release prefix, then rerun setup.`;
+      else mcpCommand = [node, adapter, ...command];
+    }
     // Earlier LCU versions registered an `lcu` skill; official Codex computer use has none, so remove it.
     // Best-effort legacy cleanup: a failure here must not fail setup.
     try {
@@ -575,6 +581,10 @@ export async function configure(names, home, command, toolsRoot, releaseRoot,
       let result;
       if (name === 'pi') {
         result = registerPi(home, command, releaseRoot, { scope, project, env, cwd, setupCommand });
+      } else if (name === 'deepseek') {
+        if (mcpSetupError) throw new Error(mcpSetupError);
+        result = { stdout: '', stderr: '' };
+        say(`${client.label}: capability registered at ${configureDeepseek(home, mcpCommand, { scope })}.`);
       } else {
         if (mcpSetupError) throw new Error(mcpSetupError);
         preflightMcp(node, mcp, client, scope, cwd, env);
