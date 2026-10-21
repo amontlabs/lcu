@@ -432,10 +432,15 @@ def expected_renames(old):
 
 
 # Data the port added on purpose: a NEW-only key whose path ends in the first item and whose value equals the
-# second is not a difference. Anything else under the key still shows.
+# second (or satisfies it, when it is a predicate) is not a difference. Anything else under the key still shows.
 EXPECTED_ADDITIONS = (
     # `lcu status --json` reports the cross-turn Computer Use setting, off by default (docs/releases/0.11.0.md).
     ('/status-json-body/cross_turn', {'enabled': False, 'source': None}),
+    # The launcher records what it derived for the original runtime, so that a nested `lcu` derives it again
+    # (docs/INSTALLATION.md, an agent started from an app that Computer Use launched). It holds per-case path
+    # digests, so only its shape is checked.
+    ('/env/LCU_PARENT_ENV', lambda v: isinstance(v, dict) and isinstance(v.get('json'), dict)
+     and set(v['json']) == {'runtime', 'derived'}),
 )
 
 
@@ -470,7 +475,8 @@ def diff(old, new, path='', out=None):
             if key not in new:
                 out.append(f'{path}/{key}: only OLD = {short(old[key])}')
             elif key not in old:
-                if any(f'{path}/{key}'.endswith(suffix) and new[key] == value for suffix, value in EXPECTED_ADDITIONS):
+                if any(f'{path}/{key}'.endswith(suffix) and (value(new[key]) if callable(value) else new[key] == value)
+                       for suffix, value in EXPECTED_ADDITIONS):
                     continue
                 out.append(f'{path}/{key}: only NEW = {short(new[key])}')
             else:
