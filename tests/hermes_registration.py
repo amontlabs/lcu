@@ -63,10 +63,10 @@ def main() -> None:
             if result.returncode != 0:
                 raise SystemExit(f"Hermes prompt section rendering failed ({result.returncode}):\n{result.stderr}")
             sections = dict(json.loads(result.stdout.strip().splitlines()[-1]))
-            content = sections.get("lcu-cua.instructions", "")
+            content = sections.get("0-lcu-cua.instructions", "")
             if "Original CUA initialization guide." not in content or "inputSchema" in content:
                 raise SystemExit(f"Hermes did not render the LCU instructions section:\n{result.stdout}")
-            print(f"Hermes rendered system prompt section lcu-cua.instructions ({len(content)} characters)")
+            print(f"Hermes rendered system prompt section 0-lcu-cua.instructions ({len(content)} characters)")
         print(f"Isolated HERMES_HOME: {hermes_home}")
 
 

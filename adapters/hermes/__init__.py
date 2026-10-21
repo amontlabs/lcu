@@ -24,7 +24,9 @@ BRIDGE_STDERR_CHARS = 512
 BRIDGE_STDERR_LINES = 200
 # Hermes system prompt section carrying the original initialization instructions. Hermes renders it
 # once per new session and keeps its bytes for that session; a longer section is skipped, never cut.
-SYSTEM_PROMPT_SECTION_ID = "lcu-cua.instructions"
+# Hermes adds sections in ID order until its 8,000-character total for all plugins is used, so the
+# leading "0" (before any ID starting with a letter) keeps this short section from being skipped.
+SYSTEM_PROMPT_SECTION_ID = "0-lcu-cua.instructions"
 SYSTEM_PROMPT_SECTION_MAX_CHARS = 4000
 
 

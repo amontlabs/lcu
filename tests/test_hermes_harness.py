@@ -135,7 +135,7 @@ class HermesHarnessTests(unittest.TestCase):
                 self.assertEqual(context.tools["js"]["schema"]["description"], "Original JS description.")
                 # Like official Codex: original instructions, once per session in the system
                 # prompt; the descriptors reach the model only as the tool schemas.
-                section = context.sections["lcu-cua.instructions"]
+                section = context.sections["0-lcu-cua.instructions"]
                 self.assertEqual(section["position"], "after_memory")
                 self.assertEqual(section["max_chars"], 4000)
                 self.assertIsInstance(section["content"], str)
@@ -422,7 +422,7 @@ class HermesHarnessTests(unittest.TestCase):
             try:
                 with patch.dict(os.environ, {"LCU_FIXTURE_INSTRUCTIONS_FILE": str(instructions)}):
                     plugin.register(context)
-                    self.assertIn("First original guide.", context.sections["lcu-cua.instructions"]["content"])
+                    self.assertIn("First original guide.", context.sections["0-lcu-cua.instructions"]["content"])
                     self.assertIsNone(context.hooks["pre_llm_call"](session_id="a", turn_id="a1"))
                     context.hooks["on_session_end"](session_id="a", turn_id="a1")
                     # Unchanged instructions: the next session reconnects and proceeds.
