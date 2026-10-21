@@ -35,12 +35,18 @@ class FakeContext:
         self.tools = {}
         self.hooks = {}
         self.middleware = {}
+        self.sections = {}
         self.unload_callbacks = []
+
+    def register_system_prompt_section(self, id, content, *, position="after_memory", max_chars=4000):
+        # Hermes 0.21.5 contract: ids are unique and max_chars is at most 4,000.
+        if id in self.sections or not 0 < max_chars <= 4000:
+            raise ValueError(id)
+        self.sections[id] = {"content": content, "position": position, "max_chars": max_chars}
+        return object()
 
     def register_tool(self, *, name, toolset, schema, handler):
         self.tools[name] = {"toolset": toolset, "schema": schema, "handler": handler}
-        return object()
-
         return object()
 
     def on_unload(self, callback):
@@ -59,7 +65,28 @@ class FakeContext:
         return object()
 
 
+class LegacyContext(FakeContext):
+    """A Hermes without register_system_prompt_section."""
+
+    register_system_prompt_section = None
+
+
 class HermesHarnessTests(unittest.TestCase):
+    def load_plugin(self, home, module_name):
+        plugin_dir = home / "plugins" / "lcu-cua"
+        plugin_dir.mkdir(parents=True)
+        shutil.copy2(PLUGIN / "__init__.py", plugin_dir / "__init__.py")
+        adapter_root, node = self.make_adapter_tree(home)
+        (plugin_dir / "lcu-config.json").write_text(json.dumps({
+            "command": [str(node), str(adapter_root / "test/hermes-mcp-fixture.mjs")], "node": str(node),
+            "bridge": str(adapter_root / "hermes/bridge.mjs"),
+        }), encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(module_name, plugin_dir / "__init__.py")
+        plugin = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(plugin)
+        return plugin
+
     def make_adapter_tree(self, home):
         """Run fixtures beside the built release dependencies; source checkouts omit node_modules."""
         installed = INSTALLED_ADAPTERS if (INSTALLED_ADAPTERS / "node_modules/@modelcontextprotocol/sdk/package.json").is_file() else SOURCE_ADAPTERS
@@ -106,12 +133,19 @@ class HermesHarnessTests(unittest.TestCase):
                 plugin.register(context)
                 self.assertEqual(set(context.tools), {"js", "js_reset"})
                 self.assertEqual(context.tools["js"]["schema"]["description"], "Original JS description.")
-                injected = context.hooks["pre_llm_call"](
-                    session_id="hermes-session", turn_id="hermes-turn")
-                # Like official Codex: original instructions and descriptors only, no skill.
-                self.assertNotIn("SKILL.md", injected)
-                self.assertIn("Original CUA initialization guide.", injected)
-                self.assertIn('"name": "js"', injected)
+                # Like official Codex: original instructions, once per session in the system
+                # prompt; the descriptors reach the model only as the tool schemas.
+                section = context.sections["0-lcu-cua.instructions"]
+                self.assertEqual(section["position"], "after_memory")
+                self.assertEqual(section["max_chars"], 4000)
+                self.assertIsInstance(section["content"], str)
+                self.assertIn("Original CUA MCP initialization instructions:\nOriginal CUA initialization guide.",
+                              section["content"])
+                self.assertNotIn("SKILL.md", section["content"])
+                self.assertNotIn("Original JS description.", section["content"])
+                # The per-turn hook only does lifecycle work and adds nothing to the user message.
+                self.assertIsNone(context.hooks["pre_llm_call"](
+                    session_id="hermes-session", turn_id="hermes-turn", is_first_turn=True))
 
                 def invoke_lcu(name, params, call_id):
                     # Mirror Hermes' public tool_execution contract: the
@@ -255,7 +289,7 @@ class HermesHarnessTests(unittest.TestCase):
                 context.hooks["pre_llm_call"](session_id="cleanup-once", turn_id="cleanup-turn")
                 context.hooks["on_session_end"](session_id="cleanup-once", turn_id="cleanup-turn",
                                                  completed=True, interrupted=False)
-                context.hooks["pre_llm_call"](session_id="next-session", turn_id="next-turn")
+                self.assertIsNone(context.hooks["pre_llm_call"](session_id="next-session", turn_id="next-turn"))
                 entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
                 call = next(item for item in entries if item.get("name") == "js")
                 metadata = call["meta"]["x-codex-turn-metadata"]
@@ -345,6 +379,116 @@ class HermesHarnessTests(unittest.TestCase):
             finally:
                 context.unload()
 
+    def test_without_section_api_instructions_go_to_the_first_turn_only(self):
+        with tempfile.TemporaryDirectory(prefix="lcu-hermes-test-") as temporary:
+            plugin = self.load_plugin(Path(temporary), "lcu_hermes_legacy")
+            context = LegacyContext()
+            try:
+                plugin.register(context)
+                self.assertEqual(context.sections, {})
+                first = context.hooks["pre_llm_call"](session_id="s", turn_id="t1", is_first_turn=True)
+                self.assertIn("Original CUA initialization guide.", first)
+                self.assertNotIn("Original JS description.", first)
+                self.assertIsNone(context.hooks["pre_llm_call"](session_id="s", turn_id="t2", is_first_turn=False))
+                self.assertIsNone(context.hooks["pre_llm_call"](session_id="s", turn_id="t3"))
+            finally:
+                context.unload()
+
+    def test_without_section_api_a_refused_first_turn_gets_the_instructions_later(self):
+        with tempfile.TemporaryDirectory(prefix="lcu-hermes-test-") as temporary:
+            plugin = self.load_plugin(Path(temporary), "lcu_hermes_legacy_refused")
+            context = LegacyContext()
+            try:
+                plugin.register(context)
+                self.assertIn("Original CUA initialization guide.",
+                              context.hooks["pre_llm_call"](session_id="a", turn_id="a1", is_first_turn=True))
+                refused = context.hooks["pre_llm_call"](session_id="b", turn_id="b1", is_first_turn=True)
+                self.assertIn("another Hermes session still owns", refused)
+                self.assertNotIn("Original CUA initialization guide.", refused)
+                context.hooks["on_session_end"](session_id="a", turn_id="a1")
+                admitted = context.hooks["pre_llm_call"](session_id="b", turn_id="b2", is_first_turn=False)
+                self.assertIn("Original CUA initialization guide.", admitted)
+                context.hooks["on_session_end"](session_id="b", turn_id="b2")
+                self.assertIsNone(context.hooks["pre_llm_call"](session_id="b", turn_id="b3", is_first_turn=False))
+            finally:
+                context.unload()
+
+    def test_instructions_over_the_section_limit_are_not_truncated(self):
+        with tempfile.TemporaryDirectory(prefix="lcu-hermes-test-") as temporary:
+            home = Path(temporary)
+            long_instructions = "Original long guide. " * 300 + "END-OF-ORIGINAL-GUIDE"
+            instructions = home / "instructions.txt"
+            instructions.write_text(long_instructions, encoding="utf-8")
+            plugin = self.load_plugin(home, "lcu_hermes_long")
+            context = FakeContext()
+            try:
+                with patch.dict(os.environ, {"LCU_FIXTURE_INSTRUCTIONS_FILE": str(instructions)}):
+                    plugin.register(context)
+                self.assertEqual(context.sections, {})
+                first = context.hooks["pre_llm_call"](session_id="s", turn_id="t1", is_first_turn=True)
+                self.assertIn(long_instructions, first)
+                self.assertIsNone(context.hooks["pre_llm_call"](session_id="s", turn_id="t2", is_first_turn=False))
+            finally:
+                context.unload()
+
+    def test_session_handoff_refuses_changed_instructions(self):
+        with tempfile.TemporaryDirectory(prefix="lcu-hermes-test-") as temporary:
+            home = Path(temporary)
+            instructions = home / "instructions.txt"
+            instructions.write_text("First original guide.", encoding="utf-8")
+            plugin = self.load_plugin(home, "lcu_hermes_handoff")
+            context = FakeContext()
+            try:
+                with patch.dict(os.environ, {"LCU_FIXTURE_INSTRUCTIONS_FILE": str(instructions)}):
+                    plugin.register(context)
+                    self.assertIn("First original guide.", context.sections["0-lcu-cua.instructions"]["content"])
+                    self.assertIsNone(context.hooks["pre_llm_call"](session_id="a", turn_id="a1"))
+                    context.hooks["on_session_end"](session_id="a", turn_id="a1")
+                    # Unchanged instructions: the next session reconnects and proceeds.
+                    self.assertIsNone(context.hooks["pre_llm_call"](session_id="b", turn_id="b1"))
+                    context.hooks["on_session_end"](session_id="b", turn_id="b1")
+                    instructions.write_text("Changed original guide.", encoding="utf-8")
+                    refused = context.hooks["pre_llm_call"](session_id="c", turn_id="c1")
+                    self.assertIn("tool descriptors or instructions changed during Hermes session handoff", refused)
+                    raw = context.tools["js"]["handler"]({"code": "must-not-run"}, session_id="c", turn_id="c1")
+                    self.assertTrue(json.loads(raw)["isError"])
+                    # The previous owner is refused too while the bridge holds the changed runtime.
+                    refused = context.hooks["pre_llm_call"](session_id="b", turn_id="b2")
+                    self.assertIn("tool descriptors or instructions changed during Hermes session handoff", refused)
+                    raw = context.tools["js"]["handler"]({"code": "must-not-run"}, session_id="b", turn_id="b2")
+                    self.assertTrue(json.loads(raw)["isError"])
+                    # A reconnect that passes the check admits turns again.
+                    instructions.write_text("First original guide.", encoding="utf-8")
+                    self.assertIsNone(context.hooks["pre_llm_call"](session_id="b", turn_id="b3"))
+            finally:
+                context.unload()
+
+    def test_failed_handoff_reconnect_keeps_the_runtime_blocked(self):
+        with tempfile.TemporaryDirectory(prefix="lcu-hermes-test-") as temporary:
+            home = Path(temporary)
+            instructions = home / "instructions.txt"
+            instructions.write_text("First original guide.", encoding="utf-8")
+            plugin = self.load_plugin(home, "lcu_hermes_failed_handoff")
+            context = FakeContext()
+            try:
+                with patch.dict(os.environ, {"LCU_FIXTURE_INSTRUCTIONS_FILE": str(instructions)}):
+                    plugin.register(context)
+                    self.assertIsNone(context.hooks["pre_llm_call"](session_id="a", turn_id="a1"))
+                    context.hooks["on_session_end"](session_id="a", turn_id="a1")
+                    # The fixture cannot start without its instructions file, so the reconnect fails.
+                    instructions.unlink()
+                    refused = context.hooks["pre_llm_call"](session_id="b", turn_id="b1")
+                    self.assertIn("could not reconnect the original runtime", refused)
+                    # The next session retries the reconnect instead of being admitted to no runtime.
+                    refused = context.hooks["pre_llm_call"](session_id="c", turn_id="c1")
+                    self.assertIn("could not reconnect the original runtime", refused)
+                    raw = context.tools["js"]["handler"]({"code": "must-not-run"}, session_id="c", turn_id="c1")
+                    self.assertTrue(json.loads(raw)["isError"])
+                    instructions.write_text("First original guide.", encoding="utf-8")
+                    self.assertIsNone(context.hooks["pre_llm_call"](session_id="c", turn_id="c2"))
+            finally:
+                context.unload()
+
     def test_bridge_and_cleanup_output_stay_off_the_hermes_terminal(self):
         """The Hermes CLI draws its TUI on the plugin process's stderr: nothing from LCU may land there."""
         with tempfile.TemporaryDirectory(prefix="lcu-hermes-stderr-") as temporary:
@@ -380,7 +524,7 @@ class HermesHarnessTests(unittest.TestCase):
                 "context.hooks['on_session_end'](session_id='cleanup-once', turn_id='turn-1')\n"
                 "retried = context.hooks['pre_llm_call'](session_id='cleanup-once', turn_id='turn-2')\n"
                 "context.unload()\n"
-                "print(json.dumps({'retried': 'Original CUA initialization guide.' in retried}))\n"
+                "print(json.dumps({'retried': retried is None}))\n"
             )
             env = {**os.environ, "LCU_DIAGNOSTIC_LOG": "0",
                    "NODE_OPTIONS": f"--import={flood.as_uri()}"}

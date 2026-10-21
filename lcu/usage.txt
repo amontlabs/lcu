@@ -1,7 +1,7 @@
 Usage: lcu [--chrome] [--audio] [--mcp-discovery-compat]
        lcu setup OPTIONS
        lcu browser install
-       lcu browser status
+       lcu browser status [--browser FAMILY]
        lcu apps [list|allow APP|revoke APP] [--json]   (macOS)
        lcu cross-turn [status|on|off] [--json] [--unattended]
        lcu origins [list [--session ID] [--json]]

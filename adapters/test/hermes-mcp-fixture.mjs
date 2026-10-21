@@ -1,10 +1,12 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 const server = new Server({ name: 'hermes-original-cua-fixture', version: '1' },
-  { capabilities: { tools: {} }, instructions: 'Original CUA initialization guide.' });
+  { capabilities: { tools: {} }, instructions: process.env.LCU_FIXTURE_INSTRUCTIONS_FILE
+    ? readFileSync(process.env.LCU_FIXTURE_INSTRUCTIONS_FILE, 'utf8')
+    : 'Original CUA initialization guide.' });
 const record = value => process.env.LCU_FIXTURE_LOG && appendFileSync(process.env.LCU_FIXTURE_LOG, `${JSON.stringify(value)}\n`);
 let failCleanupOnce = true;
 

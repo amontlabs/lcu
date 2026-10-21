@@ -181,3 +181,61 @@ test('the lifecycle wrapper replaces only the original Sky service; a custom Sky
   assert.throws(() => configureMacosLifecycle(r.root, r.runtime, { CUA_REPL_ENABLED_SURFACES: 'computer',
     NODE_REPL_TRUSTED_SERVICES: JSON.stringify({ sky: 'custom/sky/service' }) }), /custom Sky trusted-service/);
 });
+
+// What the original launcher, node_repl and the apps they start add to the environment a parent LCU passed on.
+const downstream = (env) => ({ ...env, NODE_REPL_JS_BANNER: 'parent banner', NODE_REPL_TOOL_OVERRIDES: '{"js":{}}',
+  NODE_REPL_UNTRUSTED_ENV_ALLOWLIST: [env.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST, 'CUA_REPL_ENABLED_SURFACES'].filter(Boolean).join(','),
+  CUA_REPL_ENABLED_SURFACES: 'browser,computer', __CFBundleIdentifier: 'com.example.launched' });
+
+test('a nested lcu re-derives what a parent LCU passed on and keeps the caller’s own settings', async (t) => {
+  const parent = macRelease(t);
+  const home = userInfo().homedir;
+  const { env: passed } = await supervised(t, parent, { HOME: home, LCU_LOG_DIR: '/caller/logs', CLAUDE_CODE_SESSION_ID: 'parent',
+    CLAUDE_CODE_MESSAGING_TOKEN: 'parent-secret', LAUNCHED_BY: 'parent' });
+  assert.ok(!('CLAUDE_CODE_MESSAGING_TOKEN' in passed) && !passed.LCU_PARENT_ENV.includes('parent-secret'), 'not even in the record');
+  // An app the parent's runtime launched starts an agent whose user exports their own settings.
+  const nested = macRelease(t);
+  const { status, env } = await supervised(t, nested, { ...downstream(passed), LCU_TEST_OUT: nested.out,
+    LCU_NODE_REPL_SANDBOX: 'host', CODEX_HOME: '/chosen/codex' });
+  assert.equal(status, 0);
+  assert.equal(JSON.parse(env.NODE_REPL_TRUSTED_SERVICES).sky, join(nested.root, 'lcu/macos_sky_service.mjs'));
+  assert.equal(env.LCU_MAC_SKY_SERVICE_PATH, join(nested.runtime, 'lib/node_modules/@oai/sky/dist/project/cua/sky_js/src/service.js'));
+  assert.equal(env.SKY_CUA_SERVICE_PATH, join(nested.runtime, 'lib/node_modules/@oai/sky/Codex Computer Use.app'));
+  assert.equal(env.NODE_REPL_NODE_PATH, join(nested.runtime, 'bin/node'));
+  assert.equal(env.CUA_REPL_ENABLED_SURFACES, 'computer', 'surfaces follow this launch, not the parent’s runtime');
+  assert.notEqual(env.NODE_REPL_REQUEST_META, passed.NODE_REPL_REQUEST_META, 'a fresh connection identity');
+  assert.notEqual(env.LCU_MAC_LIFETIME_SOCKET, passed.LCU_MAC_LIFETIME_SOCKET);
+  for (const name of ['NODE_REPL_JS_BANNER', 'NODE_REPL_TOOL_OVERRIDES']) assert.ok(!(name in env), name);
+  assert.ok(!env.NODE_REPL_TRUSTED_CODE_PATHS.split(':').includes(join(parent.root, 'lcu')));
+  assert.ok(!env.PATH.split(':').includes(join(parent.runtime, 'bin')));
+  assert.deepEqual([env.LCU_LOG_DIR, env.LCU_NODE_REPL_SANDBOX, env.CODEX_HOME, env.LAUNCHED_BY, env.__CFBundleIdentifier],
+    ['/caller/logs', 'host', '/chosen/codex', 'parent', 'com.example.launched']);
+  assert.ok(!('CLAUDE_CODE_SESSION_ID' in env));
+});
+
+test('an environment from an LCU without the parent record is re-derived too', async (t) => {
+  const nested = macRelease(t);
+  const old = '/Users/fixture/.local/share/lcu/releases/0.11.7-6ecb09409274';
+  const observed = { HOME: userInfo().homedir, LCU_LOG_DIR: '/caller/logs',
+    NODE_REPL_TRUSTED_SERVICES: JSON.stringify({ sky: `${old}/lcu/macos_sky_service.mjs` }),
+    NODE_REPL_TRUSTED_CODE_PATHS: `${old}/lcu:/fixture/.codex`, NODE_REPL_REQUEST_META: '{"x-codex-turn-metadata":{"session_id":"lcu-old"}}',
+    NODE_REPL_NODE_PATH: '/old/node', NODE_REPL_NODE_MODULE_DIRS: '/old/modules', NODE_REPL_TOOL_OVERRIDES: '{}',
+    NODE_REPL_UNTRUSTED_ENV_ALLOWLIST: 'CUA_REPL_ENABLED_SURFACES', NODE_REPL_JS_BANNER: 'old', NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS: '1000',
+    NODE_REPL_DISABLE_ANALYTICS: '1', LCU_MAC_LIFETIME_SOCKET: '/private/tmp/lcu-ml-old/lifetime.sock', LCU_MAC_SERVICE_LOCK: '/old.lock',
+    LCU_MAC_SKY_SERVICE_PATH: '/old/service.js', LCU_MAC_SKY_CLIENT_PATH: '/old/client.js', SKY_CUA_SERVICE_PATH: '/old/helper.app',
+    CUA_REPL_ENABLED_SURFACES: 'browser,computer', CUA_REPL_BROWSER_ENV: 'codex-app', CUA_REPL_NODE_REPL_PATH: '/old/node_repl',
+    CODEX_CLI_PATH: '/old/codex', BROWSER_USE_CODEX_APP_VERSION: 'old', BROWSER_USE_TINYSKY_ENABLED: '1' };
+  const { status, env } = await supervised(t, nested, observed);
+  assert.equal(status, 0);
+  assert.equal(JSON.parse(env.NODE_REPL_TRUSTED_SERVICES).sky, join(nested.root, 'lcu/macos_sky_service.mjs'));
+  assert.deepEqual([env.SKY_CUA_SERVICE_PATH, env.CODEX_CLI_PATH, env.BROWSER_USE_CODEX_APP_VERSION, env.CUA_REPL_ENABLED_SURFACES],
+    [join(nested.runtime, 'lib/node_modules/@oai/sky/Codex Computer Use.app'), nested.codex, VERSION, 'computer']);
+  assert.ok(!('NODE_REPL_JS_BANNER' in env) && !env.NODE_REPL_TRUSTED_CODE_PATHS.includes(old));
+  assert.equal(env.LCU_LOG_DIR, '/caller/logs');
+});
+
+test('without a parent LCU, a caller’s custom Sky service is still refused', async (t) => {
+  const r = macRelease(t);
+  await assert.rejects(supervised(t, r, { HOME: userInfo().homedir,
+    NODE_REPL_TRUSTED_SERVICES: JSON.stringify({ sky: '/custom/lcu/macos_sky_service.mjs' }) }), /custom Sky trusted-service/);
+});

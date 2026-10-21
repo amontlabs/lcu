@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { host as doctorHost } from '../../lcu/doctor.mjs';
-import { environment, main, paths } from '../../lcu/runtime.mjs';
+import { environment, main, markDerived, paths, PARENT_ENV } from '../../lcu/runtime.mjs';
 import {
   PACKAGE_NAME, PACKAGE_PUBLISHER, WINDOWS_REQUIRED_FILES, applicationInventory, applicationStamps, canonicalJson, inventoryRecord,
   inventorySha256, registeredPackage, resolveInstalledWindowsApp, validateWindowsAppTree,
@@ -173,6 +173,18 @@ test('the managed app supplies the original Windows paths and environment', { sk
   assert.equal(env.PATH, `${join(r.runtime, 'bin')};C:\\Windows`);
   assert.ok(!('Path' in env));
   assert.equal(env.BROWSER_USE_CODEX_APP_VERSION, VERSION);
+});
+
+test('a nested Windows lcu restores the caller’s Path and derives the rest again', { skip: posixOnly('the managed-copy fixture stands in sh scripts for node.exe') }, (t) => {
+  const r = windowsRelease(t);
+  const selected = paths(r.root);
+  const caller = { USERPROFILE: 'C:\\fixture', Path: 'C:\\Windows' };
+  const passed = markDerived(caller, environment(r.root, selected, { env: caller }));
+  const nested = environment(r.root, selected, { env: { ...passed, SKY_CUA_NATIVE_PIPE: '1', NODE_REPL_JS_BANNER: 'parent' } });
+  assert.equal(nested.PATH, `${join(r.runtime, 'bin')};C:\\Windows`);
+  assert.ok(!('Path' in nested) && !('NODE_REPL_JS_BANNER' in nested) && !(PARENT_ENV in nested));
+  assert.equal(nested.SKY_CUA_NATIVE_PIPE, '1', 'a value the parent did not derive is the caller’s');
+  assert.equal(nested.CODEX_HOME, 'C:\\fixture\\.codex');
 });
 
 async function launchWindows(t, r, argv, settings = {}) {

@@ -22,6 +22,12 @@ LOGGER = logging.getLogger(__name__)
 BRIDGE_STDERR_CHARS = 512
 # Lines of bridge stderr passed to Hermes' log per bridge; the rest is read and dropped.
 BRIDGE_STDERR_LINES = 200
+# Hermes system prompt section carrying the original initialization instructions. Hermes renders it
+# once per new session and keeps its bytes for that session; a longer section is skipped, never cut.
+# Hermes adds sections in ID order until its 8,000-character total for all plugins is used, so the
+# leading "0" (before any ID starting with a letter) keeps this short section from being skipped.
+SYSTEM_PROMPT_SECTION_ID = "0-lcu-cua.instructions"
+SYSTEM_PROMPT_SECTION_MAX_CHARS = 4000
 
 
 def _warn(message: str, *args: Any) -> None:
@@ -301,17 +307,65 @@ def register(ctx) -> None:
         bridge.close()
         raise
 
+    # Like official Codex, the model gets only the original server's instructions and tool
+    # descriptors. The descriptors reach it as the registered tool schemas below; the instructions
+    # go once into each session's system prompt, not into every user message.
+    instructions = connected.get("instructions")
+    context_text = ""
+    if isinstance(instructions, str) and instructions.strip():
+        context_text = ("Use the original installed Computer Use runtime through these LCU tools.\n\n"
+                        "Original CUA MCP initialization instructions:\n" + instructions).strip()
+    register_section = getattr(ctx, "register_system_prompt_section", None)
+    # Without the section API, or when Hermes would skip the section as too long, the text is added
+    # to the first message of each session instead (Hermes replays it from there on later turns).
+    inject_on_first_turn = False
+    if context_text:
+        if callable(register_section) and len(context_text) <= SYSTEM_PROMPT_SECTION_MAX_CHARS:
+            try:
+                register_section(SYSTEM_PROMPT_SECTION_ID, context_text, position="after_memory",
+                                 max_chars=SYSTEM_PROMPT_SECTION_MAX_CHARS)
+            except BaseException:
+                bridge.close()
+                raise
+        else:
+            inject_on_first_turn = True
+            if callable(register_section):
+                _warn("LCU original instructions (%d characters) exceed Hermes' %d-character system prompt "
+                      "section limit; they are added to the first message of each session instead",
+                      len(context_text), SYSTEM_PROMPT_SECTION_MAX_CHARS)
+
     active_turns: dict[str, str] = {}
     pending_cleanups: dict[tuple[str, str], str] = {}
     turn_lock = threading.Lock()
     owner_session: str | None = None
+    # Set when a handoff reconnect failed or found changed descriptors or instructions: the bridge then
+    # holds no runtime or a changed one, so every session, the previous owner included, must reconnect first.
+    handoff_refused = False
+    # Fallback sessions whose first turn was refused before receiving the instructions.
+    uninstructed_sessions: set[str] = set()
     active_tool_identity = contextvars.ContextVar("lcu_hermes_active_tool_identity", default=None)
 
-    def inject_original_context(session_id="", turn_id="", **kwargs):
-        nonlocal connected, owner_session
+    def inject_original_context(session_id="", turn_id="", is_first_turn=False, **kwargs):
         del kwargs
         if not isinstance(session_id, str) or not session_id or not isinstance(turn_id, str) or not turn_id:
             return "LCU is unavailable for this Hermes turn because the host did not provide exact session and turn IDs."
+        refusal = admit_turn(session_id, turn_id)
+        with turn_lock:
+            first_delivery = inject_on_first_turn and (is_first_turn is True or session_id in uninstructed_sessions)
+            if refusal is not None:
+                # Hermes replays a refused first message without the instructions; send them on
+                # this session's first admitted turn instead.
+                if first_delivery:
+                    uninstructed_sessions.add(session_id)
+                return refusal
+            uninstructed_sessions.discard(session_id)
+        # Lifecycle only: Hermes appends returned text to the user message and replays it on every
+        # later turn, so success returns nothing unless the fallback above is in use.
+        return context_text if first_delivery else None
+
+    def admit_turn(session_id, turn_id):
+        """Make this turn the runtime's active turn, or return why LCU is unavailable for it."""
+        nonlocal connected, owner_session, handoff_refused
         with turn_lock:
             previous_turn = active_turns.get(session_id)
             if previous_turn and previous_turn != turn_id:
@@ -334,31 +388,28 @@ def register(ctx) -> None:
                     pending_cleanups.pop((pending_session, pending_turn), None)
                 except Exception as exc:
                     return f"LCU is unavailable because cleanup for prior turn {pending_turn} failed: {exc}"
-            if owner_session is not None and owner_session != session_id:
+            if handoff_refused or (owner_session is not None and owner_session != session_id):
                 if active_turns:
                     return "LCU is unavailable because another Hermes session still owns the original Computer Use runtime."
                 try:
                     bridge.request("close")
                     reconnected = bridge.request("connect", command=bridge.command)
-                    if reconnected.get("tools") != connected.get("tools"):
-                        return "LCU is unavailable because the original tool descriptors changed during Hermes session handoff."
+                    # The session prompt already holds the instructions; they and the tool
+                    # schemas must stay those of the connected runtime.
+                    if (reconnected.get("tools") != connected.get("tools") or
+                            reconnected.get("instructions") != connected.get("instructions")):
+                        handoff_refused = True
+                        return ("LCU is unavailable because the original tool descriptors or instructions "
+                                "changed during Hermes session handoff.")
                     connected = reconnected
+                    handoff_refused = False
                 except Exception as exc:
                     owner_session = None
+                    handoff_refused = True
                     return f"LCU could not reconnect the original runtime for this Hermes session: {exc}"
             owner_session = session_id
             active_turns[session_id] = turn_id
-        # Like official Codex, the model gets only the original server's
-        # instructions and tool descriptors.
-        descriptors = json.dumps(public, ensure_ascii=False, indent=2)
-        instructions = connected.get("instructions")
-        if not isinstance(instructions, str):
-            instructions = ""
-        return (
-            "Use the original installed Computer Use runtime through these LCU tools.\n\n"
-            "Original CUA MCP initialization instructions:\n" + instructions + "\n\n"
-            "Original public CUA MCP tool descriptors:\n" + descriptors
-        )
+        return None
 
     def on_session_end(session_id="", turn_id="", interrupted=False, failed=False, **kwargs):
         del kwargs

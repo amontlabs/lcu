@@ -4,7 +4,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, un
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { environment, leaveUnusableWorkingDirectory, main, paths } from '../../lcu/runtime.mjs';
+import { environment, inheritedEnvironment, leaveUnusableWorkingDirectory, main, markDerived, paths, PARENT_ENV } from '../../lcu/runtime.mjs';
 import { REPO, linuxApp, override, posixTests, temporary, write, mockWrite } from './fixtures.mjs';
 
 const test = posixTests('the Linux launch path (process.execve, sh stand-ins, POSIX modes)');
@@ -191,6 +191,60 @@ test('caller-supplied service maps are kept verbatim; an explicit original Sky e
   const e = env(r, { NODE_REPL_TRUSTED_SERVICES: JSON.stringify({ sky: '@oai/sky/service', other: '/custom/service.mjs' }) });
   assert.deepEqual(JSON.parse(e.NODE_REPL_TRUSTED_SERVICES), { sky: join(r.root, 'lcu/linux_sky_service.mjs'), other: '/custom/service.mjs' });
   assert.ok('LCU_LINUX_SKY_SERVICE_PATH' in e);
+});
+
+test('a nested Linux lcu wraps the real Codex CLI and Sky service again, not the parent’s shim and wrapper', (t) => {
+  const parent = release(t);
+  shim(parent);
+  inputWrapper(parent);
+  const caller = { HOME: '/fixture', PATH: '/usr/bin:/bin', LCU_LINUX_INPUT_TRANSLATION: 'on' };
+  const passed = markDerived(caller, env(parent, caller));
+  const nested = release(t);
+  const path = shim(nested);
+  inputWrapper(nested);
+  // The original launcher appends to the allowlist downstream; a user then turns the sandbox off.
+  const e = env(nested, { ...passed, NODE_REPL_UNTRUSTED_ENV_ALLOWLIST: `${passed.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST},CUA_REPL_ENABLED_SURFACES`,
+    LCU_NODE_REPL_SANDBOX: 'host' });
+  assert.equal(JSON.parse(e.NODE_REPL_TRUSTED_SERVICES).sky, join(nested.root, 'lcu/linux_sky_service.mjs'));
+  assert.equal(e.LCU_LINUX_SKY_SERVICE_PATH, join(nested.modules, '@oai/sky/dist/project/cua/sky_js/src/service.js'));
+  assert.ok(!('LCU_SANDBOX_SHIM' in e) && e.CODEX_CLI_PATH === join(nested.root, 'app/resources/codex'), 'host mode is the caller’s');
+  assert.equal(e.PATH, `${join(nested.runtime, 'bin')}:/usr/bin:/bin`);
+  assert.equal(e.LCU_LINUX_INPUT_TRANSLATION, 'on');
+  assert.ok(!(PARENT_ENV in e));
+  const sandboxed = env(nested, passed);
+  assert.equal(sandboxed.CODEX_CLI_PATH, path);
+  assert.equal(JSON.parse(sandboxed.LCU_SANDBOX_SHIM).codex, join(nested.root, 'app/resources/codex'));
+  assert.deepEqual(sandboxed.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST.split(','), ['LCU_SANDBOX_SHIM']);
+});
+
+test('Claude Code’s own environment and Anthropic credentials never reach the original runtime', (t) => {
+  const r = release(t);
+  const claude = { CLAUDECODE: '1', CLAUDE_CODE_MESSAGING_TOKEN: 'secret', CLAUDE_CODE_OAUTH_SCOPES: 'user:inference',
+    CLAUDE_CODE_SESSION_ID: 's', CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_PROJECT_DIR: '/project', CLAUDE_AGENT_SDK_VERSION: '1',
+    CLAUDE_PREVIEW_CLASSIFIER_FLOOR: 'x', ANTHROPIC_API_KEY: 'key', ANTHROPIC_AUTH_TOKEN: 'token' };
+  const kept = { HOME: '/fixture', CLAUDE_CONFIG_DIR: '/claude', ANTHROPIC_BASE_URL: 'https://example.invalid', MY_CLAUDE_CODE_NOTE: 'n',
+    LCU_LOG_DIR: '/logs' };
+  const e = env(r, { ...claude, ...kept });
+  for (const name of Object.keys(claude)) assert.ok(!(name in e), name);
+  for (const [name, value] of Object.entries(kept)) assert.equal(e[name], value, name);
+  for (const name of Object.keys(claude)) assert.ok(!(name in env(r, { [name]: 'v' }, { platform: 'darwin' })), `${name} on macOS`);
+});
+
+test('the parent record: caller values stay, changed values are the caller’s, a broken record is dropped', () => {
+  const caller = { CODEX_CLI_PATH: '/host/codex', NODE_REPL_TRUSTED_SERVICES: '{"sky":"/custom/sky.mjs"}', LCU_MAC_CONTROL_SOCKET: '/parent.sock' };
+  const passed = markDerived(caller, { ...caller, CODEX_CLI_PATH: '/shim', CODEX_HOME: '/fixture/.codex', NODE_REPL_NODE_PATH: '/node' });
+  assert.deepEqual(inheritedEnvironment(passed), { CODEX_CLI_PATH: '/host/codex', NODE_REPL_TRUSTED_SERVICES: '{"sky":"/custom/sky.mjs"}' },
+    'the parent caller’s own values; the adapter-private socket is only its own adapter’s');
+  assert.deepEqual(inheritedEnvironment({ ...passed, CODEX_HOME: '/chosen', LCU_MAC_CONTROL_SOCKET: '/own.sock' }),
+    { CODEX_CLI_PATH: '/host/codex', NODE_REPL_TRUSTED_SERVICES: '{"sky":"/custom/sky.mjs"}', CODEX_HOME: '/chosen', LCU_MAC_CONTROL_SOCKET: '/own.sock' });
+  for (const broken of ['not json', '[]', '{"runtime":{}}']) {
+    assert.deepEqual(inheritedEnvironment({ NODE_REPL_NODE_PATH: '/node', [PARENT_ENV]: broken }), { NODE_REPL_NODE_PATH: '/node' });
+  }
+  const unrecorded = { ...passed, LCU_MAC_LIFETIME_SOCKET: '/lifetime.sock', NODE_REPL_REQUEST_META: '{"own":true}' };
+  delete unrecorded[PARENT_ENV];
+  assert.ok(!('NODE_REPL_REQUEST_META' in inheritedEnvironment(unrecorded)), 'without the record a parent launch is the legacy one');
+  const plain = { NODE_REPL_TRUSTED_SERVICES: '{"sky":"/custom/sky.mjs"}', CODEX_CLI_PATH: '/host/codex' };
+  assert.deepEqual(inheritedEnvironment(plain), plain, 'without a parent LCU everything is the caller’s');
 });
 
 test('a tested pair that handles a toolkit natively is not translated for it', (t) => {
