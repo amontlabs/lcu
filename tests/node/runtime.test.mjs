@@ -240,6 +240,9 @@ test('the parent record: caller values stay, changed values are the caller’s, 
   for (const broken of ['not json', '[]', '{"runtime":{}}']) {
     assert.deepEqual(inheritedEnvironment({ NODE_REPL_NODE_PATH: '/node', [PARENT_ENV]: broken }), { NODE_REPL_NODE_PATH: '/node' });
   }
+  const unrecorded = { ...passed, LCU_MAC_LIFETIME_SOCKET: '/lifetime.sock', NODE_REPL_REQUEST_META: '{"own":true}' };
+  delete unrecorded[PARENT_ENV];
+  assert.ok(!('NODE_REPL_REQUEST_META' in inheritedEnvironment(unrecorded)), 'without the record a parent launch is the legacy one');
   const plain = { NODE_REPL_TRUSTED_SERVICES: '{"sky":"/custom/sky.mjs"}', CODEX_CLI_PATH: '/host/codex' };
   assert.deepEqual(inheritedEnvironment(plain), plain, 'without a parent LCU everything is the caller’s');
 });
