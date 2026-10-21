@@ -96,7 +96,95 @@ export function defaultCodexHome(env, windows) {
   return posix.join('HOME' in env ? env.HOME : userInfo().homedir, '.codex');
 }
 
-/** The child environment for the original runtime. `env` is the caller's environment (not modified). */
+/**
+ * Set on the original runtime's environment: what this launcher derived, so that a nested `lcu` started from
+ * that environment derives it again instead of taking it for caller overrides. The original runtime passes its
+ * environment on to the Computer Use service and to the apps that service launches, and an agent started from
+ * such an app starts `lcu` with it. `{runtime: {NAME: value}, derived: {NAME: [value before | null, digest | null]}}`:
+ * `runtime` holds the caller's own variables of the original runtime's families, which the original launcher
+ * also sets and appends to downstream; `derived` holds every other variable this launcher set or removed.
+ */
+export const PARENT_ENV = 'LCU_PARENT_ENV';
+// The original runtime's own variable families: the original launcher and node_repl set and append to them
+// after LCU, so their values downstream do not match what LCU derived.
+const RUNTIME_FAMILY = /^(NODE_REPL|CUA_REPL|BROWSER_USE)_/i;
+// Private between an adapter and the launcher it starts: only that adapter may supply it.
+const ADAPTER_PRIVATE = 'LCU_MAC_CONTROL_SOCKET';
+// LCU 0.11.8 and earlier set no parent record. Their launcher set one of these on its runtime in every launch
+// that can reach an app; the other names are what those versions derived outside the runtime's families.
+const LEGACY_SIGNS = ['LCU_MAC_LIFETIME_SOCKET', 'LCU_WRE_LIFETIME_PIPE', SHIM_CONFIG_ENV, 'LCU_LINUX_SKY_SERVICE_PATH'];
+const LEGACY_DERIVED = [...LEGACY_SIGNS, 'LCU_MAC_SERVICE_LOCK', 'LCU_MAC_SKY_SERVICE_PATH', 'LCU_MAC_SKY_CLIENT_PATH',
+  'LCU_LINUX_INPUT_TOOLKITS', 'LCU_WRE_SKY_SERVICE_PATH', 'SKY_CUA_SERVICE_PATH', 'SKY_CUA_NATIVE_PIPE',
+  'SKY_CUA_NATIVE_PIPE_DIRECTORY', 'CODEX_CLI_PATH'];
+
+// A short fingerprint, not a secret: it only tells whether a value is still the one this launcher derived
+// (FNV-1a over UTF-16 code units, and the length).
+function digest(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+  return `${value.length}:${(hash >>> 0).toString(16)}`;
+}
+const plainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const own = (env, key) => (Object.hasOwn(env, key) ? env[key] : null);
+
+/**
+ * The caller's environment without what a parent LCU launcher derived for its runtime (see PARENT_ENV). A
+ * derived variable whose value has changed since then was set by the caller and stays; the original runtime's
+ * families return to the parent caller's own values. `source` is not modified.
+ */
+export function inheritedEnvironment(source) {
+  const env = { ...source };
+  const family = () => Object.keys(env).filter((key) => RUNTIME_FAMILY.test(key));
+  if (!Object.hasOwn(env, PARENT_ENV)) {
+    if (LEGACY_SIGNS.some((key) => Object.hasOwn(env, key))) for (const key of [...family(), ...LEGACY_DERIVED]) delete env[key];
+    return env;
+  }
+  let record;
+  try {
+    record = JSON.parse(env[PARENT_ENV]);
+  } catch {
+    record = null;
+  }
+  delete env[PARENT_ENV];
+  if (!plainObject(record) || !plainObject(record.runtime) || !plainObject(record.derived)) return env;
+  for (const key of family()) delete env[key];
+  for (const [key, value] of Object.entries(record.runtime)) {
+    if (RUNTIME_FAMILY.test(key) && typeof value === 'string') env[key] = value;
+  }
+  for (const [key, entry] of Object.entries(record.derived)) {
+    if (RUNTIME_FAMILY.test(key) || !Array.isArray(entry) || entry.length !== 2) continue;
+    const [before, derived] = entry;
+    const current = own(env, key);
+    if ((current === null ? null : digest(current)) !== derived) continue;
+    if (typeof before === 'string') env[key] = before;
+    else delete env[key];
+  }
+  return env;
+}
+
+/** Record in `env`, the original runtime's environment, how this launcher derived it from `base` (see PARENT_ENV). */
+export function markDerived(base, env) {
+  const runtime = {};
+  const derived = {};
+  for (const key of new Set([...Object.keys(base), ...Object.keys(env)])) {
+    if (key === PARENT_ENV) continue;
+    const before = own(base, key);
+    if (RUNTIME_FAMILY.test(key)) {
+      if (before !== null) runtime[key] = before;
+      continue;
+    }
+    const after = own(env, key);
+    if (key === ADAPTER_PRIVATE && after !== null) derived[key] = [null, digest(after)];
+    else if (before !== after) derived[key] = [before, after === null ? null : digest(after)];
+  }
+  env[PARENT_ENV] = JSON.stringify({ runtime, derived });
+  return env;
+}
+
+/**
+ * The child environment for the original runtime. `env` is the caller's environment (not modified); what a
+ * parent LCU derived in it is derived again (see inheritedEnvironment).
+ */
 export function environment(root, resolved, { chrome = false, audio = false, platform, env: source = process.env } = {}) {
   resolved ??= paths(root);
   const { resources, runtime, metadata } = resolved;
@@ -107,7 +195,7 @@ export function environment(root, resolved, { chrome = false, audio = false, pla
   const node = join(runtime, windows ? 'bin/node.exe' : 'bin/node');
   const nodeRepl = join(runtime, windows ? 'bin/node_repl.exe' : 'bin/node_repl');
   const codex = locateCodexTools(resources, { windows }).cli;
-  const env = { ...source };
+  const env = inheritedEnvironment(source);
   // Windows variable names are case-insensitive: PATH may arrive as `Path`; keep one spelling of it.
   const existingPath = windows ? Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? ''
     : env.PATH ?? '/usr/bin:/bin';
@@ -443,21 +531,22 @@ export async function main(root, argv) {
   // A launch reuses a recorded deep signature check (macOS) or inventory match (Windows); `lcu doctor` always
   // checks in full.
   const resolved = paths(root, descriptor, { reuseRecordedChecks: !doctorArgs });
-  const env = environment(root, resolved, { chrome: count('--chrome') === 1, audio: count('--audio') === 1, platform });
+  const base = inheritedEnvironment(process.env);
+  const env = environment(root, resolved, { chrome: count('--chrome') === 1, audio: count('--audio') === 1, platform, env: base });
   if (doctorArgs) return (await command('doctor')).main(root, doctorArgs, { resolved, env });
-  if (platform === 'windows') return launchWindows(root, resolved, env, discoveryCompat);
+  if (platform === 'windows') return launchWindows(root, resolved, base, env, discoveryCompat);
   const launch = [env.NODE_REPL_NODE_PATH, join(resolved.runtime, 'lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs')];
   if (discoveryCompat) replyToServerDiscover();
   if (platform === 'darwin') {
     const client = configureMacosLifecycle(root, resolved.runtime, env);
-    if (client) return launchMacos(client, launch, env);
+    if (client) return launchMacos(client, launch, base, env);
   }
   if (platform === 'linux') leaveUnusableWorkingDirectory();
-  process.execve(join(resolved.runtime, 'bin/node'), launch, env);
+  process.execve(join(resolved.runtime, 'bin/node'), launch, markDerived(base, env));
   return 0;
 }
 
-async function launchMacos(client, launch, env) {
+async function launchMacos(client, launch, base, env) {
   const { startOriginalHost } = await import('./macos_host.mjs');
   // Always decided here, never inherited: only the default socket location is known, and the original client
   // builds its socket path from $HOME (Node's os.homedir), so an account whose HOME is elsewhere is talking to a
@@ -469,13 +558,13 @@ async function launchMacos(client, launch, env) {
   const host = await startOriginalHost({ client, env, controlAddress: env.LCU_MAC_CONTROL_SOCKET });
   env.LCU_MAC_LIFETIME_SOCKET = host.address;
   try {
-    return await runChild(launch, env);
+    return await runChild(launch, markDerived(base, env));
   } finally {
     await host.stop();
   }
 }
 
-async function launchWindows(root, resolved, env, discoveryCompat) {
+async function launchWindows(root, resolved, base, env, discoveryCompat) {
   const { startOriginalHost, stopOriginalHost } = await import('./windows_host.mjs');
   const sky = '@oai/sky/dist/project/cua/sky_js/src';
   const original = (relative) => component(resolved.app, `app/resources/cua_node/bin/node_modules/${relative}`);
@@ -490,7 +579,7 @@ async function launchWindows(root, resolved, env, discoveryCompat) {
     env.LCU_WRE_LIFETIME_PIPE = host.lifetime;
     env.LCU_WRE_SKY_SERVICE_PATH = original(`${sky}/service.js`);
     overrideTrustedService(env, join(root, 'lcu-host/windows-sky-service.mjs'), ';', 'Windows', { computerGated: true });
-    return await runChild(launch, env);
+    return await runChild(launch, markDerived(base, env));
   } finally {
     await stopOriginalHost(host.child);
   }
