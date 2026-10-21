@@ -5,6 +5,7 @@ import { accessSync, chmodSync, constants, cpSync, lstatSync, mkdirSync, mkdtemp
   readlinkSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import * as nodePath from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -488,7 +489,8 @@ function checkFamily(browsers, family) {
 
 /**
  * Report setup from the original diagnostics (not a connection test); resolves true when ready. Without `family`,
- * reports every browser family in which the original diagnostic finds the extension installed.
+ * checks each browser family whose user data directory exists (resolved by the original diagnostics module) and
+ * reports every family where the extension is installed and every check that failed.
  */
 export async function status(root, family) {
   const selected = host.paths(root);
@@ -511,20 +513,28 @@ export async function status(root, family) {
     checkFamily(browsers, family);
     return report(root, selected, plugin, browsers.find((item) => item.browserFamily === family), check);
   }
-  const checked = browsers.map((browser) => [browser, check('check-extension-installed.js', browser.browserFamily)]);
-  const found = checked.filter(([, extension]) => extension.installed === true);
-  if (!found.length) {
-    // The original diagnostic reports a missing browser and a failed check alike, so show each browser's error.
-    say(`ChatGPT extension: not found in ${listed(browsers.map((item) => item.shortDisplayName))}.`,
-      ...checked.filter(([, extension]) => extension.problem).map(([browser, extension]) =>
-        `  ${browser.shortDisplayName} could not be checked: ${extension.problem}`),
-      '  Install the official extension in the browser profile you want to use. Check one browser in detail with ' +
-      `\`lcu browser status --browser ${browsers.map((item) => item.browserFamily).join('|')}\`.`);
-    return false;
-  }
+  // The original check fails the same way for a browser that is not installed and for a real failure, so it only
+  // runs where the original module's user data directory (or its preferences override) exists.
+  const diagnostics = await import(pathToFileURL(join(plugin, 'scripts/chromium-browser-diagnostics.mjs')).href);
+  const system = host.system();
+  const platform = { Darwin: 'darwin', Windows: 'win32' }[system] ?? 'linux';
+  const present = (browser) => Boolean(env.CODEX_CHROMIUM_PREFERENCES_PATH ??
+    (browser.browserFamily === 'chrome' ? env.CODEX_CHROME_PREFERENCES_PATH : undefined)) ||
+    isDirectory(diagnostics.resolveBrowserUserDataDirectory({ browser, env, homedir: homeOf(env, system), path: nodePath, platform }));
+  const checked = browsers.filter(present).map((browser) => [browser, check('check-extension-installed.js', browser.browserFamily)]);
   let ready = false;
-  for (const [browser, extension] of found) ready = report(root, selected, plugin, browser, check, extension) || ready;
-  return ready;
+  for (const [browser, extension] of checked) {
+    if (extension.installed === true) ready = report(root, selected, plugin, browser, check, extension) || ready;
+    else if (extension.problem) say(`${browser.shortDisplayName} extension: could not check. ${extension.problem}`);
+  }
+  if (checked.some(([, extension]) => extension.installed === true)) return ready;
+  const absent = checked.filter(([, extension]) => !extension.problem).map(([browser]) => browser.shortDisplayName);
+  const names = listed(browsers.map((item) => item.shortDisplayName));
+  if (!checked.length) say(`ChatGPT extension: no ${names} user data found.`);
+  else if (absent.length) say(`ChatGPT extension: not found in ${listed(absent)}.`);
+  say('  Install the official extension in the browser profile you want to use. Check one browser in detail with ' +
+    `\`lcu browser status --browser ${browsers.map((item) => item.browserFamily).join('|')}\`.`);
+  return false;
 }
 
 /** One browser family's report; `known` is its extension diagnostic when already run. Returns true when ready. */

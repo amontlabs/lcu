@@ -25,6 +25,13 @@ export async function install() {
   if (process.env.FIXTURE_FAIL) { console.error(process.env.FIXTURE_FAIL); process.exit(3); }
 }
 `;
+// Stands in for the original plugin's chromium-browser-diagnostics.mjs: the Linux user data directory under HOME.
+const DIAGNOSTICS = `export function resolveBrowserUserDataDirectory({ browser, homedir, path }) {
+  return path.join(homedir, ...browser.linux.userDataDirectorySegments);
+}
+`;
+const family = (name, directory) => ({ browserFamily: name, shortDisplayName: name[0].toUpperCase() + name.slice(1),
+  extensionManagementUrl: `${name}://extensions`, storeUrl: 'https://store.example/chatgpt', linux: { userDataDirectorySegments: ['.config', directory] } });
 
 function fixture(t) {
   const base = temporary(t);
@@ -35,8 +42,8 @@ function fixture(t) {
   const plugin = join(resources, 'plugins/openai-bundled/plugins/chrome');
   write(join(plugin, 'scripts/installManifest.mjs'), INSTALLER);
   write(join(plugin, `extension-host/linux/${ARCH}/extension-host`), '#!/bin/sh\n', 0o755);
-  write(join(plugin, 'scripts/extension-ids.json'), JSON.stringify({ browserDiagnostics: [{ browserFamily: 'chrome', shortDisplayName: 'Chrome',
-    extensionManagementUrl: 'chrome://extensions', storeUrl: 'https://store.example/chatgpt' }] }));
+  write(join(plugin, 'scripts/chromium-browser-diagnostics.mjs'), DIAGNOSTICS);
+  write(join(plugin, 'scripts/extension-ids.json'), JSON.stringify({ browserDiagnostics: [family('chrome', 'google-chrome')] }));
   const root = join(base, 'prefix/releases/release');
   mkdirSync(join(root, 'lcu'), { recursive: true });
   symlinkSync(app, join(root, 'app'));
@@ -186,32 +193,40 @@ test('status reports the extension and the connector without claiming a live con
   assert.match(seen.out, /could not check\. diagnostic broke/);
   seen = await output(t);
   assert.equal(await browser.status(f.root), false);
-  assert.match(seen.out, /ChatGPT extension: not found in Chrome\.\n  Chrome could not be checked: diagnostic broke\n.*`lcu browser status --browser chrome`/);
+  assert.match(seen.out, /^Chrome extension: could not check\. diagnostic broke\n  Install .*`lcu browser status --browser chrome`/);
+  assert.doesNotMatch(seen.out, /not found/);
   override(t, browser.host, 'run', () => result(0, JSON.stringify({ installed: false, enabled: false })));
   seen = await output(t);
   assert.equal(await browser.status(f.root), false);
   assert.match(seen.out, /ChatGPT extension: not found in Chrome\.\n  Install/);
+  rmSync(join(f.home, '.config/google-chrome'), { recursive: true });
+  seen = await output(t);
+  assert.equal(await browser.status(f.root), false);
+  assert.match(seen.out, /^ChatGPT extension: no Chrome user data found\.\n  Install/);
 });
 
-test('status accepts every browser family the app lists and, without --browser, reports those with the extension', async (t) => {
+test('status accepts every browser family the app lists and, without --browser, checks only installed ones', async (t) => {
   const f = fixture(t);
   write(join(f.plugin, 'scripts/extension-ids.json'), JSON.stringify({ browserDiagnostics: ['chrome', 'edge', 'brave', 'opera', 'vivaldi']
-    .map((family) => ({ browserFamily: family, shortDisplayName: family[0].toUpperCase() + family.slice(1),
-      extensionManagementUrl: `${family}://extensions`, storeUrl: 'https://store.example/chatgpt' })) }));
+    .map((name) => family(name, name === 'chrome' ? 'google-chrome' : name)) }));
   await browser.install(f.root);
+  for (const name of ['brave', 'vivaldi']) mkdirSync(join(f.home, '.config', name));
   const asked = [];
   override(t, browser.host, 'run', (command, args) => {
     const family = args[args.indexOf('--browser') + 1];
     asked.push(`${family} ${args[0].split('/').at(-1)}`);
     if (args[0].endsWith('check-native-host-manifest.js')) return result(0, JSON.stringify({ correct: true, manifestPath: f.manifest() }));
     if (family === 'brave') return result(0, JSON.stringify({ installed: true, enabled: true, selectedProfileDirectory: 'Default' }));
+    if (family === 'chrome') return result(1, JSON.stringify({ installed: false, enabled: false }));
     return result(1, '', 'Could not find a browser profile directory with Preferences.');
   });
   let seen = await output(t);
   assert.equal(await browser.status(f.root), true);
-  assert.match(seen.out, /^Brave extension: enabled in Default\.\nBrave connector: configured for this LCU installation\./);
-  assert.doesNotMatch(seen.out, /Chrome/);
-  assert.deepEqual(asked.filter((item) => item.endsWith('check-native-host-manifest.js')), ['brave check-native-host-manifest.js']);
+  assert.match(seen.out, /^Brave extension: enabled in Default\.\nBrave connector: configured for this LCU installation\./m);
+  assert.match(seen.out, /^Vivaldi extension: could not check\. Could not find a browser profile directory with Preferences\.$/m);
+  assert.doesNotMatch(seen.out, /Chrome|Edge|Opera|not found/);
+  assert.deepEqual(asked, ['chrome check-extension-installed.js', 'brave check-extension-installed.js',
+    'vivaldi check-extension-installed.js', 'brave check-native-host-manifest.js']);
   for (const family of ['brave', 'opera', 'vivaldi']) {
     seen = await output(t);
     assert.equal(await browser.main(f.root, ['status', '--browser', family]), family === 'brave' ? 0 : 1);
