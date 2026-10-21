@@ -1,5 +1,5 @@
 // One fake for every external program LCU runs during setup: the app's own `codex` (also its `app-server`
-// config writer) and the harness CLIs (codex, claude, pi, omp, hermes) on the account PATH. Each call is
+// config writer) and the harness CLIs (codex, claude, pi, omp, hermes, dsh) on the account PATH. Each call is
 // appended to RECORDS/commands.jsonl; NAME and RECORDS are substituted when the fake is installed.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

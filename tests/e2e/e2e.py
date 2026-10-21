@@ -240,7 +240,7 @@ class Sandbox:
             os.chown(path, self.account.uid, self.account.gid)
         self.home.chmod(0o700)
         fake = make_fake_app(self.app, self.records, node)
-        for name in ('codex', 'claude', 'pi', 'omp', 'hermes'):
+        for name in ('codex', 'claude', 'pi', 'omp', 'hermes', 'dsh'):
             write(self.fakebin / name, fake(name), 0o755)
         self.guard = self.root / 'guard' if guard else None
         if guard:
@@ -437,6 +437,35 @@ EXPECTED_ADDITIONS = (
     # `lcu status --json` reports the cross-turn Computer Use setting, off by default (docs/releases/0.11.0.md).
     ('/status-json-body/cross_turn', {'enabled': False, 'source': None}),
 )
+
+
+# Harnesses NEW supports and an older OLD does not: when OLD's setup data never mentions one, NEW's registration
+# of it is not a difference. Only its own install command (`dsh plugin --profile P add DIR` for a DIR under its
+# bundle root) and the files under that root are set aside; anything else still shows.
+NEW_HARNESSES = {
+    # DeepSeek Harness (docs/ADAPTERS.md#deepseek-harness): `--agent all` includes it.
+    'dsh': '.local/share/lcu/dsh/',
+}
+
+
+def new_harness_command(entry, tool, root):
+    """Whether a normalized command record is the harness's own `plugin --profile P add DIR` under root."""
+    argv = entry.get('argv', [])
+    return (entry.get('tool') == tool and len(argv) == 5 and argv[:2] == ['plugin', '--profile'] and argv[3] == 'add'
+            and isinstance(argv[4], str) and argv[4].startswith(f'<SB>/home/{root}'))
+
+
+def expected_new_harnesses(old, new):
+    """NEW setup data without the registrations of NEW_HARNESSES that OLD's data never mentions."""
+    for tool, root in NEW_HARNESSES.items():
+        files = f'HOME/{root}'
+        if any(entry.get('tool') == tool for case in old.values() for entry in case['commands']) or \
+                any(key.startswith(files) for case in old.values() for key in case['files']):
+            continue
+        new = {name: {**case, 'commands': [entry for entry in case['commands'] if not new_harness_command(entry, tool, root)],
+                      'files': {key: value for key, value in case['files'].items() if not key.startswith(files)}}
+               for name, case in new.items()}
+    return new
 
 
 # The Claude Code `lcu-approve` mod setup copied into HOME. `lcu update` refreshes it from the new release
@@ -924,7 +953,10 @@ class Run:
             finally:
                 sandbox.close()
                 sandbox.root.rename(sandbox.root.with_name(f'{label}-{impl.label}'))
-        return diff(expected_renames(results[0]) if old.archive != new.archive else results[0], results[1])
+        if old.archive == new.archive:
+            return diff(results[0], results[1])
+        renamed = expected_renames(results[0])
+        return diff(renamed, expected_new_harnesses(renamed, results[1]) if check == 'setup' else results[1])
 
     def check(self, name, old, new):
         """(status, lines): status is PASS, FAIL or SKIP."""
