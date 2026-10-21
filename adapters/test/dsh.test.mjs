@@ -41,6 +41,7 @@ function host({ questions } = {}) {
       turns.set(sessionId, { openTurnStartSeq: null, lastTurn: turn });
       listeners.get('session/event')({ id: sessionId }, { type: 'turn/end', data: { turn, reason: { kind } } });
     },
+    disposeSession(sessionId) { listeners.get('session/disposed')({ id: sessionId }); },
     dispose: () => Promise.all(effects.map(dispose => dispose())),
     async call(tool, sessionId, args, { callId = 'dsh-call', signal = new AbortController().signal, model } = {}) {
       return tools.get(tool).options.call(args, { agent: agent(sessionId, model), callId, signal });
@@ -164,6 +165,28 @@ test('a failed DSH turn cleanup stays pending, blocks the next turn until it suc
     dsh.startTurn('fail-session', 2);
     await assert.rejects(dsh.call('js', 'fail-session', { code: 'blocked' }), /still finishing the previous turn/);
     assert.equal(entries().filter(entry => entry.args?.code === 'blocked').length, 0);
+  });
+});
+
+test('a disposed DSH session keeps a failed turn cleanup and retries it on a later call before dropping it', async () => {
+  await withPlugin({}, async (dsh, entries, until) => {
+    dsh.startTurn('fail-once-session', 1);
+    await dsh.call('js', 'fail-once-session', { code: 'first' });
+    dsh.disposeSession('fail-once-session');
+    await until(() => dsh.warnings.length === 1);
+    assert.match(dsh.warnings[0], /LCU turn cleanup is pending: Original CUA turn cleanup failed: cleanup failed once/);
+    dsh.startTurn('other-session', 1);
+    await dsh.call('js', 'other-session', { code: 'second' });
+    await until(list => list.length === 4);
+    // Once the retry succeeds the session is dropped: a later call retries nothing.
+    await dsh.call('js', 'other-session', { code: 'third' });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const list = entries();
+    const turnId = list[0].meta['x-codex-turn-metadata'].turn_id;
+    assert.deepEqual(list.filter(entry => entry.name === 'js').map(entry => entry.args.code), ['first', 'second', 'third']);
+    assert.deepEqual(list.filter(entry => entry.name === 'turn_ended').map(entry =>
+      [entry.args.session_id, entry.args.turn_id, entry.args.hook_event_name]),
+    [['fail-once-session', turnId, 'Interrupt'], ['fail-once-session', turnId, 'Interrupt']]);
   });
 });
 

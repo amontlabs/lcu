@@ -71,7 +71,7 @@ export async function apply(ctx, config = {}, deps = {}) {
   if (typeof createMcpToolDefinition !== 'function') {
     throw new Error('LCU DSH plugin: load it through the bundle `lcu setup --agent dsh` generates');
   }
-  // Session id -> { active: {turn, turnId}, pending: {turnId, event}, cleaning: Promise }.
+  // Session id -> { active: {turn, turnId}, pending: {turnId, event}, cleaning: Promise, disposed: boolean }.
   const sessions = new Map();
   // Tool calls in flight -> their agent: an approval is asked in the one agent with a call in flight.
   const inFlight = new Map();
@@ -138,10 +138,22 @@ export async function apply(ctx, config = {}, deps = {}) {
     }
   }
 
+  /** Drop a disposed session once its cleanup succeeds; a failure keeps it for later calls and shutdown. */
+  async function release(sessionId) {
+    try {
+      await finish(sessionId, 'Interrupt');
+    } catch (error) {
+      log(`LCU turn cleanup is pending: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (sessions.get(sessionId)?.disposed) sessions.delete(sessionId);
+  }
+
   /** The LCU turn id of the agent's open DSH turn, ending an earlier one first. */
   async function turnOf(agent) {
     const session = agent?.session;
     if (!session?.id) throw new Error('LCU requires a DSH agent session');
+    for (const [id, other] of sessions) if (other.disposed && id !== session.id) release(id);
     const boundary = ctx.get('sessionProjections')?.stateOf(session, 'turnBoundary');
     if (!boundary || boundary.openTurnStartSeq === null || boundary.openTurnStartSeq === undefined) {
       throw new Error('LCU requires an active DSH agent turn');
@@ -149,6 +161,7 @@ export async function apply(ctx, config = {}, deps = {}) {
     const turn = boundary.lastTurn;
     let state = sessions.get(session.id);
     if (!state) sessions.set(session.id, state = {});
+    state.disposed = false;
     if (state.active?.turn === turn) return state.active.turnId;
     // A turn whose end LCU missed, or whose cleanup failed, must finish before this turn's first action.
     try {
@@ -168,8 +181,10 @@ export async function apply(ctx, config = {}, deps = {}) {
       .catch(error => log(`LCU turn cleanup is pending: ${error instanceof Error ? error.message : String(error)}`));
   }, { global: true });
   ctx.on('session/disposed', (session) => {
-    if (!sessions.has(session?.id)) return;
-    finish(session.id, 'Interrupt').catch(() => {}).finally(() => sessions.delete(session.id));
+    const state = sessions.get(session?.id);
+    if (!state) return;
+    state.disposed = true;
+    release(session.id);
   }, { global: true });
 
   await client.connect();
