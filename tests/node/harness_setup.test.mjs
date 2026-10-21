@@ -3,19 +3,20 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
 import { DSH_PACKAGE, dshDesktopListed } from '../../lcu/harness_setup.mjs';
 import { join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import * as setup from '../../lcu/setup.mjs';
 import { output, override, posixTests, result, temporary, write } from './fixtures.mjs';
 
 const test = posixTests('the fake OMP, Hermes and DSH CLIs are sh scripts');
 
-function fixture(t) {
+function fixture(t, releaseName = 'release') {
   const root = temporary(t);
   const home = join(root, 'home');
   const project = join(root, 'project with spaces');
   mkdirSync(home);
   mkdirSync(project);
-  const release = join(root, 'release');
+  const release = join(root, releaseName);
   write(join(release, 'adapters/pi/index.ts'), 'export default function () {}');
   for (const name of ['plugin.yaml', '__init__.py', 'bridge.mjs']) write(join(release, 'adapters/hermes', name), `fixture ${name}`);
   write(join(release, 'adapters/dsh/plugin.mjs'), 'export function apply() {}');
@@ -178,6 +179,19 @@ test('DSH links a generated bundle per profile through `dsh plugin add`, importi
   assert.deepEqual(await f.configure('dsh', { env: { DSH_HOME: join(f.root, 'other dsh home') } }), []);
   assert.notEqual(dshCall(f).argv[5], pkg);
   assert.equal(dshCall(f).options.env.DSH_HOME, join(f.root, 'other dsh home'));
+});
+
+test('DSH percent-encodes the adapter import so `#`, `?` and `%` in the prefix stay in the path', async (t) => {
+  const f = fixture(t, 'lcu#beta?x=%41 b');
+  write(join(f.release, 'adapters/dsh/plugin.mjs'), "export const name = 'lcu-fixture';");
+  assert.deepEqual(await f.configure('dsh'), []);
+  const pkg = dshCall(f).argv[5];
+  const wrapper = readFileSync(join(pkg, 'index.js'), 'utf8');
+  const specifier = JSON.parse(wrapper.split('import * as lcu from ')[1].split(';')[0]);
+  assert.ok(specifier.startsWith('.'));
+  const url = new URL(specifier, pathToFileURL(join(pkg, 'index.js')));
+  assert.equal(realpathSync(fileURLToPath(url)), realpathSync(join(f.release, 'adapters/dsh/plugin.mjs')));
+  assert.equal((await import(url.href)).name, 'lcu-fixture');
 });
 
 test('DSH uses the CLI inside the installed app when no dsh is on PATH, and refuses without either', async (t) => {

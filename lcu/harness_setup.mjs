@@ -170,9 +170,13 @@ export function configureDsh(home, command, release, { scope, env, profile = DSH
   const suffix = createHash('sha256').update(spacedJson([profile, real(root)])).digest('hex').slice(0, 16);
   const data = join(home, process.platform === 'win32' ? 'AppData/Local/LCU' : '.local/share/lcu');
   const destination = join(data, 'dsh', `${profile}-${suffix}`);
-  let specifier = relative(destination, adapter).replaceAll('\\', '/');
+  // An import specifier is a URL: each relative segment is percent-encoded so `#`, `?` and `%` stay in the path.
+  let specifier = relative(destination, adapter);
   if (isAbsolute(specifier)) specifier = pathToFileURL(adapter).href;
-  else if (!specifier.startsWith('.')) specifier = `./${specifier}`;
+  else {
+    specifier = specifier.split(/[\\/]/).map(encodeURIComponent).join('/');
+    if (!specifier.startsWith('.')) specifier = `./${specifier}`;
+  }
   const manifest = {
     name: DSH_PACKAGE, version: '0.1.0', private: true, type: 'module',
     description: 'LCU: computer use through the installed OpenAI computer-use runtime.',
