@@ -217,6 +217,19 @@ test('a nested Linux lcu wraps the real Codex CLI and Sky service again, not the
   assert.deepEqual(sandboxed.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST.split(','), ['LCU_SANDBOX_SHIM']);
 });
 
+test('Claude Code’s own environment and Anthropic credentials never reach the original runtime', (t) => {
+  const r = release(t);
+  const claude = { CLAUDECODE: '1', CLAUDE_CODE_MESSAGING_TOKEN: 'secret', CLAUDE_CODE_OAUTH_SCOPES: 'user:inference',
+    CLAUDE_CODE_SESSION_ID: 's', CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_PROJECT_DIR: '/project', CLAUDE_AGENT_SDK_VERSION: '1',
+    CLAUDE_PREVIEW_CLASSIFIER_FLOOR: 'x', ANTHROPIC_API_KEY: 'key', ANTHROPIC_AUTH_TOKEN: 'token' };
+  const kept = { HOME: '/fixture', CLAUDE_CONFIG_DIR: '/claude', ANTHROPIC_BASE_URL: 'https://example.invalid', MY_CLAUDE_CODE_NOTE: 'n',
+    LCU_LOG_DIR: '/logs' };
+  const e = env(r, { ...claude, ...kept });
+  for (const name of Object.keys(claude)) assert.ok(!(name in e), name);
+  for (const [name, value] of Object.entries(kept)) assert.equal(e[name], value, name);
+  for (const name of Object.keys(claude)) assert.ok(!(name in env(r, { [name]: 'v' }, { platform: 'darwin' })), `${name} on macOS`);
+});
+
 test('the parent record: caller values stay, changed values are the caller’s, a broken record is dropped', () => {
   const caller = { CODEX_CLI_PATH: '/host/codex', NODE_REPL_TRUSTED_SERVICES: '{"sky":"/custom/sky.mjs"}', LCU_MAC_CONTROL_SOCKET: '/parent.sock' };
   const passed = markDerived(caller, { ...caller, CODEX_CLI_PATH: '/shim', CODEX_HOME: '/fixture/.codex', NODE_REPL_NODE_PATH: '/node' });

@@ -190,7 +190,9 @@ const downstream = (env) => ({ ...env, NODE_REPL_JS_BANNER: 'parent banner', NOD
 test('a nested lcu re-derives what a parent LCU passed on and keeps the callerâ€™s own settings', async (t) => {
   const parent = macRelease(t);
   const home = userInfo().homedir;
-  const { env: passed } = await supervised(t, parent, { HOME: home, LCU_LOG_DIR: '/caller/logs', CLAUDE_CODE_SESSION_ID: 'parent' });
+  const { env: passed } = await supervised(t, parent, { HOME: home, LCU_LOG_DIR: '/caller/logs', CLAUDE_CODE_SESSION_ID: 'parent',
+    CLAUDE_CODE_MESSAGING_TOKEN: 'parent-secret', LAUNCHED_BY: 'parent' });
+  assert.ok(!('CLAUDE_CODE_MESSAGING_TOKEN' in passed) && !passed.LCU_PARENT_ENV.includes('parent-secret'), 'not even in the record');
   // An app the parent's runtime launched starts an agent whose user exports their own settings.
   const nested = macRelease(t);
   const { status, env } = await supervised(t, nested, { ...downstream(passed), LCU_TEST_OUT: nested.out,
@@ -206,8 +208,9 @@ test('a nested lcu re-derives what a parent LCU passed on and keeps the callerâ€
   for (const name of ['NODE_REPL_JS_BANNER', 'NODE_REPL_TOOL_OVERRIDES']) assert.ok(!(name in env), name);
   assert.ok(!env.NODE_REPL_TRUSTED_CODE_PATHS.split(':').includes(join(parent.root, 'lcu')));
   assert.ok(!env.PATH.split(':').includes(join(parent.runtime, 'bin')));
-  assert.deepEqual([env.LCU_LOG_DIR, env.LCU_NODE_REPL_SANDBOX, env.CODEX_HOME, env.CLAUDE_CODE_SESSION_ID, env.__CFBundleIdentifier],
+  assert.deepEqual([env.LCU_LOG_DIR, env.LCU_NODE_REPL_SANDBOX, env.CODEX_HOME, env.LAUNCHED_BY, env.__CFBundleIdentifier],
     ['/caller/logs', 'host', '/chosen/codex', 'parent', 'com.example.launched']);
+  assert.ok(!('CLAUDE_CODE_SESSION_ID' in env));
 });
 
 test('an environment from an LCU without the parent record is re-derived too', async (t) => {

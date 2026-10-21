@@ -117,6 +117,10 @@ const LEGACY_DERIVED = [...LEGACY_SIGNS, 'LCU_MAC_SERVICE_LOCK', 'LCU_MAC_SKY_SE
   'LCU_LINUX_INPUT_TOOLKITS', 'LCU_WRE_SKY_SERVICE_PATH', 'SKY_CUA_SERVICE_PATH', 'SKY_CUA_NATIVE_PIPE',
   'SKY_CUA_NATIVE_PIPE_DIRECTORY', 'CODEX_CLI_PATH'];
 
+// Claude Code's own variables and Anthropic credentials: neither LCU nor the original runtime reads them, and the
+// original runtime passes its environment on to every app Computer Use launches (docs/UPSTREAM-WORKAROUNDS.md).
+const HOST_PRIVATE = /^(CLAUDECODE|CLAUDE_PROJECT_DIR|CLAUDE_(CODE|AGENT_SDK|PREVIEW)_\w*|ANTHROPIC_(API_KEY|AUTH_TOKEN))$/i;
+
 // A short fingerprint, not a secret: it only tells whether a value is still the one this launcher derived
 // (FNV-1a over UTF-16 code units, and the length).
 function digest(value) {
@@ -167,7 +171,7 @@ export function markDerived(base, env) {
   const runtime = {};
   const derived = {};
   for (const key of new Set([...Object.keys(base), ...Object.keys(env)])) {
-    if (key === PARENT_ENV) continue;
+    if (key === PARENT_ENV || HOST_PRIVATE.test(key)) continue;
     const before = own(base, key);
     if (RUNTIME_FAMILY.test(key)) {
       if (before !== null) runtime[key] = before;
@@ -196,6 +200,7 @@ export function environment(root, resolved, { chrome = false, audio = false, pla
   const nodeRepl = join(runtime, windows ? 'bin/node_repl.exe' : 'bin/node_repl');
   const codex = locateCodexTools(resources, { windows }).cli;
   const env = inheritedEnvironment(source);
+  for (const key of Object.keys(env)) if (HOST_PRIVATE.test(key)) delete env[key];
   // Windows variable names are case-insensitive: PATH may arrive as `Path`; keep one spelling of it.
   const existingPath = windows ? Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? ''
     : env.PATH ?? '/usr/bin:/bin';
