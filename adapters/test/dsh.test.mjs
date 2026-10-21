@@ -262,5 +262,7 @@ test('DSH starts the runtime with its environment minus DSH and credential varia
   if (process.env.LCU_MCP_COMMAND === undefined) assert.deepEqual(seen[0].command, ['/opt/lcu/current/bin/lcu', '--chrome']);
   assert.equal(seen[0].env.DSH_PROFILE, undefined);
   assert.equal(seen[0].env.DEEPSEEK_API_KEY, undefined);
-  assert.equal(seen[0].env.PATH, process.env.PATH);
+  // Windows lists PATH as `Path`; the copied environment keeps that spelling.
+  const pathKey = Object.keys(seen[0].env).find((key) => key.toUpperCase() === 'PATH');
+  assert.equal(seen[0].env[pathKey], process.env.PATH);
 });
