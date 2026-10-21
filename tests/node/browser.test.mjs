@@ -182,8 +182,40 @@ test('status reports the extension and the connector without claiming a live con
   assert.match(seen.out, /extension: disabled\. Enable it at chrome:\/\/extensions/);
   override(t, browser.host, 'run', () => result(1, 'not json', 'diagnostic broke'));
   seen = await output(t);
-  await browser.status(f.root);
+  await browser.status(f.root, 'chrome');
   assert.match(seen.out, /could not check\. diagnostic broke/);
+  seen = await output(t);
+  assert.equal(await browser.status(f.root), false);
+  assert.match(seen.out, /ChatGPT extension: not found in Chrome\.\n.*`lcu browser status --browser chrome`/);
+});
+
+test('status accepts every browser family the app lists and, without --browser, reports those with the extension', async (t) => {
+  const f = fixture(t);
+  write(join(f.plugin, 'scripts/extension-ids.json'), JSON.stringify({ browserDiagnostics: ['chrome', 'edge', 'brave', 'opera', 'vivaldi']
+    .map((family) => ({ browserFamily: family, shortDisplayName: family[0].toUpperCase() + family.slice(1),
+      extensionManagementUrl: `${family}://extensions`, storeUrl: 'https://store.example/chatgpt' })) }));
+  await browser.install(f.root);
+  const asked = [];
+  override(t, browser.host, 'run', (command, args) => {
+    const family = args[args.indexOf('--browser') + 1];
+    asked.push(`${family} ${args[0].split('/').at(-1)}`);
+    if (args[0].endsWith('check-native-host-manifest.js')) return result(0, JSON.stringify({ correct: true, manifestPath: f.manifest() }));
+    if (family === 'brave') return result(0, JSON.stringify({ installed: true, enabled: true, selectedProfileDirectory: 'Default' }));
+    return result(1, '', 'Could not find a browser profile directory with Preferences.');
+  });
+  let seen = await output(t);
+  assert.equal(await browser.status(f.root), true);
+  assert.match(seen.out, /^Brave extension: enabled in Default\.\nBrave connector: configured for this LCU installation\./);
+  assert.doesNotMatch(seen.out, /Chrome/);
+  assert.deepEqual(asked.filter((item) => item.endsWith('check-native-host-manifest.js')), ['brave check-native-host-manifest.js']);
+  for (const family of ['brave', 'opera', 'vivaldi']) {
+    seen = await output(t);
+    assert.equal(await browser.main(f.root, ['status', '--browser', family]), family === 'brave' ? 0 : 1);
+  }
+  assert.match(seen.out, /Vivaldi extension: could not check\./);
+  seen = await output(t);
+  assert.equal(await browser.main(f.root, ['status', '--browser', 'firefox']), 2);
+  assert.match(seen.err, /Unknown browser 'firefox'; use chrome, edge, brave, opera or vivaldi\./);
 });
 
 test('removed and unknown subcommands are usage errors', async (t) => {

@@ -472,15 +472,31 @@ export async function refresh(root) {
 const reconnectStep = (browser) => `restart ${browser.shortDisplayName}, or turn the ChatGPT extension off and on at ` +
   `${browser.extensionManagementUrl}, so an already-connected extension reconnects through LCU's relay.`;
 
-/** Report setup from the original diagnostics (not a connection test); resolves true when ready. */
-export async function status(root, family = 'chrome') {
+/** The selected app's per-browser diagnostics (`extension-ids.json` `browserDiagnostics`), in its order. */
+export function browserDiagnostics(root) {
+  const plugin = join(host.paths(root).resources, 'plugins/openai-bundled/plugins/chrome');
+  return JSON.parse(readFileSync(join(plugin, 'scripts/extension-ids.json'), 'utf8')).browserDiagnostics;
+}
+
+const listed = (names) => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} or ${names.at(-1)}`);
+
+/** Throws a usage error naming the app's browser families unless `family` is one of them. */
+function checkFamily(browsers, family) {
+  const families = browsers.map((item) => item.browserFamily);
+  if (!families.includes(family)) throw new Error(`Unknown browser '${family}'; use ${listed(families)}.`);
+}
+
+/**
+ * Report setup from the original diagnostics (not a connection test); resolves true when ready. Without `family`,
+ * reports every browser family in which the original diagnostic finds the extension installed.
+ */
+export async function status(root, family) {
   const selected = host.paths(root);
   const env = host.environment(root, selected, process.env);
   const plugin = join(selected.resources, 'plugins/openai-bundled/plugins/chrome');
-  const browser = JSON.parse(readFileSync(join(plugin, 'scripts/extension-ids.json'), 'utf8')).browserDiagnostics
-    .find((item) => item.browserFamily === family);
-  const check = (script) => {
-    const result = host.run(env.NODE_REPL_NODE_PATH, [join(plugin, 'scripts', script), '--browser', family, '--json'], { env, timeout: 20_000 });
+  const browsers = browserDiagnostics(root);
+  const check = (script, name) => {
+    const result = host.run(env.NODE_REPL_NODE_PATH, [join(plugin, 'scripts', script), '--browser', name, '--json'], { env, timeout: 20_000 });
     try {
       const parsed = JSON.parse(result.stdout);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
@@ -491,7 +507,27 @@ export async function status(root, family = 'chrome') {
     const size = Buffer.byteLength(result.stdout ?? '');
     return { problem: size ? `The original diagnostic output could not be parsed (${size} bytes).` : 'The original diagnostic returned no result.' };
   };
-  const extension = check('check-extension-installed.js');
+  if (family !== undefined) {
+    checkFamily(browsers, family);
+    return report(root, selected, plugin, browsers.find((item) => item.browserFamily === family), check);
+  }
+  const found = browsers.map((browser) => [browser, check('check-extension-installed.js', browser.browserFamily)])
+    .filter(([, extension]) => extension.installed === true);
+  if (!found.length) {
+    say(`ChatGPT extension: not found in ${listed(browsers.map((item) => item.shortDisplayName))}.`,
+      '  Install the official extension in the browser profile you want to use. Check one browser in detail with ' +
+      `\`lcu browser status --browser ${browsers.map((item) => item.browserFamily).join('|')}\`.`);
+    return false;
+  }
+  let ready = false;
+  for (const [browser, extension] of found) ready = report(root, selected, plugin, browser, check, extension) || ready;
+  return ready;
+}
+
+/** One browser family's report; `known` is its extension diagnostic when already run. Returns true when ready. */
+function report(root, selected, plugin, browser, run, known) {
+  const check = (script) => run(script, browser.browserFamily);
+  const extension = known ?? check('check-extension-installed.js');
   const manifest = check('check-native-host-manifest.js');
   const label = browser.shortDisplayName;
   const profile = extension.selectedProfileDirectory;
@@ -543,7 +579,7 @@ export async function status(root, family = 'chrome') {
   return enabled && connected;
 }
 
-const USAGE = 'Usage: lcu browser {install [--directory DIR] | status [--browser chrome|edge]}';
+const USAGE = 'Usage: lcu browser {install [--directory DIR] | status [--browser FAMILY]}';
 
 /** `lcu browser ARGV`; returns the exit status. */
 export async function main(root, argv) {
@@ -556,7 +592,9 @@ export async function main(root, argv) {
   if (action === '-h' || action === '--help' || (['install', 'status'].includes(action) && rest.some((arg) => arg === '-h' || arg === '--help'))) {
     say(USAGE, '', 'Connect installed Chromium browsers using OpenAI\'s original native host.', '',
       '  install [--directory DIR]           Install the original native host for the current desktop account',
-      '  status [--browser chrome|edge]      Check extension and connector setup without changing the browser');
+      '  status [--browser FAMILY]           Check extension and connector setup without changing the browser.',
+      '                                      FAMILY is a browser the app\'s diagnostics list (chrome, edge, brave,',
+      '                                      opera, vivaldi); without it, reports each browser with the extension');
     return 0;
   }
   let values;
@@ -564,11 +602,9 @@ export async function main(root, argv) {
     if (!['install', 'status'].includes(action)) {
       throw new Error(action === undefined ? 'Name an action: install or status.' : `Unknown action '${action}'; use install or status.`);
     }
-    const options = action === 'install' ? { directory: { type: 'string' } } : { browser: { type: 'string', default: 'chrome' } };
+    const options = action === 'install' ? { directory: { type: 'string' } } : { browser: { type: 'string' } };
     ({ values } = parseArgs({ args: rest, options }));
-    if (action === 'status' && !['chrome', 'edge'].includes(values.browser)) {
-      throw new Error(`Unknown browser '${values.browser}'; use chrome or edge.`);
-    }
+    if (action === 'status' && values.browser !== undefined) checkFamily(browserDiagnostics(root), values.browser);
   } catch (error) {
     warn(`lcu browser: ${error.message}`, "Run 'lcu browser --help' for usage.");
     return 2;
