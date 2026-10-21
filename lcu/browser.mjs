@@ -511,10 +511,13 @@ export async function status(root, family) {
     checkFamily(browsers, family);
     return report(root, selected, plugin, browsers.find((item) => item.browserFamily === family), check);
   }
-  const found = browsers.map((browser) => [browser, check('check-extension-installed.js', browser.browserFamily)])
-    .filter(([, extension]) => extension.installed === true);
+  const checked = browsers.map((browser) => [browser, check('check-extension-installed.js', browser.browserFamily)]);
+  const found = checked.filter(([, extension]) => extension.installed === true);
   if (!found.length) {
+    // The original diagnostic reports a missing browser and a failed check alike, so show each browser's error.
     say(`ChatGPT extension: not found in ${listed(browsers.map((item) => item.shortDisplayName))}.`,
+      ...checked.filter(([, extension]) => extension.problem).map(([browser, extension]) =>
+        `  ${browser.shortDisplayName} could not be checked: ${extension.problem}`),
       '  Install the official extension in the browser profile you want to use. Check one browser in detail with ' +
       `\`lcu browser status --browser ${browsers.map((item) => item.browserFamily).join('|')}\`.`);
     return false;

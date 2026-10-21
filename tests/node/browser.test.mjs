@@ -186,7 +186,11 @@ test('status reports the extension and the connector without claiming a live con
   assert.match(seen.out, /could not check\. diagnostic broke/);
   seen = await output(t);
   assert.equal(await browser.status(f.root), false);
-  assert.match(seen.out, /ChatGPT extension: not found in Chrome\.\n.*`lcu browser status --browser chrome`/);
+  assert.match(seen.out, /ChatGPT extension: not found in Chrome\.\n  Chrome could not be checked: diagnostic broke\n.*`lcu browser status --browser chrome`/);
+  override(t, browser.host, 'run', () => result(0, JSON.stringify({ installed: false, enabled: false })));
+  seen = await output(t);
+  assert.equal(await browser.status(f.root), false);
+  assert.match(seen.out, /ChatGPT extension: not found in Chrome\.\n  Install/);
 });
 
 test('status accepts every browser family the app lists and, without --browser, reports those with the extension', async (t) => {
