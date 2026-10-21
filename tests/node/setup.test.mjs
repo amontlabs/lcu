@@ -763,12 +763,16 @@ test('--dsh-profile reaches DeepSeek Harness registration and a pending DSH keep
   assert.equal(missing.code, 0, missing.err);
   assert.deepEqual(setup.loadSetupState(f.home).pending, ['dsh']);
   assert.equal(setup.loadSetupState(f.home).pending_context.dsh_profile, 'web');
+  // Deferring another harness without naming DSH keeps the profile saved for the pending DSH.
+  assert.equal((await f.main('--agent', 'omp', '--allow-missing')).code, 0);
+  assert.deepEqual(setup.loadSetupState(f.home).pending, ['dsh', 'omp']);
+  assert.equal(setup.loadSetupState(f.home).pending_context.dsh_profile, 'web');
   f.installed = new Set(['dsh']);
   f.registered.length = 0;
   const reconciled = await f.reconcile();
   assert.equal(reconciled.code, 0, reconciled.err);
   assert.deepEqual([f.registered[0].names, f.registered[0].dshProfile], [['dsh'], 'web']);
-  assert.deepEqual(setup.loadSetupState(f.home).pending, []);
+  assert.deepEqual(setup.loadSetupState(f.home).pending, ['omp']);
   f.failing = new Set(['dsh']);
   assert.match((await f.main('--agent', 'dsh', '--dsh-profile', 'web')).err, /--dsh-profile web --agent dsh/);
   writeFileSync(setup.setupStatePath(f.home), JSON.stringify({ chrome: false, audio: false, pending: ['dsh'],
