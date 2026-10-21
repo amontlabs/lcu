@@ -338,8 +338,8 @@ def register(ctx) -> None:
     pending_cleanups: dict[tuple[str, str], str] = {}
     turn_lock = threading.Lock()
     owner_session: str | None = None
-    # Set when a handoff reconnect found changed descriptors or instructions: the bridge then holds
-    # the changed runtime, so every session, the previous owner included, must reconnect first.
+    # Set when a handoff reconnect failed or found changed descriptors or instructions: the bridge then
+    # holds no runtime or a changed one, so every session, the previous owner included, must reconnect first.
     handoff_refused = False
     # Fallback sessions whose first turn was refused before receiving the instructions.
     uninstructed_sessions: set[str] = set()
@@ -405,6 +405,7 @@ def register(ctx) -> None:
                     handoff_refused = False
                 except Exception as exc:
                     owner_session = None
+                    handoff_refused = True
                     return f"LCU could not reconnect the original runtime for this Hermes session: {exc}"
             owner_session = session_id
             active_turns[session_id] = turn_id

@@ -463,6 +463,32 @@ class HermesHarnessTests(unittest.TestCase):
             finally:
                 context.unload()
 
+    def test_failed_handoff_reconnect_keeps_the_runtime_blocked(self):
+        with tempfile.TemporaryDirectory(prefix="lcu-hermes-test-") as temporary:
+            home = Path(temporary)
+            instructions = home / "instructions.txt"
+            instructions.write_text("First original guide.", encoding="utf-8")
+            plugin = self.load_plugin(home, "lcu_hermes_failed_handoff")
+            context = FakeContext()
+            try:
+                with patch.dict(os.environ, {"LCU_FIXTURE_INSTRUCTIONS_FILE": str(instructions)}):
+                    plugin.register(context)
+                    self.assertIsNone(context.hooks["pre_llm_call"](session_id="a", turn_id="a1"))
+                    context.hooks["on_session_end"](session_id="a", turn_id="a1")
+                    # The fixture cannot start without its instructions file, so the reconnect fails.
+                    instructions.unlink()
+                    refused = context.hooks["pre_llm_call"](session_id="b", turn_id="b1")
+                    self.assertIn("could not reconnect the original runtime", refused)
+                    # The next session retries the reconnect instead of being admitted to no runtime.
+                    refused = context.hooks["pre_llm_call"](session_id="c", turn_id="c1")
+                    self.assertIn("could not reconnect the original runtime", refused)
+                    raw = context.tools["js"]["handler"]({"code": "must-not-run"}, session_id="c", turn_id="c1")
+                    self.assertTrue(json.loads(raw)["isError"])
+                    instructions.write_text("First original guide.", encoding="utf-8")
+                    self.assertIsNone(context.hooks["pre_llm_call"](session_id="c", turn_id="c2"))
+            finally:
+                context.unload()
+
     def test_bridge_and_cleanup_output_stay_off_the_hermes_terminal(self):
         """The Hermes CLI draws its TUI on the plugin process's stderr: nothing from LCU may land there."""
         with tempfile.TemporaryDirectory(prefix="lcu-hermes-stderr-") as temporary:
