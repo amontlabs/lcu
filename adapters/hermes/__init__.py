@@ -338,13 +338,34 @@ def register(ctx) -> None:
     pending_cleanups: dict[tuple[str, str], str] = {}
     turn_lock = threading.Lock()
     owner_session: str | None = None
+    # Set when a handoff reconnect found changed descriptors or instructions: the bridge then holds
+    # the changed runtime, so every session, the previous owner included, must reconnect first.
+    handoff_refused = False
+    # Fallback sessions whose first turn was refused before receiving the instructions.
+    uninstructed_sessions: set[str] = set()
     active_tool_identity = contextvars.ContextVar("lcu_hermes_active_tool_identity", default=None)
 
     def inject_original_context(session_id="", turn_id="", is_first_turn=False, **kwargs):
-        nonlocal connected, owner_session
         del kwargs
         if not isinstance(session_id, str) or not session_id or not isinstance(turn_id, str) or not turn_id:
             return "LCU is unavailable for this Hermes turn because the host did not provide exact session and turn IDs."
+        refusal = admit_turn(session_id, turn_id)
+        with turn_lock:
+            first_delivery = inject_on_first_turn and (is_first_turn is True or session_id in uninstructed_sessions)
+            if refusal is not None:
+                # Hermes replays a refused first message without the instructions; send them on
+                # this session's first admitted turn instead.
+                if first_delivery:
+                    uninstructed_sessions.add(session_id)
+                return refusal
+            uninstructed_sessions.discard(session_id)
+        # Lifecycle only: Hermes appends returned text to the user message and replays it on every
+        # later turn, so success returns nothing unless the fallback above is in use.
+        return context_text if first_delivery else None
+
+    def admit_turn(session_id, turn_id):
+        """Make this turn the runtime's active turn, or return why LCU is unavailable for it."""
+        nonlocal connected, owner_session, handoff_refused
         with turn_lock:
             previous_turn = active_turns.get(session_id)
             if previous_turn and previous_turn != turn_id:
@@ -367,7 +388,7 @@ def register(ctx) -> None:
                     pending_cleanups.pop((pending_session, pending_turn), None)
                 except Exception as exc:
                     return f"LCU is unavailable because cleanup for prior turn {pending_turn} failed: {exc}"
-            if owner_session is not None and owner_session != session_id:
+            if handoff_refused or (owner_session is not None and owner_session != session_id):
                 if active_turns:
                     return "LCU is unavailable because another Hermes session still owns the original Computer Use runtime."
                 try:
@@ -377,18 +398,16 @@ def register(ctx) -> None:
                     # schemas must stay those of the connected runtime.
                     if (reconnected.get("tools") != connected.get("tools") or
                             reconnected.get("instructions") != connected.get("instructions")):
+                        handoff_refused = True
                         return ("LCU is unavailable because the original tool descriptors or instructions "
                                 "changed during Hermes session handoff.")
                     connected = reconnected
+                    handoff_refused = False
                 except Exception as exc:
                     owner_session = None
                     return f"LCU could not reconnect the original runtime for this Hermes session: {exc}"
             owner_session = session_id
             active_turns[session_id] = turn_id
-        # Lifecycle only: Hermes appends returned text to the user message and replays it on every
-        # later turn, so success returns nothing unless the fallback above is in use.
-        if inject_on_first_turn and is_first_turn is True:
-            return context_text
         return None
 
     def on_session_end(session_id="", turn_id="", interrupted=False, failed=False, **kwargs):

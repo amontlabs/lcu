@@ -394,6 +394,25 @@ class HermesHarnessTests(unittest.TestCase):
             finally:
                 context.unload()
 
+    def test_without_section_api_a_refused_first_turn_gets_the_instructions_later(self):
+        with tempfile.TemporaryDirectory(prefix="lcu-hermes-test-") as temporary:
+            plugin = self.load_plugin(Path(temporary), "lcu_hermes_legacy_refused")
+            context = LegacyContext()
+            try:
+                plugin.register(context)
+                self.assertIn("Original CUA initialization guide.",
+                              context.hooks["pre_llm_call"](session_id="a", turn_id="a1", is_first_turn=True))
+                refused = context.hooks["pre_llm_call"](session_id="b", turn_id="b1", is_first_turn=True)
+                self.assertIn("another Hermes session still owns", refused)
+                self.assertNotIn("Original CUA initialization guide.", refused)
+                context.hooks["on_session_end"](session_id="a", turn_id="a1")
+                admitted = context.hooks["pre_llm_call"](session_id="b", turn_id="b2", is_first_turn=False)
+                self.assertIn("Original CUA initialization guide.", admitted)
+                context.hooks["on_session_end"](session_id="b", turn_id="b2")
+                self.assertIsNone(context.hooks["pre_llm_call"](session_id="b", turn_id="b3", is_first_turn=False))
+            finally:
+                context.unload()
+
     def test_instructions_over_the_section_limit_are_not_truncated(self):
         with tempfile.TemporaryDirectory(prefix="lcu-hermes-test-") as temporary:
             home = Path(temporary)
@@ -430,9 +449,17 @@ class HermesHarnessTests(unittest.TestCase):
                     context.hooks["on_session_end"](session_id="b", turn_id="b1")
                     instructions.write_text("Changed original guide.", encoding="utf-8")
                     refused = context.hooks["pre_llm_call"](session_id="c", turn_id="c1")
-                self.assertIn("tool descriptors or instructions changed during Hermes session handoff", refused)
-                raw = context.tools["js"]["handler"]({"code": "must-not-run"}, session_id="c", turn_id="c1")
-                self.assertTrue(json.loads(raw)["isError"])
+                    self.assertIn("tool descriptors or instructions changed during Hermes session handoff", refused)
+                    raw = context.tools["js"]["handler"]({"code": "must-not-run"}, session_id="c", turn_id="c1")
+                    self.assertTrue(json.loads(raw)["isError"])
+                    # The previous owner is refused too while the bridge holds the changed runtime.
+                    refused = context.hooks["pre_llm_call"](session_id="b", turn_id="b2")
+                    self.assertIn("tool descriptors or instructions changed during Hermes session handoff", refused)
+                    raw = context.tools["js"]["handler"]({"code": "must-not-run"}, session_id="b", turn_id="b2")
+                    self.assertTrue(json.loads(raw)["isError"])
+                    # A reconnect that passes the check admits turns again.
+                    instructions.write_text("First original guide.", encoding="utf-8")
+                    self.assertIsNone(context.hooks["pre_llm_call"](session_id="b", turn_id="b3"))
             finally:
                 context.unload()
 
