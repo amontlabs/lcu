@@ -767,6 +767,9 @@ test('--dsh-profile reaches DeepSeek Harness registration and a pending DSH keep
   assert.equal((await f.main('--agent', 'omp', '--allow-missing')).code, 0);
   assert.deepEqual(setup.loadSetupState(f.home).pending, ['dsh', 'omp']);
   assert.equal(setup.loadSetupState(f.home).pending_context.dsh_profile, 'web');
+  // Retrying the pending DSH without --dsh-profile keeps it too.
+  assert.equal((await f.main('--agent', 'dsh', '--allow-missing')).code, 0);
+  assert.equal(setup.loadSetupState(f.home).pending_context.dsh_profile, 'web');
   f.installed = new Set(['dsh']);
   f.registered.length = 0;
   const reconciled = await f.reconcile();

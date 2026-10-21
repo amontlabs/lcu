@@ -1202,9 +1202,9 @@ async function registerLocked(args, account, home, names, missing, register, pat
   const failed = [...new Set(failures.map(([name]) => name))];
   const pending = args.export ? [] : [...new Set([...state.pending, ...missing])]
     .filter((name) => !names.includes(name) || failed.includes(name));
-  // A DSH profile other than the default is kept for the reconcile that registers a pending DSH. A run that does
-  // not name DSH keeps the profile saved for it.
-  const dshProfile = names.includes('dsh') || missing.includes('dsh') ? args['dsh-profile'] : state.pending_context?.dsh_profile;
+  // A DSH profile other than the default is kept for the reconcile that registers a pending DSH. A run without
+  // --dsh-profile keeps the profile saved for it.
+  const dshProfile = args['dsh-profile'] ?? state.pending_context?.dsh_profile;
   const dshContext = pending.includes('dsh') && dshProfile && dshProfile !== DSH_DEFAULT_PROFILE
     ? { dsh_profile: dshProfile } : {};
   saveSetupState(home, { chrome, audio, approval: approvalMode, pending, pendingContext: pending.length
