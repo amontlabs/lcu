@@ -458,7 +458,7 @@ test('a terminal that cannot draw pictures gets no icon cell before the name', a
 
 const NOTICE = {
   current: '0.9.1', latest: '0.9.2', severity: 'normal', release_url: 'https://example.test/r', command: LCU,
-  message: 'LCU 0.9.2 is available (installed: 0.9.1). Tell the user and offer to run `lcu update`.',
+  message: 'LCU 0.9.2 is available (installed: 0.9.1). Run `lcu update`, then restart the agents that use LCU.',
 }
 
 function noticeHost(on: any, processes: (argv: string[]) => any, surfaces: string[] = ['terminal'], files: Record<string, string> = { [LCU]: '' }) {
@@ -469,12 +469,13 @@ function noticeHost(on: any, processes: (argv: string[]) => any, surfaces: strin
 
 const noticeRun = (stdout: string) => (argv: string[]) => (argv[1] === 'update' ? { stdout } : undefined)
 
-test('an update notice becomes session context and one toast', async ($, on) => {
+// The notice is for the person: a toast, and the hook's result unchanged, so the model never receives it.
+test('an update notice becomes one toast and never model context', async ($, on) => {
   const { ran, toasts } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)))
   const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
   expect(ran.find(argv => argv[1] === 'update')?.slice(0, 4)).toEqual([LCU, 'update', '--notice', '--json'])
   expect(ran.find(argv => argv[1] === 'update')?.[4]).toMatch(/^--announce/)
-  expect(result.additionalContext).toEqual([NOTICE.message])
+  expect(result.additionalContext).toBeUndefined()
   expect(toasts).toEqual(['LCU 0.9.2 is available \u2014 ask Claude to update it, or run lcu update'])
 })
 
@@ -484,19 +485,18 @@ test('the session id goes to lcu, which applies the account-wide cooldown', asyn
   expect(ran.find(argv => argv[1] === 'update')).toEqual([LCU, 'update', '--notice', '--json', '--announce=s1'])
 })
 
-test('a release lcu already announced on the account today: no context, no toast', async ($, on) => {
+test('a release lcu already announced on the account today: no toast', async ($, on) => {
   const { toasts } = noticeHost(on, argv => (argv[1] === 'update' ? { stdout: argv[4] === '--announce=s2' ? '{}' : JSON.stringify(NOTICE) } : undefined))
-  const first: any = await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
-  const second: any = await $.classic.SessionStart({ source: 'startup', session_id: 's2' } as any)
-  expect(first.additionalContext).toEqual([NOTICE.message])
-  expect(second.additionalContext).toBeUndefined()
+  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  expect(toasts.length).toBe(1)
+  await $.classic.SessionStart({ source: 'startup', session_id: 's2' } as any)
   expect(toasts.length).toBe(1)
 })
 
-test('a headless run gets the context without a toast', async ($, on) => {
+test('a headless run gets neither context nor a toast', async ($, on) => {
   const { toasts } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)), [])
   const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
-  expect(result.additionalContext).toEqual([NOTICE.message])
+  expect(result.additionalContext).toBeUndefined()
   expect(toasts).toEqual([])
 })
 
@@ -514,7 +514,7 @@ const quiet: [string, (argv: string[]) => any][] = [
   ['a command that cannot run', () => { throw new Error('no processes') }],
 ]
 for (const [name, processes] of quiet) {
-  test(`${name}: no context, no toast, no throw`, async ($, on) => {
+  test(`${name}: no toast, no throw`, async ($, on) => {
     const { toasts } = noticeHost(on, processes)
     const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
     expect(result.additionalContext).toBeUndefined()
@@ -542,7 +542,7 @@ test('the first prompt checks for a notice', async ($, on) => {
   const { ran, toasts } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
   const result: any = await prompt($)
   expect(checks(ran)).toBe(1)
-  expect(result.additionalContext).toEqual([NOTICE.message])
+  expect(result.additionalContext).toBeUndefined()
   expect(toasts.length).toBe(1)
 })
 
@@ -560,12 +560,12 @@ test('a prompt within ten minutes of a check does not run the command', async ($
 
 test('a version announced at session start is not repeated', async ($, on) => {
   const clock = mock.clock(on)
-  const { ran } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
+  const { ran, toasts } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
   await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
   await clock.advance(11 * MIN)
-  const result: any = await prompt($)
+  await prompt($)
   expect(checks(ran)).toBe(2)
-  expect(result.additionalContext).toBeUndefined()
+  expect(toasts.length).toBe(1)
 })
 
 test('after the cooldown lcu announces again: a session told nothing yet gets it once', async ($, on) => {
@@ -574,11 +574,12 @@ test('after the cooldown lcu announces again: a session told nothing yet gets it
   const { toasts } = promptHost(on, argv => (argv[1] === 'update' ? { stdout: out } : undefined))
   await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
   out = JSON.stringify(NOTICE)
+  expect(toasts.length).toBe(0)
   await clock.advance(11 * MIN)
-  expect(((await prompt($)) as any).additionalContext).toEqual([NOTICE.message])
+  await prompt($)
   expect(toasts.length).toBe(1)
   await clock.advance(11 * MIN)
-  expect(((await prompt($)) as any).additionalContext).toBeUndefined()
+  await prompt($)
   expect(toasts.length).toBe(1)
 })
 
@@ -589,20 +590,19 @@ test('a newer version is announced once', async ($, on) => {
   await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
   out = JSON.stringify(NEWER)
   await clock.advance(11 * MIN)
-  const result: any = await prompt($)
-  expect(result.additionalContext).toEqual([NEWER.message])
+  await prompt($)
   expect(toasts.length).toBe(2)
   await clock.advance(11 * MIN)
-  expect(((await prompt($)) as any).additionalContext).toBeUndefined()
+  await prompt($)
+  expect(toasts.length).toBe(2)
 })
 
 test('sessions are independent', async ($, on) => {
-  const { ran } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
-  const a: any = await prompt($, 'a')
-  const b: any = await prompt($, 'b')
+  const { ran, toasts } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
+  await prompt($, 'a')
+  await prompt($, 'b')
   expect(checks(ran)).toBe(2)
-  expect(a.additionalContext).toEqual([NOTICE.message])
-  expect(b.additionalContext).toEqual([NOTICE.message])
+  expect(toasts.length).toBe(2)
 })
 
 test('a failing check on a prompt gives nothing and does not throw', async ($, on) => {

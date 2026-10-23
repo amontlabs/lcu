@@ -1,4 +1,4 @@
-// Find out whether a newer LCU release exists, cache the answer and tell the agent.
+// Find out whether a newer LCU release exists, cache the answer and tell the person using the agent.
 // `lcu update --notice --hook ...` runs on agent prompts: it reads only the cache and never waits on the network.
 const { mkdirSync, readFileSync, readSync, renameSync, statSync, utimesSync, writeFileSync, closeSync, openSync } = process.getBuiltinModule('node:fs');
 const { dirname, join } = process.getBuiltinModule('node:path');
@@ -270,9 +270,8 @@ export function refreshClaimed(now = deps.now()) {
 
 function message(root, info, current) {
   const prefix = { security: 'Security update: ', breaking: 'Breaking update: ' }[info.severity] ?? '';
-  return `${prefix}LCU ${info.version} is available (installed: ${current}). Tell the user and offer to run ` +
-    `\`${stableCommand(root)} update\`; do not upgrade without asking. Agents using LCU must be ` +
-    `restarted afterwards. Release notes: ${info.release_url}`;
+  return `${prefix}LCU ${info.version} is available (installed: ${current}). Run \`${stableCommand(root)} update\`, ` +
+    `then restart the agents that use LCU. Release notes: ${info.release_url}`;
 }
 
 /** The notice from the cache only (no refresh), or null. */
@@ -428,7 +427,7 @@ const OPTIONS = {
 };
 const USAGE = 'Usage: lcu update [-h] [--check | --notice] [--json] [--yes]\n\n' +
   'Find out whether a newer LCU release exists and install it.\n\n' +
-  '  --check   check now without installing\n  --notice  print the cached update notice for an agent (never uses the network)\n' +
+  '  --check   check now without installing\n  --notice  print the cached update notice (never uses the network)\n' +
   '  --json    print JSON (with --check or --notice)\n  --yes     do not ask before installing\n';
 
 function parse(argv) {
@@ -461,11 +460,11 @@ export async function main(root, argv = []) {
     try {
       let found = notice(root);
       if (args.hook) {
-        // A hook's documented way to add model context: once per session and release, and at most once a day
-        // per release across the account, else silent.
+        // A hook's documented message for the person (`systemMessage`, never model context): once per session and
+        // release, and at most once a day per release across the account, else silent.
         const session = found && hookSessionId();
         if (found && (session || args.hook === 'SessionStart') && announce(session, found.latest)) {
-          process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: args.hook, additionalContext: found.message } })}\n`);
+          process.stdout.write(`${JSON.stringify({ systemMessage: found.message })}\n`);
         }
       } else {
         // An agent integration (the Claude Code mod) is under the same cooldown as the hooks.

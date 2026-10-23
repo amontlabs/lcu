@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { userInfo } from 'node:os';
@@ -156,6 +157,35 @@ function launchedLauncher(command: string[]) {
   const path = childPath();
   const target = resolveExecutable(rest[1], path === undefined ? '/bin:/usr/bin' : path);
   return isLauncher(target, 'lcu', 'runtime.mjs') ? target : undefined;
+}
+
+const NOTICE_TIMEOUT_MS = 3000;
+
+/**
+ * The cached update notice for the person, from `lcu update --notice --json --announce[=SESSION_ID]` of the
+ * release `command` launches (launchedLauncher), or undefined. The command reads only LCU's local cache,
+ * returns `{}` when update checks are off (LCU_NO_UPDATE_CHECK, a source checkout) or the release was already
+ * announced (once per session, once a day per account, shared with Codex and Claude Code), and never fails
+ * the session: any error, a timeout or unreadable output means no notice.
+ */
+export async function updateNotice(command: string[], sessionId?: string) {
+  const launcher = launchedLauncher(command);
+  if (launcher === undefined) return undefined;
+  const stdout = await new Promise<string>(resolve => {
+    try {
+      execFile(launcher, ['update', '--notice', '--json', sessionId ? `--announce=${sessionId}` : '--announce'],
+        { timeout: NOTICE_TIMEOUT_MS, windowsHide: true }, (error, out) => resolve(error ? '' : String(out)));
+    } catch {
+      resolve('');
+    }
+  });
+  try {
+    const value = JSON.parse(stdout);
+    if (!value || typeof value !== 'object' || typeof value.message !== 'string' || !value.message.trim()) return undefined;
+    return { message: value.message as string, severity: typeof value.severity === 'string' ? value.severity as string : 'normal' };
+  } catch {
+    return undefined;
+  }
 }
 
 const plistString = (plist: string, key: string) =>
@@ -833,6 +863,17 @@ export default function (pi: ExtensionAPI, options: {
     }
   });
   pi.on('session_shutdown', leaveSession);
+  // An update notice for the person, as a UI notification; the model never receives it. Only interactive
+  // sessions ask, so a session without UI does not use up the release's once-a-day announcement.
+  pi.on('session_start', async (_event, ctx) => {
+    try {
+      if (!ctx.hasUI || typeof ctx.ui?.notify !== 'function') return;
+      const notice = await updateNotice(commandFromEnvironment(options.command), ctx.sessionManager?.getSessionId?.());
+      if (notice) ctx.ui.notify(notice.message, ['security', 'breaking'].includes(notice.severity) ? 'warning' : 'info');
+    } catch {
+      // a notice never fails the session
+    }
+  });
   pi.registerCommand('lcu', {
     description: 'Stop active original Computer Use or pick a target for the editor.',
     getArgumentCompletions: prefix => [

@@ -145,8 +145,8 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // An update notice from the cache `lcu update --notice` keeps: the model gets the message as session
-  // context (`session.start` cannot carry any; the classic SessionStart hook can), the person one toast.
+  // An update notice from the cache `lcu update --notice` keeps: the person gets one toast. The model never
+  // receives it; the hook's result is returned unchanged.
   on('classic.SessionStart', async ($, e, next) => {
     const result = await next(e)
     const state = sessionState(e)
@@ -155,7 +155,7 @@ export const register: Register = on => {
     if (!notice) return result
     state.announced = notice.latest ?? notice.message
     await toast($, notice)
-    return { ...result, additionalContext: [...(result.additionalContext ?? []), notice.message] }
+    return result
   })
 
   // A release published while the session is open: the cache refreshes in the background, so the first
@@ -174,7 +174,7 @@ export const register: Register = on => {
       if (version === state.announced) return result
       state.announced = version
       await toast($, notice)
-      return { ...result, additionalContext: [...(result.additionalContext ?? []), notice.message] }
+      return result
     } catch {
       return result
     }

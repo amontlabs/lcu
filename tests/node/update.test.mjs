@@ -190,7 +190,8 @@ test('the notice names the stable command, the severity and the release', (t) =>
   assert.deepEqual(Object.keys(found).sort(), ['command', 'current', 'latest', 'message', 'release_url', 'severity']);
   assert.deepEqual([found.current, found.latest, found.severity, found.command], ['0.9.1', '0.9.2', 'normal', command]);
   assert.ok(found.message.startsWith('LCU 0.9.2 is available'));
-  assert.ok(found.message.includes(`\`${command} update\``) && found.message.includes('without asking'));
+  assert.equal(found.message, `LCU 0.9.2 is available (installed: 0.9.1). Run \`${command} update\`, then restart ` +
+    `the agents that use LCU. Release notes: ${INFO.release_url}`);
   cache({ ...INFO, severity: 'security' });
   assert.ok(update.notice(root).message.startsWith('Security update: '));
   cache({ ...INFO, severity: 'breaking' });
@@ -253,19 +254,22 @@ async function hook(t, root, event, stdin = '{"session_id": "s1"}') {
   override(t, update.deps, 'readStdin', () => stdin);
   const [status, out] = await cli(t, root, '--notice', '--hook', event);
   assert.equal(status, 0);
-  return out ? JSON.parse(out).hookSpecificOutput : null;
+  if (!out) return null;
+  const printed = JSON.parse(out);
+  // Shown to the person only: a `systemMessage`, never `hookSpecificOutput.additionalContext` for the model.
+  assert.deepEqual(Object.keys(printed), ['systemMessage']);
+  return printed;
 }
 
 test('hooks announce a release once per session and once a day per account', async (t) => {
   const { root } = setup(t);
   cache();
   const first = await hook(t, root, 'SessionStart');
-  assert.equal(first.hookEventName, 'SessionStart');
-  assert.ok(first.additionalContext.startsWith('LCU 0.9.2 is available'));
+  assert.ok(first.systemMessage.startsWith('LCU 0.9.2 is available'));
   assert.equal(await hook(t, root, 'SessionStart'), null);
   assert.equal(await hook(t, root, 'UserPromptSubmit', '{"session_id": "s2"}'), null);
   cache({ ...INFO, version: '0.9.3', tag: 'v0.9.3' });
-  assert.match((await hook(t, root, 'UserPromptSubmit')).additionalContext, /0\.9\.3/);
+  assert.match((await hook(t, root, 'UserPromptSubmit')).systemMessage, /0\.9\.3/);
   assert.equal(await hook(t, root, 'SessionStart', '{"session_id": "s2"}'), null);
 });
 
