@@ -262,6 +262,48 @@ test('Codex: project scope reads and records the project config; the policy merg
   assert.deepEqual(approval.mergeCodexPolicy(host, {}), host);
 });
 
+test('Junie: auto appends exact allowlist patterns, keeps other rules; ask removes only what it added', (t) => {
+  const home = temporary(t);
+  const path = approval.junieAllowlistPath(home);
+  const junie = (mode) => approval.apply(mode, 'junie', home, { scope: 'user', project: null, env: {} });
+  assert.equal(junie('ask'), 'unchanged (no allowlist file)');
+  assert.equal(existsSync(path), false);
+  const original = { defaultBehavior: 'ask', allowReadonlyCommands: true, rules: {
+    executables: { rules: [{ prefix: 'git ', action: 'allow' }] },
+    mcpTools: { rules: [{ prefix: 'github:', action: 'allow' }] } } };
+  write(path, `${JSON.stringify(original, null, 4)}\n`);
+  assert.match(junie('auto'), /added `lcu:js`, added `lcu:js_reset`/);
+  const allowed = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(allowed.rules.mcpTools.rules, [{ prefix: 'github:', action: 'allow' },
+    { pattern: 'lcu:js', action: 'allow' }, { pattern: 'lcu:js_reset', action: 'allow' }]);
+  assert.deepEqual(allowed.rules.executables, original.rules.executables);
+  const bytes = readFileSync(path, 'utf8');
+  assert.equal(junie('auto'), 'unchanged');
+  assert.equal(readFileSync(path, 'utf8'), bytes);
+  assert.match(junie('ask'), /removed `lcu:js`, removed `lcu:js_reset`/);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), original);
+  assert.deepEqual(approval.loadRecord(home), {});
+});
+
+test('Junie: a rule the user wrote is kept by both modes; auto creates a missing allowlist; malformed ones are refused', (t) => {
+  const home = temporary(t);
+  const path = approval.junieAllowlistPath(home);
+  const junie = (mode) => approval.apply(mode, 'junie', home, { scope: 'user', project: null, env: {} });
+  assert.match(junie('auto'), /added `lcu:js`/);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')),
+    { rules: { mcpTools: { rules: [{ pattern: 'lcu:js', action: 'allow' }, { pattern: 'lcu:js_reset', action: 'allow' }] } } });
+  junie('ask');
+  write(path, JSON.stringify({ rules: { mcpTools: { rules: [{ pattern: 'lcu:js', action: 'ask' }, { pattern: 'lcu:js_reset', action: 'allow' }] } } }));
+  assert.match(junie('auto'), /kept your own `lcu:js` rule/);
+  assert.match(junie('ask'), /kept your own `lcu:js` rule, which LCU did not add, kept your own `lcu:js_reset` rule/);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).rules.mcpTools.rules.length, 2);
+  for (const content of ['[]', '{"rules": []}', '{"rules": {"mcpTools": {"rules": {}}}}', '{"rules": {"mcpTools": {"rules": ["x"]}}}']) {
+    write(path, content);
+    assert.throws(() => junie('auto'), Error, content);
+    assert.equal(readFileSync(path, 'utf8'), content);
+  }
+});
+
 test('Pi, Hermes and DeepSeek Harness have nothing to configure; an unknown mode is refused; the record is sorted JSON', (t) => {
   assert.match(approval.apply('auto', 'pi', '/h', { scope: 'user', project: null, env: {} }), /no permission system/);
   assert.match(approval.apply('ask', 'hermes', '/h', { scope: 'user', project: null, env: {} }), /pre_tool_call/);

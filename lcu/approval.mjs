@@ -23,6 +23,10 @@ export const MODEL_TOOLS = ['js', 'js_reset'];
 export const CLAUDE_RULES = MODEL_TOOLS.map((tool) => `mcp__lcu__${tool}`);
 // Earlier versions added this server-wide rule; `auto` replaces it, `ask` still removes it.
 const LEGACY_CLAUDE_RULE = 'mcp__lcu';
+// Junie: `rules.mcpTools.rules` entries of ~/.junie/allowlist.json. Junie's own "Always allow" writes a `prefix`
+// rule (`lcu:js` would also match `lcu:js_reset` and any later `js…` tool); a `pattern` without wildcards matches
+// exactly one tool.
+export const JUNIE_PATTERNS = MODEL_TOOLS.map((tool) => `lcu:${tool}`);
 // Codex: per-tool `approval_mode` under `[mcp_servers.lcu.tools.<tool>]`. Earlier versions wrote the
 // server-wide `default_tools_approval_mode = "approve"`.
 const CODEX_KEY = 'default_tools_approval_mode';
@@ -216,6 +220,50 @@ function applyClaude(mode, home, project) {
   return `${outcome} ${shown} in permissions.allow (${path})${note}`;
 }
 
+export const junieAllowlistPath = (home) => join(home, '.junie/allowlist.json');
+
+function applyJunie(mode, home) {
+  const path = junieAllowlistPath(home);
+  const key = `junie|${path}`;
+  const record = loadRecord(home);
+  const before = readFile(path);
+  if (before === null && mode !== 'auto') {
+    commit(home, key, null);
+    return 'unchanged (no allowlist file)';
+  }
+  const allowlist = parseJson(before);
+  if (!isObject(allowlist)) throw new Error(`Junie allowlist must be an object: ${path}`);
+  const rules = member(allowlist, 'rules', {}, `Junie allowlist rules must be an object: ${path}`);
+  const mcpTools = member(rules, 'mcpTools', {}, `Junie mcpTools rules must be an object: ${path}`);
+  const list = member(mcpTools, 'rules', [], `Junie mcpTools rules must be an array of objects: ${path}`);
+  if (!list.every(isObject)) throw new Error(`Junie mcpTools rules must be an array of objects: ${path}`);
+  // Exactly the rule `auto` writes; only one LCU recorded adding is LCU's to remove.
+  const ours = (rule, pattern) => Object.keys(rule).length === 2 && rule.pattern === pattern && rule.action === 'allow';
+  const added = new Set((record[key]?.added ?? []).filter((pattern) => list.some((rule) => ours(rule, pattern))));
+  let updated = [...list];
+  const notes = [];
+  for (const pattern of JUNIE_PATTERNS) {
+    const existing = updated.find((rule) => rule.pattern === pattern);
+    if (mode === 'auto') {
+      if (!existing) {
+        updated.push({ pattern, action: 'allow' });
+        added.add(pattern);
+        notes.push(`added \`${pattern}\``);
+      } else if (!ours(existing, pattern)) notes.push(`kept your own \`${pattern}\` rule`);
+    } else if (added.has(pattern)) {
+      updated = updated.filter((rule) => !ours(rule, pattern));
+      added.delete(pattern);
+      notes.push(`removed \`${pattern}\``);
+    } else if (existing) notes.push(`kept your own \`${pattern}\` rule, which LCU did not add`);
+  }
+  if (updated.length !== list.length) {
+    mcpTools.rules = updated;
+    applyChanges([change(path, before, json(allowlist))]);
+  }
+  commit(home, key, mode === 'auto' && added.size ? { added: [...added].sort() } : null);
+  return notes.length ? `${notes.join(', ')} in mcpTools rules (${path})` : 'unchanged';
+}
+
 function omp(executable, env, home, ...args) {
   return checked('omp config', executable, ['config', ...args], { cwd: home, env, timeout: 60_000 }).stdout;
 }
@@ -270,6 +318,7 @@ export function apply(mode, name, home, { scope, project, env, plan = null }) {
   if (!MODES.includes(mode)) throw new Error(`Unknown approval mode: ${mode}`);
   if (name === 'claude-code') return applyClaude(mode, home, scope === 'project' ? project : null);
   if (name === 'omp') return applyOmp(mode, home, env);
+  if (name === 'junie') return applyJunie(mode, home);
   if (name === 'codex') {
     plan ??= codexPlan(mode, home, { scope, project, env });
     if (plan.record !== KEEP) commit(home, plan.key, plan.record);

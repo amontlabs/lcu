@@ -450,6 +450,8 @@ EXPECTED_ADDITIONS = (
 NEW_HARNESSES = {
     # DeepSeek Harness (docs/ADAPTERS.md#deepseek-harness): `--agent all` includes it.
     'dsh': '.local/share/lcu/dsh/',
+    # Junie (docs/ADAPTERS.md#junie): `--agent all` includes it; setup only writes its files, no command runs.
+    'junie': '.junie/',
 }
 
 

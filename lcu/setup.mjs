@@ -15,7 +15,7 @@ import { install as installApprovalMod } from './claude_mod.mjs';
 import { install as hideHostOnlyTools } from './claude_visibility.mjs';
 import { accountHome, isFile, lstat, real, shellQuote } from './fsutil.mjs';
 import { approvalNote, question as crossTurnQuestion, readCrossTurn, setCrossTurn } from './cross_turn.mjs';
-import { configureDsh, configureHermes, configureOmp, DSH_DEFAULT_PROFILE, dshExecutable, validDshProfile } from './harness_setup.mjs';
+import { configureDsh, configureHermes, configureJunie, configureOmp, DSH_DEFAULT_PROFILE, dshExecutable, validDshProfile } from './harness_setup.mjs';
 import { withLock } from './lock.mjs';
 import { ask, say, warn } from './terminal.mjs';
 
@@ -40,13 +40,15 @@ export const CLIENTS = {
   omp: { label: 'Oh My Pi', executable: 'omp', detectPath: '.omp', mcpAgent: '' },
   hermes: { label: 'Hermes', executable: 'hermes', detectPath: '.hermes', mcpAgent: '' },
   dsh: { label: 'DeepSeek Harness', executable: 'dsh', detectPath: '.dsh', mcpAgent: '' },
+  junie: { label: 'Junie', executable: 'junie', detectPath: '.junie', mcpAgent: '' },
 };
 export const ALIASES = { claude: 'claude-code', 'oh-my-pi': 'omp', 'hermes-agent': 'hermes', 'deepseek-harness': 'dsh' };
 // Harnesses whose native registration needs their own executable; Codex and Claude Code register through
-// add-mcp and their config files without the CLI installed.
+// add-mcp and their config files, and Junie through its config files, without the CLI installed.
 const NEEDS_BINARY = ['pi', 'omp', 'hermes', 'dsh'];
-// Native harness plugins are profile-scoped; project scope is unsupported.
-const USER_ONLY_AGENTS = ['omp', 'hermes', 'dsh'];
+// Native harness plugins are profile-scoped, and Junie reads hooks only from the user's config; project scope is
+// unsupported.
+const USER_ONLY_AGENTS = ['omp', 'hermes', 'dsh', 'junie'];
 
 // Shell and Windows command-line quoting for the commands LCU prints and registers.
 export const shellJoin = (args) => args.map(shellQuote).join(' ');
@@ -547,6 +549,17 @@ export async function configure(names, home, command, toolsRoot, releaseRoot,
       applyApproval(name);
       continue;
     }
+    if (name === 'junie') {
+      try {
+        const { mcpPath, configPath } = configureJunie(home, command, node, releaseRoot, { scope });
+        say(`${client.label}: MCP server registered in ${mcpPath}; turn hooks in ${configPath}.`);
+      } catch (error) {
+        fail(name, 'MCP', error);
+        continue;
+      }
+      applyApproval(name);
+      continue;
+    }
     let mcpCommand = command;
     let mcpSetupError = null;
     let codexPlan = null;
@@ -868,7 +881,7 @@ const agentScopes = (name) => (USER_ONLY_AGENTS.includes(name) ? 'user' : 'user,
 
 function validateAgentScope(names, scope) {
   if (scope === 'project' && names.some((name) => USER_ONLY_AGENTS.includes(name))) {
-    throw new Error('Oh My Pi, Hermes and DeepSeek Harness native plugins are profile-scoped. Use --scope user with the intended profile; project scope is not supported.');
+    throw new Error('Oh My Pi, Hermes and DeepSeek Harness native plugins are profile-scoped, and Junie reads hooks only from ~/.junie/config.json. Use --scope user with the intended profile; project scope is not supported.');
   }
 }
 
@@ -1154,7 +1167,8 @@ async function registerLocked(args, account, home, names, missing, register, pat
   if (approvalMode === 'auto' && !args.export) {
     const entries = { 'claude-code': 'Claude Code: allow `mcp__lcu__js` and `mcp__lcu__js_reset`',
       codex: 'Codex: `approval_mode = "approve"` for the `js` and `js_reset` tools of `[mcp_servers.lcu]`',
-      omp: 'Oh My Pi: `tools.approval` `js` and `js_reset` set to `allow`' };
+      omp: 'Oh My Pi: `tools.approval` `js` and `js_reset` set to `allow`',
+      junie: 'Junie: allowlist `mcpTools` rules for exactly `lcu:js` and `lcu:js_reset`' };
     const chosen = names.filter((name) => entries[name]).map((name) => entries[name]);
     say('Approval mode auto: add only LCU\'s own entries so its tools run without a per-call harness prompt' +
       (chosen.length ? `: ${chosen.join('; ')}` : '') + '. ' +

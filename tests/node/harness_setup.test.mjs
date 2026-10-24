@@ -1,12 +1,12 @@
-// Registration boundaries for the Oh My Pi, Hermes and DeepSeek Harness native harness packages.
+// Registration boundaries for the Oh My Pi, Hermes and DeepSeek Harness native harness packages and the Junie files.
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
-import { DSH_PACKAGE, dshDesktopListed } from '../../lcu/harness_setup.mjs';
+import { DSH_PACKAGE, dshDesktopListed, isJunieHook, JUNIE_HOOKS } from '../../lcu/harness_setup.mjs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import * as setup from '../../lcu/setup.mjs';
-import { output, override, posixTests, result, temporary, write } from './fixtures.mjs';
+import { output, override, posixTests, REPO, result, temporary, write } from './fixtures.mjs';
 
 const test = posixTests('the fake OMP, Hermes and DSH CLIs are sh scripts');
 
@@ -20,6 +20,7 @@ function fixture(t, releaseName = 'release') {
   write(join(release, 'adapters/pi/index.ts'), 'export default function () {}');
   for (const name of ['plugin.yaml', '__init__.py', 'bridge.mjs']) write(join(release, 'adapters/hermes', name), `fixture ${name}`);
   write(join(release, 'adapters/dsh/plugin.mjs'), 'export function apply() {}');
+  write(join(release, 'adapters/junie.mjs'), '// relay');
   const tools = join(root, 'tools');
   write(join(tools, 'node/bin/node'), '#!/bin/sh\n', 0o755);
   write(join(tools, 'node_modules/skills/bin/cli.mjs'));
@@ -237,4 +238,64 @@ test('the DSH Desktop check matches the app, not the dsh CLI that runs on the sa
   assert.equal(dshDesktopListed(`${binary} --expose-internals /x/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js plugin\n`), false);
   assert.equal(dshDesktopListed(`/Applications/DeepSeek Harness.app/Contents/Frameworks/DeepSeek Harness Helper.app/Contents/MacOS/DeepSeek Harness Helper\n`), false);
   assert.equal(dshDesktopListed('grep DeepSeek Harness\n'), false);
+});
+
+const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
+
+test('Junie registers the relay in mcp.json and its hooks in config.json, keeping everything else', async (t) => {
+  const f = fixture(t);
+  const mcpPath = join(f.home, '.junie/mcp/mcp.json');
+  const configPath = join(f.home, '.junie/config.json');
+  write(mcpPath, JSON.stringify({ mcpServers: { github: { url: 'https://example.invalid/mcp' }, lcu: { command: 'old' } } }));
+  const mine = { type: 'command', command: '~/.junie/hooks/check.sh', timeout: 10 };
+  write(configPath, JSON.stringify({ model: 'x', hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [mine] }], Stop: [{ hooks: [mine] }] } }));
+  assert.deepEqual(await f.configure('junie'), []);
+  assert.deepEqual(f.calls, []);
+  const node = join(f.tools, 'node/bin/node');
+  const adapter = join(f.release, 'adapters/junie.mjs');
+  assert.deepEqual(readJson(mcpPath).mcpServers, { github: { url: 'https://example.invalid/mcp' },
+    lcu: { command: node, args: [adapter, ...f.command], timeout: 3_600_000 } });
+  const config = readJson(configPath);
+  assert.equal(config.model, 'x');
+  assert.deepEqual(Object.keys(config.hooks), ['PreToolUse', 'Stop', 'SessionStart', 'UserPromptSubmit', 'StopFailure', 'SessionEnd']);
+  assert.deepEqual(config.hooks.PreToolUse, [{ matcher: 'Bash', hooks: [mine] }]);
+  const ours = (timeout) => ({ hooks: [{ type: 'command', command: `${node} ${adapter} --hook`, timeout }] });
+  assert.deepEqual(config.hooks.Stop, [{ hooks: [mine] }, ours(60)]);
+  for (const [event, timeout] of Object.entries(JUNIE_HOOKS)) if (event !== 'Stop') assert.deepEqual(config.hooks[event], [ours(timeout)]);
+  assert.match(f.seen.out, /Junie: MCP server registered in .*mcp\.json; turn hooks in .*config\.json\./);
+  // A second run changes nothing.
+  const bytes = [readFileSync(mcpPath, 'utf8'), readFileSync(configPath, 'utf8')];
+  assert.deepEqual(await f.configure('junie'), []);
+  assert.deepEqual([readFileSync(mcpPath, 'utf8'), readFileSync(configPath, 'utf8')], bytes);
+});
+
+test('Junie setup replaces an earlier release\'s hooks, and refuses project scope and malformed files', async (t) => {
+  const f = fixture(t, 'release with space');
+  const configPath = join(f.home, '.junie/config.json');
+  const old = { type: 'command', command: "/old/node '/opt/lcu/0.11.0 x/adapters/junie.mjs' --hook", timeout: 30 };
+  assert.ok(isJunieHook(old));
+  assert.ok(!isJunieHook({ type: 'command', command: '/x/adapters/junie.mjs --hook --other' }));
+  write(configPath, JSON.stringify({ hooks: { Stop: [{ hooks: [old] }, { hooks: [old, { type: 'command', command: 'mine' }] }] } }));
+  assert.deepEqual(await f.configure('junie'), []);
+  const stop = readJson(configPath).hooks.Stop;
+  assert.equal(stop.length, 2);
+  assert.deepEqual(stop[0], { hooks: [{ type: 'command', command: 'mine' }] });
+  assert.match(stop[1].hooks[0].command, /'[^']*release with space\/adapters\/junie\.mjs' --hook$/);
+  const failures = await f.configure('junie', { scope: 'project' });
+  assert.deepEqual(failures.map(([name, phase]) => [name, phase]), [['junie', 'MCP']]);
+  assert.match(failures[0][2], /--scope user; project scope is not supported/);
+  for (const content of ['[]', '{"hooks": []}', '{"hooks": {"Stop": {}}}', '{"hooks": {"Stop": [{"command": "x"}]}}']) {
+    write(configPath, content);
+    const [[, , message]] = await f.configure('junie');
+    assert.match(message, /Junie/);
+    assert.equal(readFileSync(configPath, 'utf8'), content);
+  }
+});
+
+test('the Junie hook table agrees with the relay', () => {
+  const relay = readFileSync(join(REPO, 'adapters/junie.mjs'), 'utf8');
+  const table = /HOOK_TIMEOUTS = (\{[^}]*\})/.exec(relay)[1].replace(/(\w+):/g, '"$1":');
+  assert.deepEqual(JSON.parse(table), JUNIE_HOOKS);
+  const events = /HOOK_EVENTS = \{([^}]*)\}/.exec(relay)[1].match(/(\w+):/g).map((key) => key.slice(0, -1));
+  assert.deepEqual(events, Object.keys(JUNIE_HOOKS));
 });

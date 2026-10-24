@@ -1,11 +1,13 @@
-// Local harness packages for Oh My Pi, Hermes and DeepSeek Harness; host configuration remains with their native installers.
+// Local harness packages for Oh My Pi, Hermes and DeepSeek Harness, whose host configuration remains with their native
+// installers, and the Junie registration, which has no installer.
 import { createHash } from 'node:crypto';
 import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
-import { real } from './fsutil.mjs';
-import { checked, json, regularPath, seams, spacedJson } from './setup.mjs';
+import { real, shellQuote } from './fsutil.mjs';
+import { applyChanges, change, checked, json, member, parseJson, readFile, regularPath, seams, spacedJson } from './setup.mjs';
 
 const MARKER = '.lcu-generated.json';
 
@@ -201,4 +203,65 @@ export function configureDsh(home, command, release, { scope, env, profile = DSH
     'locale/en.json': json(locale), 'icon.svg': DSH_ICON },
   (pkg) => checked('installer', executable, ['plugin', '--profile', profile, 'add', pkg], { cwd: home, env, timeout: 300_000 }));
   return { profile, destination };
+}
+
+
+// Junie --------------------------------------------------------------------------------------------------
+
+export const JUNIE_SERVER = 'lcu';
+/** The Junie hook events the relay's `--hook` mode handles, with Junie's timeout for each, in seconds. */
+export const JUNIE_HOOKS = { SessionStart: 10, UserPromptSubmit: 30, Stop: 60, StopFailure: 60, SessionEnd: 10 };
+// Junie's default MCP request timeout, 60 s, also bounds each tool call; the relay bounds its own calls.
+const JUNIE_MCP_TIMEOUT_MS = 3_600_000;
+const JUNIE_HOOK = /(^|[\\/])adapters[\\/]junie\.mjs'? --hook$/;
+
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+/** Whether a Junie hook entry is one LCU wrote, from any release. */
+export const isJunieHook = (hook) => isObject(hook) && hook.type === 'command' && typeof hook.command === 'string' &&
+  JUNIE_HOOK.test(hook.command);
+
+/**
+ * Register the Junie relay as the `lcu` server of `~/.junie/mcp/mcp.json` and its hooks in `~/.junie/config.json`,
+ * replacing only LCU's own entries. Junie has no installer for either; it reads both files as written here.
+ * Project scope is rejected: Junie ignores a project's config.json hooks unless it is started with that file.
+ */
+export function configureJunie(home, command, node, release, { scope }) {
+  if (process.platform === 'win32') throw new Error('Junie is not supported on Windows yet.');
+  if (scope !== 'user') {
+    throw new Error('Junie runs hooks only from ~/.junie/config.json, which LCU needs to end its turns. Use --scope user; project scope is not supported.');
+  }
+  const adapter = join(release, 'adapters/junie.mjs');
+  if (!existsSync(adapter)) throw new Error(`LCU Junie relay missing: ${adapter}`);
+  const mcpPath = join(home, '.junie/mcp/mcp.json');
+  const configPath = join(home, '.junie/config.json');
+
+  const mcpBefore = readFile(mcpPath);
+  const mcp = parseJson(mcpBefore);
+  if (!isObject(mcp)) throw new Error(`Junie MCP configuration must be an object: ${mcpPath}`);
+  const servers = member(mcp, 'mcpServers', {}, `Junie mcpServers must be an object: ${mcpPath}`);
+  servers[JUNIE_SERVER] = { command: String(node), args: [adapter, ...command], timeout: JUNIE_MCP_TIMEOUT_MS };
+
+  const configBefore = readFile(configPath);
+  const config = parseJson(configBefore);
+  if (!isObject(config)) throw new Error(`Junie configuration must be an object: ${configPath}`);
+  const hooks = member(config, 'hooks', {}, `Junie hooks must be an object: ${configPath}`);
+  const hookCommand = `${shellQuote(String(node))} ${shellQuote(adapter)} --hook`;
+  for (const [event, timeout] of Object.entries(JUNIE_HOOKS)) {
+    const groups = member(hooks, event, [], `Junie ${event} hooks must be an array of objects`);
+    if (!groups.every((group) => isObject(group) && Array.isArray(group.hooks))) {
+      throw new Error(`Junie ${event} hooks must be an array of objects with a hooks array: ${configPath}`);
+    }
+    // An earlier release's entry points at its own adapter path; only LCU's entries are replaced.
+    const kept = groups.map((group) => ({ ...group, hooks: group.hooks.filter((hook) => !isJunieHook(hook)) }))
+      .filter((group, index) => group.hooks.length || !groups[index].hooks.length);
+    kept.push({ hooks: [{ type: 'command', command: hookCommand, timeout }] });
+    hooks[event] = kept;
+  }
+  const changes = [];
+  if (mcpBefore === null || !isDeepStrictEqual(parseJson(mcpBefore), mcp)) changes.push(change(mcpPath, mcpBefore, json(mcp)));
+  if (configBefore === null || !isDeepStrictEqual(parseJson(configBefore), config)) {
+    changes.push(change(configPath, configBefore, json(config)));
+  }
+  applyChanges(changes);
+  return { mcpPath, configPath };
 }

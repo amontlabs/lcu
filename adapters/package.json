@@ -2,7 +2,7 @@
   "name": "lcu-harness-adapters",
   "version": "0.1.0",
   "private": true,
-  "description": "Connect Pi, Codex CLI, Claude Code, oh-my-pi, Hermes, and DeepSeek Harness to the installed OpenAI computer-use runtime.",
+  "description": "Connect Pi, Codex CLI, Claude Code, oh-my-pi, Hermes, DeepSeek Harness, and Junie to the installed OpenAI computer-use runtime.",
   "license": "MIT",
   "repository": {
     "type": "git",
