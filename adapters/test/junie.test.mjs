@@ -156,6 +156,11 @@ test('a failed turn end is retried before the session\'s next call, which is ref
     assert.deepEqual(ends.map(entry => [entry.args.hook_event_name, entry.args.turn_id]),
       [['Stop', turnOf(entries().at(-3)).turn_id], ['Stop', turnOf(entries().at(-3)).turn_id]]);
     assert.equal(entries().some(entry => entry.args?.code === 'four'), false);
+    // Another session's calls are refused too while that end fails.
+    await hook('UserPromptSubmit', 'junie-session');
+    const other = await (async () => { try { return await js('five'); } catch (error) { return error.message; } })();
+    assert.match(String(other), /still finishing the previous turn/);
+    assert.equal(entries().some(entry => entry.args?.code === 'five'), false);
   });
 });
 
@@ -169,6 +174,10 @@ test('an app approval Junie cannot show is cancelled and the result names the `l
     // An agent host app is refused before anyone could be asked, so there is nothing to allow.
     assert.deepEqual(await js('approval-native-host'), [JSON.stringify({ action: 'decline' })]);
     assert.deepEqual(await js('plain'), ['plain']);
+    // An approval request does not say which call asked, so overlapping calls get no hint.
+    const [slow, asked] = await Promise.all([js('sleep-300'), js('approval-native')]);
+    assert.deepEqual(slow, ['sleep-300']);
+    assert.deepEqual(asked, [JSON.stringify({ action: 'cancel' })]);
   });
   assert.match(approvalHint('Visual Studio Code'), /`lcu apps allow "Visual Studio Code"`/);
 });

@@ -61,6 +61,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
 server.setRequestHandler(CallToolRequestSchema, async request => {
   const { name, arguments: args, _meta } = request.params;
   record({ name, args, meta: _meta });
+  if (name === 'js' && /^sleep-\d+$/.test(args?.code ?? '')) {
+    await new Promise(resolve => setTimeout(resolve, Number(args.code.slice(6))));
+    return { content: [{ type: 'text', text: args.code }] };
+  }
   if (name === 'js' && args?.code === 'stop-pending') {
     const turn = _meta?.['x-codex-turn-metadata'] ?? {};
     activeRequest = { session_id: turn.session_id, turn_id: turn.turn_id };

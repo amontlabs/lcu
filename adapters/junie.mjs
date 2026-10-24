@@ -81,7 +81,9 @@ export async function runJunieRelay({
     allowedOrigins: process.env.LCU_APPROVED_ORIGINS ? JSON.parse(process.env.LCU_APPROVED_ORIGINS) : [],
     onElicitation: async (params) => {
       const approval = nativeAppApprovalOptions(params);
-      if (approval) for (const call of inFlight) call.add(approval.resource);
+      // An approval request does not name the call it came from, so only a lone call can get the hint;
+      // with calls overlapping, the model still sees the runtime's own "not approved" error.
+      if (approval && inFlight.size === 1) for (const call of inFlight) call.add(approval.resource);
       // Cancel, not decline: nothing is decided, so a retry after `lcu apps allow` is not refused.
       return { action: 'cancel' };
     },
@@ -116,12 +118,17 @@ export async function runJunieRelay({
     }
   }
 
-  /** The open LCU turn of the session, ending a missed or failed earlier one first. */
+  /**
+   * The open LCU turn of the session, ending a missed or failed earlier one first. A failed end of any
+   * session's turn is retried too, so no call runs while an earlier turn's hooks may still hold the desktop.
+   */
   async function turnOf(sessionId) {
     const state = stateOf(sessionId);
-    if (state.active) return state.active;
+    const unfinished = [...sessions].filter(([id, other]) => id !== sessionId && (other.pending || other.cleaning));
+    if (state.active && !unfinished.length) return state.active;
     try {
-      await finish(sessionId, 'Interrupt');
+      await Promise.all([...unfinished.map(([id]) => finish(id, 'Interrupt')),
+        ...(state.active ? [] : [finish(sessionId, 'Interrupt')])]);
     } catch (error) {
       throw new Error('LCU is still finishing the previous turn, so Computer Use actions are paused. ' +
         `Try again in a few seconds. ${asError(error)}`);
@@ -134,8 +141,8 @@ export async function runJunieRelay({
   async function announce(sessionId) {
     current = sessionId;
     stateOf(sessionId);
-    await Promise.all([...sessions.keys()].filter(id => id !== sessionId && sessions.get(id).active)
-      .map(id => finish(id, 'Interrupt').catch(() => {})));
+    await Promise.all([...sessions].filter(([id, other]) => id !== sessionId && (other.active || other.pending))
+      .map(([id]) => finish(id, 'Interrupt').catch(() => {})));
   }
 
   /** Answer one hook: `{additional_context?}`. */
