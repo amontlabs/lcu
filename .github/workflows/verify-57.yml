@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   d-drive:
-    name: ChatGPT on D:, LCU ${{ matrix.ref }}
+    name: "ChatGPT on D:, LCU ${{ matrix.ref }}"
     strategy:
       fail-fast: false
       matrix:
@@ -33,7 +33,7 @@ jobs:
           Get-PSDrive -PSProvider FileSystem | Format-Table Name,Root,Used,Free
           Get-AppxVolume | Format-List
           winget --version
-      - name: Make D: the default AppX volume
+      - name: "Make D: the default AppX volume"
         shell: pwsh
         run: |
           Add-AppxVolume -Path D:\WindowsApps
@@ -41,7 +41,7 @@ jobs:
           Set-AppxDefaultVolume -Volume D:\WindowsApps
           Get-AppxVolume | Format-List
           Get-AppxDefaultVolume | Format-List
-      - name: Install ChatGPT from the Store to D:
+      - name: "Install ChatGPT from the Store to D:"
         shell: pwsh
         run: |
           winget install --id 9NT1R1C2HH7J --source msstore --accept-package-agreements --accept-source-agreements --disable-interactivity
