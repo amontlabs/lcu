@@ -744,6 +744,43 @@ test('declining "Apply this setup?" applies no cross-turn change, and a damaged 
   assert.equal(readFileSync(crossTurnFile(f), 'utf8'), '{broken');
 });
 
+test('Junie setup warns that approvals last until revoked and asks to continue unless --yes', async (t) => {
+  const answers = { crossTurn: 'n', apply: 'y', junie: 'n' };
+  const junieFixture = () => {
+    const f = interactiveFixture(t, answers);
+    override(t, setup.seams, 'ask', (q) => {
+      f.prompts.push(q);
+      return q === setup.JUNIE_CONTINUE_QUESTION ? answers.junie : q === CROSS_TURN_QUESTION ? answers.crossTurn : answers.apply;
+    });
+    return f;
+  };
+  // Declined: Junie is skipped, the other harness is still registered.
+  let f = junieFixture();
+  let run = await f.raw('--agent', 'junie', '--agent', 'codex', '--no-chrome', '--cross-turn', 'off');
+  assert.equal(run.code, 0, run.err);
+  assert.ok(run.err.includes(setup.JUNIE_APPROVAL_WARNING));
+  assert.match(setup.JUNIE_APPROVAL_WARNING, /allows that app until you revoke it with `lcu apps revoke <App>`/);
+  assert.deepEqual(f.prompts, [setup.JUNIE_CONTINUE_QUESTION, 'Apply this setup? [y/N] ']);
+  assert.match(run.out, /Junie skipped/);
+  assert.deepEqual(f.registered.map((entry) => entry.names), [['codex']]);
+  // Accepted: Junie is registered.
+  answers.junie = 'y';
+  f = junieFixture();
+  run = await f.raw('--agent', 'junie', '--no-chrome', '--cross-turn', 'off');
+  assert.equal(run.code, 0, run.err);
+  assert.deepEqual(f.registered.map((entry) => entry.names), [['junie']]);
+  // --yes: the warning is printed and nothing is asked.
+  f = junieFixture();
+  run = await f.raw('--agent', 'junie', '--no-chrome', '--cross-turn', 'off', '--yes');
+  assert.equal(run.code, 0, run.err);
+  assert.ok(run.err.includes(setup.JUNIE_APPROVAL_WARNING));
+  assert.deepEqual(f.prompts, []);
+  assert.deepEqual(f.registered.map((entry) => entry.names), [['junie']]);
+  // Other harnesses get no Junie warning.
+  run = await f.main('--agent', 'codex');
+  assert.ok(!run.err.includes('Junie'));
+});
+
 test('the cross-turn question names per-app approvals only where they exist', () => {
   assert.match(question('darwin'), /Per-app approvals still apply\. \[y\/N\] $/);
   assert.match(question('win32'), /Per-app approvals still apply/);

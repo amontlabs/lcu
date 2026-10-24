@@ -130,7 +130,7 @@ For Junie (experimental, macOS and Linux), run:
 
 Setup adds the `lcu` MCP server to `~/.junie/mcp/mcp.json` and LCU's turn hooks to `~/.junie/config.json`, keeping everything else in both files. Project scope is rejected because Junie reads hooks only from that user file. Restart Junie after setup. Things to know:
 
-- Junie cannot show LCU's "Allow Computer Use to use ...?" prompt. Allow each app you want the agent to control beforehand with `lcu apps allow <App>` (for example `lcu apps allow Notes`; it asks for Touch ID or your password). For an app that is not allowed yet, the call fails and the agent is told to ask you to run that command.
+- **App approvals are permanent until revoked.** Junie cannot show LCU's "Allow Computer Use to use ...?" prompt (until JetBrains ships elicitation support in Junie's MCP client). For an app that is not allowed yet, the call fails and Junie is told to run `lcu apps allow <App>` itself; macOS then asks you for Touch ID or your password, and approving allows that app, for every agent, until you run `lcu apps revoke <App>`. Junie is asked to offer that revoke when its task is done. List allowed apps with `lcu apps`. You can also allow apps beforehand yourself (for example `lcu apps allow Notes`). Setup prints this warning and, when interactive without `--yes`, asks `Continue? [y/N]` before registering Junie.
 - Junie picks the MCP tools it offers for each prompt, so mention the app or computer use in your prompt.
 - Junie asks before each MCP call; `--approval auto` adds allowlist rules for exactly LCU's two tools.
 

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { approvalHint, controlDirectory, runJunieHook } from '../junie.mjs';
+import { approvalHint, controlDirectory, launcherOf, runJunieHook } from '../junie.mjs';
 
 // Junie is not supported on Windows (setup refuses it): the relay and its hooks meet on a Unix socket.
 const unix = { skip: process.platform === 'win32' && 'Junie is not supported on Windows' };
@@ -164,7 +164,7 @@ test('a failed turn end is retried before the session\'s next call, which is ref
   });
 });
 
-test('an app approval Junie cannot show is cancelled and the result names the `lcu apps allow` command', unix, async () => {
+test('an app approval Junie cannot show is cancelled and the result tells the model to run `lcu apps allow`', unix, async () => {
   await withRelay(async ({ hook, js }) => {
     await hook('UserPromptSubmit', 'junie-session');
     const [decision, hint] = await js('approval-native');
@@ -179,7 +179,19 @@ test('an app approval Junie cannot show is cancelled and the result names the `l
     assert.deepEqual(slow, ['sleep-300']);
     assert.deepEqual(asked, [JSON.stringify({ action: 'cancel' })]);
   });
-  assert.match(approvalHint('Visual Studio Code'), /`lcu apps allow "Visual Studio Code"`/);
+  const hint = approvalHint('Visual Studio Code');
+  assert.match(hint, /Run `lcu apps allow "Visual Studio Code"` yourself in a terminal/);
+  assert.match(hint, /until it is revoked\. Then retry the call\./);
+  assert.match(hint, /fails, is refused or times out .*ask the person to run it themselves and stop/);
+  assert.match(hint, /offer to run `lcu apps revoke "Visual Studio Code"` for them\.$/);
+  assert.doesNotMatch(hint, /Do not run/);
+  assert.match(approvalHint('A"$b'), /`lcu apps allow "A\\"\\\$b"`/);
+  // The launcher setup passes to the relay is named in full, so the hint works when `lcu` is not on PATH.
+  const launcher = '/home/u/.local/share/lcu/current/bin/lcu';
+  assert.equal(launcherOf(['/x/bin/lcu-session', '--user', 'u', '--', launcher, '--chrome']), launcher);
+  assert.equal(launcherOf([process.execPath, 'fixture.mjs']), 'lcu');
+  assert.match(approvalHint('Notes', launcher), new RegExp(`\`${launcher} apps allow Notes\``));
+  assert.match(approvalHint('Notes', '/Users/a b/bin/lcu'), /`"\/Users\/a b\/bin\/lcu" apps revoke Notes`/);
 });
 
 test('the hook stays silent and never fails without a relay, with bad input, or with a stale socket', unix, async () => {

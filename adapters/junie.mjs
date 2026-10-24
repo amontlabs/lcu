@@ -3,13 +3,14 @@
 // Junie's own command hooks (`junie.mjs --hook`, installed by `lcu setup --agent junie`) reach this relay over a
 // private socket named for the Junie process that runs both: they mark the turn boundaries and carry the original
 // instructions into the first prompt of each session. Native-app approvals cannot be shown in Junie; the call
-// result tells the model which `lcu apps allow` command the person can run instead.
+// result tells the model to run `lcu apps allow <App>` itself (the person approves with Touch ID or their password,
+// which allows the app until it is revoked), and to offer `lcu apps revoke <App>` when its task is done.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -52,12 +53,22 @@ export function controlDirectory({ env = process.env, home = env.HOME || homedir
   return Buffer.byteLength(state) <= MAX_DIRECTORY_BYTES ? state : join(temporary, `lcu-junie-${uid}`);
 }
 
-/** The tool-result text that replaces an approval prompt Junie cannot show. */
-export function approvalHint(app) {
-  const quoted = /^[A-Za-z0-9._-]+$/.test(app) ? app : `"${app.replaceAll('"', '\\"')}"`;
+const shellWord = (word) => (/^[A-Za-z0-9._\/-]+$/.test(word) ? word : `"${word.replace(/["\\$`]/g, '\\$&')}"`);
+
+/** The absolute `lcu` launcher among the relay's original command (setup passes it), else plain `lcu`. */
+export function launcherOf(command = []) {
+  return [...command].reverse().find(word => typeof word === 'string' && isAbsolute(word) && basename(word) === 'lcu') ?? 'lcu';
+}
+
+/** The tool-result text that replaces an approval prompt Junie cannot show. `lcu` is the launcher to name. */
+export function approvalHint(app, lcu = 'lcu') {
+  const run = (verb) => `\`${shellWord(lcu)} apps ${verb} ${shellWord(app)}\``;
   return `LCU: Computer Use needs the person's approval to control ${app}, and Junie cannot show approval prompts ` +
-    `yet. Ask the person to run \`lcu apps allow ${quoted}\` in a terminal (it asks for Touch ID or their ` +
-    'password), then try again. Do not run that command yourself.';
+    `yet. Run ${run('allow')} yourself in a terminal: the person approves with Touch ID or their password, which ` +
+    `allows ${app} until it is revoked. Then retry the call. If the command fails, is refused or times out (for ` +
+    'example, nobody is there to approve), ask the person to run it themselves and stop. Remember the apps you ' +
+    'allow this way; when your task is done, tell the person they stay allowed until revoked and offer to run ' +
+    `${run('revoke')} for them.`;
 }
 
 /**
@@ -73,6 +84,8 @@ export async function runJunieRelay({
   // The session Junie last reported through a hook; calls before any hook use this relay's own id.
   let current;
   const fallback = `junie-${randomUUID()}`;
+  // The launcher named in approval hints, so they work when `lcu` is not on PATH.
+  const lcu = launcherOf(command);
   // Calls in flight -> the apps whose approval Junie could not show during them.
   const inFlight = new Set();
 
@@ -243,7 +256,7 @@ export async function runJunieRelay({
         }));
         if (!approvals.size) return result;
         return { ...result, content: [...(result.content ?? []),
-          ...[...approvals].map(app => ({ type: 'text', text: approvalHint(app) }))] };
+          ...[...approvals].map(app => ({ type: 'text', text: approvalHint(app, lcu) }))] };
       } finally {
         inFlight.delete(approvals);
         turn.calls--;

@@ -1105,6 +1105,12 @@ async function setup(args, account, home, names, register, crossTurn) {
   return finish(args, outcome, { desktopCommand, directRuntime, setupCommand, home });
 }
 
+/** Printed by setup for Junie, never to a model: its MCP client cannot show LCU's per-app approval prompt. */
+export const JUNIE_APPROVAL_WARNING = 'Warning: Junie can\'t show LCU\'s per-app approval prompt. Junie will run `lcu apps allow <App>` ' +
+  'itself when it needs an app; each approval (Touch ID or password) allows that app until you revoke it with ' +
+  '`lcu apps revoke <App>`. List allowed apps with `lcu apps`.';
+export const JUNIE_CONTINUE_QUESTION = 'Continue? [y/N] ';
+
 async function registerLocked(args, account, home, names, missing, register, paths) {
   const { releaseRoot, desktopCommand, directRuntime, toolsRoot, setupCommand, setupEnvironment, crossTurn } = paths;
   const state = loadSetupState(home);
@@ -1193,6 +1199,15 @@ async function registerLocked(args, account, home, names, missing, register, pat
     say('Claude Code: original turn cleanup runs on normal Stop and active MCP-call cancellation. Esc during model wait after a tool completes has no cleanup event and may leave native helpers active.');
   }
   await (await import('./tested.mjs')).report(releaseRoot, { write: (text) => say(text.trimEnd()) });
+  if (names.includes('junie') && !args.export) {
+    // Shown to the person only: Junie lets the model run `lcu apps allow` itself, so approvals outlive the task.
+    warn(JUNIE_APPROVAL_WARNING);
+    if (!args.yes && seams.interactive() &&
+      !['y', 'yes'].includes((await seams.ask(JUNIE_CONTINUE_QUESTION)).trim().toLowerCase())) {
+      names = names.filter((name) => name !== 'junie');
+      say('Junie skipped; it will not be registered.');
+    }
+  }
   if (!args.yes) {
     if (!seams.interactive()) throw new Error('Review the selection above, then rerun with --yes for noninteractive setup.');
     if (!['y', 'yes'].includes((await seams.ask('Apply this setup? [y/N] ')).trim().toLowerCase())) {
