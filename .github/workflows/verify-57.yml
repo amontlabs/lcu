@@ -1,0 +1,72 @@
+name: verify-57 (throwaway)
+
+on:
+  push:
+    branches: [claude/verify-57-windows-d]
+
+permissions:
+  contents: read
+
+jobs:
+  d-drive:
+    name: ChatGPT on D:, LCU ${{ matrix.ref }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [main, claude/verify-57-windows-d]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Host
+        shell: pwsh
+        run: |
+          Get-ComputerInfo -Property OsName,OsVersion,OsBuildNumber | Format-List
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name,Root,Used,Free
+          Get-AppxVolume | Format-List
+          winget --version
+      - name: Make D: the default AppX volume
+        shell: pwsh
+        run: |
+          Add-AppxVolume -Path D:\WindowsApps
+          Mount-AppxVolume -Volume D:\WindowsApps -ErrorAction SilentlyContinue
+          Set-AppxDefaultVolume -Volume D:\WindowsApps
+          Get-AppxVolume | Format-List
+          Get-AppxDefaultVolume | Format-List
+      - name: Install ChatGPT from the Store to D:
+        shell: pwsh
+        run: |
+          winget install --id 9NT1R1C2HH7J --source msstore --accept-package-agreements --accept-source-agreements --disable-interactivity
+          "winget exit: $LASTEXITCODE"
+          $pkg = Get-AppxPackage -Name OpenAI.Codex
+          if (-not $pkg) { throw 'OpenAI.Codex is not registered' }
+          $pkg | Format-List Name,Version,Architecture,SignatureKind,Status,InstallLocation
+          Get-Item -LiteralPath $pkg.InstallLocation | Format-List FullName,Attributes,LinkType,Target
+      - name: Build the Windows archive
+        shell: pwsh
+        run: |
+          python scripts/build_bundle.py --platform windows --output "$env:RUNNER_TEMP\dist"
+          $zip = (Get-ChildItem "$env:RUNNER_TEMP\dist\*.zip").FullName
+          Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP\lcu"
+          Get-ChildItem "$env:RUNNER_TEMP\lcu"
+      - name: Install LCU (runtime only)
+        shell: pwsh
+        run: |
+          $release = (Get-ChildItem "$env:RUNNER_TEMP\lcu" -Directory | Select-Object -First 1).FullName
+          powershell -ExecutionPolicy Bypass -File "$release\scripts\install.ps1" --runtime-only --yes
+          "install exit: $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: LCU version and doctor
+        shell: pwsh
+        run: |
+          & "$env:LOCALAPPDATA\LCU\lcu.cmd" --version
+          & "$env:LOCALAPPDATA\LCU\lcu.cmd" doctor
+          exit 0
