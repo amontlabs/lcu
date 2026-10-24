@@ -135,6 +135,10 @@ test('initialisation statements travel with what they initialise; unrelated ones
   f.layoutError(f.members(factory('const u=state.value', `${prelude}state.unused=require("electron");`)), /depends on Electron/);
   const sequence = f.plan(f.members(factory('const u=state.value', 'const state={},tally={n:0};state.value=41,state.value++,tally.n+=2;'))).module;
   assert.ok(sequence.includes('state.value=41,state.value++,tally.n+=2;') && sequence.includes('const tally={n:0};'));
+  // The bundler folds a side-effect import into a module binding's interop statement.
+  const interop = f.plan(f.members(factory('const u=net', 'const e=require("./rolldown-runtime-h.js");let net=require("node:net");' +
+    'net=e.a(net),require("node:http");'), SPLIT_MEMBERS));
+  assert.ok(interop.module.includes('net=e.a(net),require("node:http");'));
   for (const [source, expected] of [['const state={};state.value=41,register(state);function register(){}', 'register(state);'],
     ['const state={};delete state.value;', 'delete state.value;'], ['const state={};[state.value]=[1];', '[state.value]=[1];']]) {
     assert.ok(f.plan(f.members(factory('const u=state', source))).module.includes(expected), source);

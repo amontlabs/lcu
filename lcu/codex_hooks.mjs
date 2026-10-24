@@ -201,8 +201,9 @@ export async function installHooks(cli, configPath, cwd, env, hostRoot, noticeCo
       noticeEdits.push({ keyPath: `hooks.${event}`, value: kept, mergeStrategy: 'replace' });
     }
   }
-  // macOS temporary paths can use /var while Codex reports /private/var; match the writer's canonical path.
-  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'lcu-codex-config-')));
+  // macOS temporary paths can use /var while Codex reports /private/var, and a Windows temporary path can use a
+  // short (8.3) name while Codex reports the long one; match the writer's canonical path.
+  const scratch = realpathSync.native(mkdtempSync(join(tmpdir(), 'lcu-codex-config-')));
   let after;
   let trustedConfig;
   try {
@@ -230,10 +231,10 @@ export async function installHooks(cli, configPath, cwd, env, hostRoot, noticeCo
       const count = Object.values(expected).flat().reduce((total, group) => total + group.hooks.length, 0);
       if (trust.length !== count) throw new Error('Codex did not discover exactly the original LCU lifecycle hooks.');
       for (const [event, notice] of Object.entries(notices)) {
-        // Trust only the exact LCU notice command at this source path.
+        // Trust only the exact LCU notice command at this source path; Codex on Windows reports commandWindows.
         const eventName = event[0].toLowerCase() + event.slice(1);
         const found = listed.data.flatMap((entry) => entry.hooks).filter((hook) => hook.sourcePath === config &&
-          hook.eventName === eventName && hook.command === notice.hooks[0].command);
+          hook.eventName === eventName && [notice.hooks[0].command, notice.hooks[0].commandWindows].includes(hook.command));
         if (found.length !== 1) throw new Error(`Codex did not discover exactly the LCU ${event} update notice hook.`);
         trust.push(trusted(keyFor(found[0]), found[0].currentHash));
       }
@@ -245,7 +246,8 @@ export async function installHooks(cli, configPath, cwd, env, hostRoot, noticeCo
     });
     trustedConfig = readFileSync(config);
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    // Windows can briefly keep files of the exited app-server open.
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 10 });
   }
   const changes = [change(configPath, before, trustPath === configPath ? trustedConfig : after)];
   if (trustPath !== configPath) changes.push(change(trustPath, trustBefore, trustedConfig));

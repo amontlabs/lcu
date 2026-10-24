@@ -125,6 +125,27 @@ test('an MSIX-encoded scoped module segment is accepted; a redirected file is re
   assert.throws(() => resolveInstalledWindowsApp(), /redirected path|missing or outside the app/);
 });
 
+test('a package on a secondary AppX volume is selected through its WindowsApps junction, and only there', (t) => {
+  const { app, registered } = storeApp(t);
+  const volume = join(app, '../D/WindowsApps', `OpenAI.Codex_${VERSION}_x64`);
+  mkdirSync(join(volume, '..'), { recursive: true });
+  renameSync(app, volume);
+  const location = join(app, '../ProgramFiles/WindowsApps', `OpenAI.Codex_${VERSION}_x64`);
+  mkdirSync(join(location, '..'), { recursive: true });
+  symlinkSync(volume, location, 'junction');
+  const query = onWindows(t, { ...registered, InstallLocation: location });
+  assert.equal(resolveInstalledWindowsApp().app, volume);
+  for (const elsewhere of [join(app, '../D/Other', `OpenAI.Codex_${VERSION}_x64`), join(app, '../D/WindowsApps/OpenAI.Codex_other')]) {
+    mkdirSync(join(elsewhere, '..'), { recursive: true });
+    renameSync(volume, elsewhere);
+    unlinkSync(location);
+    symlinkSync(elsewhere, location, 'junction');
+    assert.throws(() => resolveInstalledWindowsApp(), /missing or redirected/);
+    renameSync(elsewhere, volume);
+  }
+  assert.equal(query.mock.callCount(), 3);
+});
+
 // ---- launching the managed private copy --------------------------------------------------------------
 
 function windowsRelease(t) {

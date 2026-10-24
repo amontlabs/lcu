@@ -113,6 +113,50 @@ test('installing the hooks is trusted, idempotent and removable', { skip: !codex
   assert.deepEqual(parseToml(readFileSync(config, 'utf8')).hooks.SessionStart.map((group) => group.hooks[0].command), ['echo mine']);
 });
 
+// A stand-in for the app-server's config writer that reports command hooks the way Codex on Windows does: by
+// their commandWindows. The scratch config holds the applied edits as JSON.
+const WINDOWS_CODEX = String.raw`
+const { readFileSync, writeFileSync } = await import('node:fs');
+const readline = await import('node:readline');
+const config = process.env.CODEX_HOME + '/config.toml';
+const load = () => JSON.parse(readFileSync(config, 'utf8') || '{}');
+const snake = (event) => event.replace(/[A-Z]/g, (c, i) => (i ? '_' : '') + c.toLowerCase());
+for await (const line of readline.createInterface({ input: process.stdin })) {
+  const message = JSON.parse(line);
+  let result;
+  if (message.method === 'initialize') result = {};
+  else if (message.method === 'config/batchWrite') {
+    const state = load();
+    for (const edit of message.params.edits) state[edit.keyPath] = edit.value;
+    writeFileSync(config, JSON.stringify(state));
+    result = {};
+  } else if (message.method === 'hooks/list') {
+    const hooks = Object.entries(load()).filter(([key]) => /^hooks\.[A-Za-z]+$/.test(key)).flatMap(([key, groups]) => {
+      const event = key.slice(6);
+      return groups.flatMap((group, g) => group.hooks.map((hook, h) => ({ sourcePath: config, key: config + ':' + snake(event) + ':' + g + ':' + h,
+        eventName: event[0].toLowerCase() + event.slice(1), server: hook.server, tool: hook.tool,
+        command: hook.commandWindows ?? hook.command, currentHash: 'sha256:' + event })));
+    });
+    result = { data: [{ hooks, errors: [] }] };
+  }
+  if (result) console.log(JSON.stringify({ id: message.id, result }));
+}
+`;
+
+test('the update-notice hook is trusted when Codex reports its Windows command', async (t) => {
+  const root = hostPlugin(temporary(t));
+  const home = join(root, 'home');
+  mkdirSync(home);
+  const server = write(join(root, 'codex-server.mjs'), WINDOWS_CODEX);
+  const cli = write(join(root, 'codex'), `#!/bin/sh\nexec '${process.execPath}' '${server}'\n`, 0o755);
+  const config = write(join(home, 'config.toml'));
+  await hooks.installHooks(cli, config, root, { ...process.env, HOME: home, CODEX_HOME: home }, root, '/p/a b/lcu');
+  const trust = Object.entries(JSON.parse(readFileSync(config, 'utf8'))).filter(([key]) => key.startsWith('hooks.state.'));
+  assert.deepEqual(trust.map(([key, hash]) => [key.split(':').at(-3), hash]).sort(), [['interrupt', 'sha256:Interrupt'],
+    ['session_start', 'sha256:SessionStart'], ['stop', 'sha256:Stop'], ['subagent_stop', 'sha256:SubagentStop'],
+    ['user_prompt_submit', 'sha256:UserPromptSubmit']]);
+});
+
 const SERVER = String.raw`
 const readline = await import('node:readline');
 const lines = readline.createInterface({ input: process.stdin });
