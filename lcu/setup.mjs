@@ -1206,6 +1206,10 @@ async function registerLocked(args, account, home, names, missing, register, pat
       !['y', 'yes'].includes((await seams.ask(JUNIE_CONTINUE_QUESTION)).trim().toLowerCase())) {
       names = names.filter((name) => name !== 'junie');
       say('Junie skipped; it will not be registered.');
+      if (!names.length) {
+        say('Cancelled; no agent configuration changed.');
+        return 'cancelled';
+      }
     }
   }
   if (!args.yes) {

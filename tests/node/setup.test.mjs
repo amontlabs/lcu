@@ -763,6 +763,12 @@ test('Junie setup warns that approvals last until revoked and asks to continue u
   assert.deepEqual(f.prompts, [setup.JUNIE_CONTINUE_QUESTION, 'Apply this setup? [y/N] ']);
   assert.match(run.out, /Junie skipped/);
   assert.deepEqual(f.registered.map((entry) => entry.names), [['codex']]);
+  // Declined with Junie alone: nothing is left to apply, so setup stops there.
+  f = junieFixture();
+  run = await f.raw('--agent', 'junie', '--no-chrome', '--cross-turn', 'off');
+  assert.deepEqual(f.prompts, [setup.JUNIE_CONTINUE_QUESTION]);
+  assert.match(run.out, /Cancelled; no agent configuration changed/);
+  assert.deepEqual(f.registered, []);
   // Accepted: Junie is registered.
   answers.junie = 'y';
   f = junieFixture();

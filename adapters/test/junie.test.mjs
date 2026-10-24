@@ -181,7 +181,8 @@ test('an app approval Junie cannot show is cancelled and the result tells the mo
   });
   const hint = approvalHint('Visual Studio Code');
   assert.match(hint, /Run `lcu apps allow "Visual Studio Code"` yourself in a terminal/);
-  assert.match(hint, /until it is revoked\. Then retry the call\./);
+  assert.match(hint, /timeout of at least 300 seconds/);
+  assert.match(hint, /until it is revoked\. .*Then retry the call\./);
   assert.match(hint, /fails, is refused or times out .*ask the person to run it themselves and stop/);
   assert.match(hint, /offer to run `lcu apps revoke "Visual Studio Code"` for them\.$/);
   assert.doesNotMatch(hint, /Do not run/);
