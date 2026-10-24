@@ -9,11 +9,14 @@ permissions:
 
 jobs:
   d-drive:
-    name: "ChatGPT on D:, LCU ${{ matrix.ref }}"
+    name: "ChatGPT on ${{ matrix.volume }}:, LCU ${{ matrix.ref }}"
     strategy:
       fail-fast: false
       matrix:
-        ref: [main, claude/verify-57-windows-d]
+        include:
+          - { ref: main, volume: D }
+          - { ref: claude/verify-57-windows-d, volume: D }
+          - { ref: claude/verify-57-windows-d, volume: C }
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -34,6 +37,7 @@ jobs:
           Get-AppxVolume | Format-List
           winget --version
       - name: "Make D: the default AppX volume"
+        if: matrix.volume == 'D'
         shell: pwsh
         run: |
           Add-AppxVolume -Path D:\WindowsApps
@@ -41,11 +45,11 @@ jobs:
           Set-AppxDefaultVolume -Volume D:\WindowsApps
           Get-AppxVolume | Format-List
           Get-AppxDefaultVolume | Format-List
-      - name: "Install ChatGPT from the Store to D:"
+      - name: "Install ChatGPT from the Store"
         shell: pwsh
         run: |
           $agree = @('--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
-          $ids = @()
+          $ids = @('9PLM9XGG6VKS')
           foreach ($term in 'ChatGPT', 'Codex', 'OpenAI') {
             $out = winget search $term --source msstore --count 25 --accept-source-agreements --disable-interactivity | Out-String
             $out
@@ -78,6 +82,24 @@ jobs:
           powershell -ExecutionPolicy Bypass -File "$release\scripts\install.ps1" --runtime-only --yes
           "install exit: $LASTEXITCODE"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Copy diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $pkg = Get-AppxPackage -Name OpenAI.Codex
+          if (-not $pkg) { exit 0 }
+          $real = (Get-Item -LiteralPath $pkg.InstallLocation).Target
+          if (-not $real) { $real = $pkg.InstallLocation }
+          $node = Join-Path $real 'app\resources\cua_node\bin\node.exe'
+          "node: $node"
+          Get-Item -LiteralPath $node | Format-List FullName,Length,Attributes
+          (Get-Acl -LiteralPath $node).AccessToString
+          cipher /c $node
+          $dest = Join-Path $env:RUNNER_TEMP 'copy-check'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          try { Copy-Item -LiteralPath $node -Destination (Join-Path $dest 'ci.exe'); 'Copy-Item: ok' } catch { "Copy-Item: $_" }
+          $js = 'const fs=require("fs");const [s,d]=process.argv.slice(1);for(const [n,f] of [["copyFileSync",()=>fs.copyFileSync(s,d+"\\a.exe")],["copyFileSync COPYFILE_FICLONE",()=>fs.copyFileSync(s,d+"\\b.exe",fs.constants.COPYFILE_FICLONE)],["read+write",()=>fs.writeFileSync(d+"\\c.exe",fs.readFileSync(s))]]){try{f();console.log(n+": ok")}catch(e){console.log(n+": "+e.code+" "+e.errno+" "+e.message)}}'
+          node -e $js $node $dest
       - name: LCU version and doctor
         shell: pwsh
         run: |
