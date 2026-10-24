@@ -202,7 +202,7 @@ test('an app approval Junie cannot show is cancelled and the result tells the mo
   assert.match(hint, /timeout of at least 300 seconds/);
   assert.match(hint, /until it is revoked\. .*Then retry the call\./);
   assert.match(hint, /fails, is refused or times out .*ask the person to run it themselves and stop/);
-  assert.match(hint, /offer to run `lcu apps revoke "Visual Studio Code"` for them\.$/);
+  assert.match(hint, /In your final answer, say that Visual Studio Code stays allowed until revoked, show `lcu apps revoke "Visual Studio Code"`, and offer to run it for them\.$/);
   assert.doesNotMatch(hint, /Do not run/);
   assert.match(approvalHint('A"$b'), /`lcu apps allow "A\\"\\\$b"`/);
   // The launcher setup passes to the relay is named in full, so the hint works when `lcu` is not on PATH.

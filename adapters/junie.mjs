@@ -70,9 +70,8 @@ export function approvalHint(app, lcu = 'lcu') {
     `yet. Run ${run('allow')} yourself in a terminal: the person approves with Touch ID or their password, which ` +
     `allows ${app} until it is revoked. It waits up to 5 minutes for them, so give the command a timeout of at ` +
     `least ${AUTH_WAIT_SECONDS} seconds. Then retry the call. If the command fails, is refused or times out (for ` +
-    'example, nobody is there to approve), ask the person to run it themselves and stop. Remember the apps you ' +
-    'allow this way; when your task is done, tell the person they stay allowed until revoked and offer to run ' +
-    `${run('revoke')} for them.`;
+    'example, nobody is there to approve), ask the person to run it themselves and stop. In your final answer, ' +
+    `say that ${app} stays allowed until revoked, show ${run('revoke')}, and offer to run it for them.`;
 }
 
 /**
