@@ -47,14 +47,14 @@ jobs:
           $agree = @('--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
           $ids = @()
           foreach ($term in 'ChatGPT', 'Codex', 'OpenAI') {
-            $out = winget search $term --source msstore @agree | Out-String
+            $out = winget search $term --source msstore --count 25 --accept-source-agreements --disable-interactivity | Out-String
             $out
             $ids += [regex]::Matches($out, '\b(9[A-Z0-9]{11}|XP[A-Z0-9]{12})\b') | ForEach-Object { $_.Value }
           }
           $ids = $ids | Select-Object -Unique
           "candidate ids: $($ids -join ', ')"
           foreach ($id in $ids) {
-            winget show --id $id --source msstore @agree | Select-Object -First 4
+            winget show --id $id --source msstore --accept-source-agreements --disable-interactivity | Select-Object -First 4
             winget install --id $id --source msstore @agree
             "winget $id exit: $LASTEXITCODE"
             Get-AppxPackage | Where-Object Name -like '*OpenAI*' | Format-Table Name,Version,InstallLocation
