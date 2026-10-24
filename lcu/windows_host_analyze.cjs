@@ -370,6 +370,8 @@ function isFactory(node) {
 // A top-level statement made only of assignments to (or updates of) bindings or property
 // paths rooted at them, such as `v = interop(v);` or `state.value = 1, state.n++;`. Such a
 // statement finishes initialising those bindings, so it travels with their declarations.
+// The bundler can fold a side-effect import into the same statement (`v = interop(v),
+// require("http");`); such a require("literal") call is carried with it as a dependency.
 function initializerRoots(statement) {
   if (statement.type !== 'ExpressionStatement') return null;
   const expression = statement.expression;
@@ -379,12 +381,18 @@ function initializerRoots(statement) {
     let target;
     if (part.type === 'AssignmentExpression') target = part.left;
     else if (part.type === 'UpdateExpression') target = part.argument;
+    else if (isRequireCall(part)) continue;
     else return null;
     const root = memberRoot(target);
     if (root === null) return null;
     roots.push(root);
   }
-  return [...new Set(roots)];
+  return roots.length ? [...new Set(roots)] : null;
+}
+
+function isRequireCall(node) {
+  return node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'require' &&
+    node.arguments.length === 1 && staticString(node.arguments[0]) !== null;
 }
 
 function entriesOf(program) {
