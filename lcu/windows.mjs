@@ -2,7 +2,7 @@
 // Builtins come from process.getBuiltinModule: an ESM import of a builtin builds its export facade, which
 // costs milliseconds on every launch; child_process, crypto and tty are loaded only where they are used.
 const { closeSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync} = process.getBuiltinModule('node:fs');
-const { dirname, join, relative, sep } = process.getBuiltinModule('node:path');
+const { basename, dirname, join, relative, sep } = process.getBuiltinModule('node:path');
 const createHash = (algorithm) => process.getBuiltinModule('node:crypto').createHash(algorithm);
 import { cacheDirectory, checkOnce, recorded, writeRecord } from './check_record.mjs';
 import { isDirectory, isFile, within } from './fsutil.mjs';
@@ -195,6 +195,26 @@ function runtimeManifest(app) {
   return version;
 }
 
+/**
+ * The package directory behind a registered install location. A package on a secondary AppX volume (such as
+ * D:\WindowsApps) is registered at its C:\Program Files\WindowsApps path, which Windows makes a junction to the
+ * volume's copy; that junction is followed only to a directory of the same package name in a WindowsApps folder.
+ */
+function packageVolumePath(location) {
+  if (!isRedirected(location)) return location;
+  let target;
+  try {
+    target = realpathSync(location);
+  } catch {
+    throw new Error('Windows package application directory is missing or redirected.');
+  }
+  const same = (left, right) => left.toLowerCase() === right.toLowerCase();
+  if (!same(basename(target), basename(location)) || !same(basename(dirname(target)), 'WindowsApps')) {
+    throw new Error('Windows package application directory is missing or redirected.');
+  }
+  return target;
+}
+
 /** Select and structurally validate the current user's official Store app. */
 export function resolveInstalledWindowsApp() {
   validateHost();
@@ -203,8 +223,9 @@ export function resolveInstalledWindowsApp() {
       !['x64', 'amd64'].includes(registered.Architecture.toLowerCase()) || registered.SignatureKind !== 'Store') {
     throw new Error('Registered ChatGPT package is not the official Windows x64 Store app.');
   }
-  const app = registered.InstallLocation;
-  if (typeof app !== 'string' || !app) throw new Error('Registered ChatGPT package has no install location.');
+  const location = registered.InstallLocation;
+  if (typeof location !== 'string' || !location) throw new Error('Registered ChatGPT package has no install location.');
+  const app = packageVolumePath(location);
   const { version } = appxIdentity(app);
   if (registered.Version !== version) throw new Error('Registered ChatGPT package version does not match its identity manifest.');
   // Capture the registered source's exact tree as the baseline for its managed copy. The validator
