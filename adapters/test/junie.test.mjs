@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -191,8 +191,10 @@ test('the hook stays silent and never fails without a relay, with bad input, or 
     await runJunieHook({ stdin: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 's' }),
       directory: join(directory, 'missing'), write });
     await runJunieHook({ stdin: JSON.stringify({ hook_event_name: 'PreToolUse', session_id: 's' }), directory, write });
+    // A relay that exited without closing its server leaves its socket behind.
     const stale = join(directory, `${process.pid}-1.sock`);
-    writeFileSync(stale, '');
+    spawnSync(process.execPath, ['-e', `require('node:net').createServer().listen(${JSON.stringify(stale)}, () => process.exit(0))`]);
+    assert.equal(existsSync(stale), true);
     await runJunieHook({ stdin: JSON.stringify({ hook_event_name: 'Stop', session_id: 's' }), directory, write,
       parent: process.pid });
     assert.deepEqual(written, []);
