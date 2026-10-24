@@ -134,6 +134,24 @@ test('calls before any hook use the relay\'s own session; closing Junie\'s conne
   });
 });
 
+test('a relay Junie started after the prompt hooks ends its first turn on Stop and follows the session after', unix, async () => {
+  await withRelay(async ({ hook, js, entries, until }) => {
+    // Junie on macOS (26.10.20) runs SessionStart and UserPromptSubmit before it starts the MCP server.
+    await js('early');
+    await hook('Stop', 'junie-session', { stop_hook_active: false });
+    await until(list => list.length === 2);
+    const [early, stop] = entries();
+    assert.deepEqual([stop.args.hook_event_name, stop.args.session_id, stop.args.turn_id],
+      ['Stop', turnOf(early).session_id, turnOf(early).turn_id]);
+    await hook('UserPromptSubmit', 'junie-session');
+    await js('next');
+    assert.equal(turnOf(entries()[2]).session_id, 'junie-session');
+    await hook('Stop', 'junie-session');
+    await until(list => list.length === 4);
+    assert.deepEqual([entries()[3].args.hook_event_name, entries()[3].args.session_id], ['Stop', 'junie-session']);
+  });
+});
+
 test('a failed turn end is retried before the session\'s next call, which is refused while it still fails', unix, async () => {
   await withRelay(async ({ hook, js, entries, until }) => {
     await hook('UserPromptSubmit', 'fail-once-session');

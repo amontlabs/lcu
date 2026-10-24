@@ -182,6 +182,13 @@ export async function runJunieRelay({
       const instructions = client.instructions;
       return instructions ? { additional_context: instructions } : {};
     }
+    // Junie can start this relay only after the session's first SessionStart and UserPromptSubmit hooks, so calls
+    // before any hook ran under the relay's own id; the first ending hook ends that turn and names the session.
+    if (current === undefined && sessions.has(fallback)) {
+      current = sessionId;
+      await finish(fallback, HOOK_EVENTS[event]);
+      return {};
+    }
     if (!sessions.has(sessionId)) return {};
     await finish(sessionId, HOOK_EVENTS[event]);
     return {};
