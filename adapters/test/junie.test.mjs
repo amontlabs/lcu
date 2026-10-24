@@ -9,6 +9,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { approvalHint, controlDirectory, runJunieHook } from '../junie.mjs';
 
+// Junie is not supported on Windows (setup refuses it): the relay and its hooks meet on a Unix socket.
+const unix = { skip: process.platform === 'win32' && 'Junie is not supported on Windows' };
 const relay = fileURLToPath(new URL('../junie.mjs', import.meta.url));
 const fixture = fileURLToPath(new URL('./mcp-fixture.mjs', import.meta.url));
 
@@ -49,7 +51,7 @@ async function withRelay(run) {
 
 const turnOf = entry => entry.meta['x-codex-turn-metadata'];
 
-test('Junie relay lists only the original js and js_reset with the original instructions', async () => {
+test('Junie relay lists only the original js and js_reset with the original instructions', unix, async () => {
   await withRelay(async ({ client, control }) => {
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map(tool => tool.name), ['js', 'js_reset']);
@@ -62,7 +64,7 @@ test('Junie relay lists only the original js and js_reset with the original inst
   });
 });
 
-test('the first prompt of each session carries the original instructions as additional context', async () => {
+test('the first prompt of each session carries the original instructions as additional context', unix, async () => {
   await withRelay(async ({ hook }) => {
     assert.deepEqual(await hook('SessionStart', 'junie-session', { source: 'startup' }), { status: 0, stdout: '' });
     const first = await hook('UserPromptSubmit', 'junie-session', { prompt: 'Open the app' });
@@ -74,7 +76,7 @@ test('the first prompt of each session carries the original instructions as addi
   });
 });
 
-test('calls carry the Junie session and one turn per prompt; Stop, StopFailure and SessionEnd end it', async () => {
+test('calls carry the Junie session and one turn per prompt; Stop, StopFailure and SessionEnd end it', unix, async () => {
   await withRelay(async ({ hook, js, entries, until }) => {
     await hook('UserPromptSubmit', 'junie-session');
     assert.deepEqual(await js('one'), ['one']);
@@ -106,7 +108,7 @@ test('calls carry the Junie session and one turn per prompt; Stop, StopFailure a
   });
 });
 
-test('a new prompt ends a turn Junie reported no Stop for; a new session interrupts the old one', async () => {
+test('a new prompt ends a turn Junie reported no Stop for; a new session interrupts the old one', unix, async () => {
   await withRelay(async ({ hook, js, entries, until }) => {
     await hook('UserPromptSubmit', 'junie-session');
     await js('one');
@@ -122,7 +124,7 @@ test('a new prompt ends a turn Junie reported no Stop for; a new session interru
   });
 });
 
-test('calls before any hook use the relay\'s own session; closing Junie\'s connection interrupts the open turn', async () => {
+test('calls before any hook use the relay\'s own session; closing Junie\'s connection interrupts the open turn', unix, async () => {
   await withRelay(async ({ client, js, entries, until }) => {
     await js('early');
     assert.match(turnOf(entries()[0]).session_id, /^junie-[0-9a-f-]{36}$/);
@@ -132,7 +134,7 @@ test('calls before any hook use the relay\'s own session; closing Junie\'s conne
   });
 });
 
-test('a failed turn end is retried before the session\'s next call, which is refused while it still fails', async () => {
+test('a failed turn end is retried before the session\'s next call, which is refused while it still fails', unix, async () => {
   await withRelay(async ({ hook, js, entries, until }) => {
     await hook('UserPromptSubmit', 'fail-once-session');
     await js('one');
@@ -157,7 +159,7 @@ test('a failed turn end is retried before the session\'s next call, which is ref
   });
 });
 
-test('an app approval Junie cannot show is cancelled and the result names the `lcu apps allow` command', async () => {
+test('an app approval Junie cannot show is cancelled and the result names the `lcu apps allow` command', unix, async () => {
   await withRelay(async ({ hook, js }) => {
     await hook('UserPromptSubmit', 'junie-session');
     const [decision, hint] = await js('approval-native');
@@ -171,7 +173,7 @@ test('an app approval Junie cannot show is cancelled and the result names the `l
   assert.match(approvalHint('Visual Studio Code'), /`lcu apps allow "Visual Studio Code"`/);
 });
 
-test('the hook stays silent and never fails without a relay, with bad input, or with a stale socket', async () => {
+test('the hook stays silent and never fails without a relay, with bad input, or with a stale socket', unix, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-junie-hook-'));
   try {
     const written = [];
