@@ -1,0 +1,33 @@
+name: release-linux (throwaway)
+
+on:
+  push:
+    branches: [claude/project-thread-wp4nhn]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "linux ${{ matrix.runner }}"
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: python3 scripts/build_bundle.py --platform linux --output "$RUNNER_TEMP/dist"
+      - run: python3 scripts/check_archive.py "$RUNNER_TEMP"/dist/*.tar.gz
+      - run: cd "$RUNNER_TEMP/dist" && ls -la && cat *.sha256 && shasum -a 256 -c *.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcu-linux-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/dist/*.tar.gz
+            ${{ runner.temp }}/dist/*.sha256
