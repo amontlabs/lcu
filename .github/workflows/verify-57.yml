@@ -44,8 +44,22 @@ jobs:
       - name: "Install ChatGPT from the Store to D:"
         shell: pwsh
         run: |
-          winget install --id 9NT1R1C2HH7J --source msstore --accept-package-agreements --accept-source-agreements --disable-interactivity
-          "winget exit: $LASTEXITCODE"
+          $agree = @('--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+          $ids = @()
+          foreach ($term in 'ChatGPT', 'Codex', 'OpenAI') {
+            $out = winget search $term --source msstore @agree | Out-String
+            $out
+            $ids += [regex]::Matches($out, '\b(9[A-Z0-9]{11}|XP[A-Z0-9]{12})\b') | ForEach-Object { $_.Value }
+          }
+          $ids = $ids | Select-Object -Unique
+          "candidate ids: $($ids -join ', ')"
+          foreach ($id in $ids) {
+            winget show --id $id --source msstore @agree | Select-Object -First 4
+            winget install --id $id --source msstore @agree
+            "winget $id exit: $LASTEXITCODE"
+            Get-AppxPackage | Where-Object Name -like '*OpenAI*' | Format-Table Name,Version,InstallLocation
+            if (Get-AppxPackage -Name OpenAI.Codex) { break }
+          }
           $pkg = Get-AppxPackage -Name OpenAI.Codex
           if (-not $pkg) { throw 'OpenAI.Codex is not registered' }
           $pkg | Format-List Name,Version,Architecture,SignatureKind,Status,InstallLocation
