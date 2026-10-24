@@ -41,7 +41,8 @@ try {
 if (-not $usable) {
   $scratch = Join-Path ([IO.Path]::GetTempPath()) ('lcu-node-' + [Guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $scratch | Out-Null
-  Copy-Item -LiteralPath $node -Destination $scratch
+  # Copy the bytes: Copy-Item keeps the EFS encryption of a package on a secondary AppX volume and fails.
+  [IO.File]::WriteAllBytes((Join-Path $scratch 'node.exe'), [IO.File]::ReadAllBytes($node))
   if ((Get-FileHash -LiteralPath $node).Hash -ne (Get-FileHash -LiteralPath (Join-Path $scratch 'node.exe')).Hash) {
     Remove-Item -LiteralPath $scratch -Recurse -Force
     Fail 'The temporary copy of the app''s node.exe differs from the original.'

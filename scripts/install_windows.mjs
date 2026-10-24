@@ -3,8 +3,8 @@
 // protected WindowsApps directory does not permit direct execution, so LCU runs an unchanged private copy
 // (`<prefix>\apps\<inventory digest>\app`) whose source-derived inventory it records and checks.
 import {
-  copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync,
-  rmSync, writeFileSync,
+  closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync,
+  realpathSync, renameSync, rmSync, writeFileSync, writeSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
@@ -37,6 +37,32 @@ const redirected = (path) => deps.isRedirected(path);
 const isUnlinkedDirectory = (path) => { try { return lstatSync(path).isDirectory(); } catch { return false; } };
 const newId = (length) => crypto.randomUUID().replaceAll('-', '').slice(0, length);
 
+/**
+ * Copy one file's bytes. A package on a secondary AppX volume is EFS-encrypted ("Application Protected"), and
+ * CopyFile then fails (UNKNOWN; "the specified file could not be encrypted") because it keeps the encryption,
+ * so such a file is read and written instead, which gives an ordinary unencrypted copy of the same bytes.
+ */
+export function copyFile(source, target) {
+  try {
+    copyFileSync(source, target);
+    return;
+  } catch (error) {
+    if (error?.code !== 'UNKNOWN') throw error;
+  }
+  const buffer = Buffer.alloc(1024 * 1024);
+  const input = openSync(source, 'r');
+  try {
+    const output = openSync(target, 'w');
+    try {
+      for (let count; (count = readSync(input, buffer, 0, buffer.length, null));) writeSync(output, buffer, 0, count);
+    } finally {
+      closeSync(output);
+    }
+  } finally {
+    closeSync(input);
+  }
+}
+
 /** Copy a directory tree, refusing any link or junction in it (Node's fs adds the long-path prefix itself). */
 function copyTree(from, to) {
   mkdirSync(to);
@@ -45,7 +71,7 @@ function copyTree(from, to) {
     const info = lstatSync(source);
     if (info.isSymbolicLink()) throw new Error(`Windows application contains a redirected path: ${source}`);
     if (info.isDirectory()) copyTree(source, target);
-    else copyFileSync(source, target);
+    else copyFile(source, target);
   }
 }
 
@@ -84,7 +110,7 @@ export function preflightHost(selected) {
   const scratch = mkdtempSync(join(tmpdir(), 'lcu-host-check-'));
   try {
     const staged = join(scratch, 'node.exe');
-    copyFileSync(node, staged);
+    copyFile(node, staged);
     deps.planOriginalHost(selected.app, { node: staged });
   } catch (error) {
     if (error?.message?.startsWith('Required Windows host layout')) {
