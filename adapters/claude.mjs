@@ -58,11 +58,12 @@ const TURN_CONTEXT_SCHEMA = {
   type: 'object',
   properties: {
     session_id: { type: 'string', minLength: 1 },
-    turn_id: { type: 'string', minLength: 1 },
+    // Empty or absent for a process that has had no user prompt yet (an agent-team teammate): see `resolveTurnId`.
+    turn_id: { type: 'string' },
     tool_use_id: { type: 'string', minLength: 1 },
     agent_id: { type: 'string' },
   },
-  required: ['session_id', 'turn_id', 'tool_use_id'],
+  required: ['session_id', 'tool_use_id'],
   additionalProperties: false,
 };
 
@@ -105,14 +106,15 @@ function asError(error) {
 
 function requireTurnContext(value) {
   if (!value || typeof value !== 'object' ||
-      !nonEmptyString(value.session_id) || !nonEmptyString(value.turn_id) ||
-      !nonEmptyString(value.tool_use_id) ||
+      !nonEmptyString(value.session_id) || !nonEmptyString(value.tool_use_id) ||
+      (value.turn_id !== undefined && value.turn_id !== null && typeof value.turn_id !== 'string') ||
       (value.agent_id !== undefined && typeof value.agent_id !== 'string')) {
-    throw new Error('Claude turn context requires session_id, turn_id, and tool_use_id');
+    throw new Error('Claude turn context requires session_id and tool_use_id, and a string turn_id when present');
   }
   return {
     sessionId: value.session_id,
-    turnId: value.turn_id,
+    // Empty when the host has no prompt id; the relay substitutes its own (`resolveTurnId`).
+    turnId: typeof value.turn_id === 'string' ? value.turn_id : '',
     toolUseId: value.tool_use_id,
     ...(typeof value.agent_id === 'string' && value.agent_id ? { agentId: value.agent_id } : {}),
   };
@@ -333,6 +335,21 @@ export async function runClaudeBridge({
     }));
   }
 
+  // A process whose turns start without user input (an agent-team teammate, driven by its inbox) has no prompt id,
+  // so its hooks pass an empty `turn_id`. The relay is one process per host process, so it stands in with an id of its
+  // own: one per promptless turn, replaced when a main Stop or Interrupt ends it, which is what a new prompt id does
+  // for a host that has them. A SubagentStop carries no turn of its own and takes the one its subagent last bound
+  // under (kept after the end, so a repeated SubagentStop is still deduplicated; bounded like the ended history).
+  let promptlessTurnId = randomUUID();
+  const promptlessSubagentTurns = new Map();
+  function resolveTurnId(sessionId, turnId, event) {
+    if (nonEmptyString(turnId)) return turnId;
+    if (event === 'SubagentStop' && promptlessSubagentTurns.has(sessionId)) {
+      return promptlessSubagentTurns.get(sessionId);
+    }
+    return promptlessTurnId;
+  }
+
   // The life a Stop, SubagentStop or hook Interrupt ends: the key's current one.
   function lifeForHook(sessionId, turnId, event) {
     if (!nonEmptyString(sessionId) || !nonEmptyString(turnId) ||
@@ -467,6 +484,16 @@ export async function runClaudeBridge({
         const context = requireTurnContext(toolArgs);
         // Match Claude's child cleanup identity while preserving the shared prompt ID.
         if (context.agentId) context.sessionId = context.agentId;
+        if (!nonEmptyString(context.turnId)) {
+          context.turnId = promptlessTurnId;
+          if (context.agentId) {
+            promptlessSubagentTurns.delete(context.sessionId);
+            promptlessSubagentTurns.set(context.sessionId, context.turnId);
+            if (promptlessSubagentTurns.size > maxEndedTurns) {
+              promptlessSubagentTurns.delete(promptlessSubagentTurns.keys().next().value);
+            }
+          }
+        }
         const previous = contexts.get(context.toolUseId);
         if (previous && (previous.sessionId !== context.sessionId || previous.turnId !== context.turnId ||
             previous.agentId !== context.agentId)) {
@@ -516,7 +543,10 @@ export async function runClaudeBridge({
       }
       if (name === TURN_END_TOOL) {
         const event = toolArgs.hook_event_name;
-        const life = lifeForHook(toolArgs.session_id, toolArgs.turn_id, event);
+        const promptless = !nonEmptyString(toolArgs.turn_id);
+        const life = lifeForHook(toolArgs.session_id,
+          resolveTurnId(toolArgs.session_id, toolArgs.turn_id, event), event);
+        if (promptless && event !== 'SubagentStop') promptlessTurnId = randomUUID();
         if (!life) return { content: [{ type: 'text', text: 'Turn already ended.' }] };
         return turnEnded(life, event);
       }
