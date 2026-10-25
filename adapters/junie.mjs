@@ -271,14 +271,16 @@ export async function runJunieRelay({
         }));
         const added = [...approvals].map(app => ({ type: 'text', text: approvalHint(app, lcu) }));
         // A session whose first prompt the hook could not reach (the relay started later) gets the original
-        // instructions with its first call result instead, once.
+        // instructions with its first call result instead, once. They go first: Junie saves a long result to a
+        // file and the model may read only its beginning.
         const state = stateOf(sessionId);
+        const leading = [];
         if (!state.told && client.instructions) {
           state.told = true;
-          added.push({ type: 'text', text: `${INSTRUCTIONS_HEADER}\n\n${client.instructions}` });
+          leading.push({ type: 'text', text: `${INSTRUCTIONS_HEADER}\n\n${client.instructions}` });
         }
-        if (!added.length) return result;
-        return { ...result, content: [...(result.content ?? []), ...added] };
+        if (!added.length && !leading.length) return result;
+        return { ...result, content: [...leading, ...(result.content ?? []), ...added] };
       } finally {
         inFlight.delete(approvals);
         turn.calls--;

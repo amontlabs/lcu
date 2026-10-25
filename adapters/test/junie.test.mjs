@@ -157,7 +157,7 @@ const INSTRUCTIONS_BLOCK = `${INSTRUCTIONS_HEADER}\n\nOriginal CUA initializatio
 test('a relay Junie started late gives the instructions with the first call, once, and not again on the next prompt', unix, async () => {
   await withRelay(async ({ hook, js }) => {
     // No hook reached this relay before its first call, so the call result carries the instructions.
-    assert.deepEqual(await js('early'), ['early', INSTRUCTIONS_BLOCK]);
+    assert.deepEqual(await js('early'), [INSTRUCTIONS_BLOCK, 'early']);
     assert.equal(INSTRUCTIONS_HEADER, 'LCU: Computer Use instructions for this session:');
     assert.deepEqual(await js('again'), ['again']);
     // Stop adopts the relay's own session as Junie's; that session's next prompt does not repeat them.
