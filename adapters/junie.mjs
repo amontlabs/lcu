@@ -2,7 +2,8 @@
 // Junie's MCP client sends no turn identity, ignores server instructions and cannot answer elicitation, so
 // Junie's own command hooks (`junie.mjs --hook`, installed by `lcu setup --agent junie`) reach this relay over a
 // private socket named for the Junie process that runs both: they mark the turn boundaries and carry the original
-// instructions into the first prompt of each session. Native-app approvals cannot be shown in Junie; the call
+// instructions into the first prompt of each session. When Junie starts the relay only after that prompt's hooks
+// (macOS), the session's first call result carries them instead. Native-app approvals cannot be shown in Junie; the call
 // result tells the model to run `lcu apps allow <App>` itself (the person approves with Touch ID or their password,
 // which allows the app until it is revoked), and to offer `lcu apps revoke <App>` when its task is done.
 import { execFileSync } from 'node:child_process';
@@ -31,6 +32,8 @@ export const HOOK_TIMEOUTS = { SessionStart: 10, UserPromptSubmit: 30, Stop: 60,
 /** Once Junie is gone, open turns get this long to end upstream before the original server is closed anyway. */
 export const SHUTDOWN_DRAIN_TIMEOUT_MS = 2_000;
 const REQUEST_LIMIT = 64 * 1024;
+/** The line above the original instructions when a call result carries them (the prompt hook could not). */
+export const INSTRUCTIONS_HEADER = 'LCU: Computer Use instructions for this session:';
 /** Ancestors of the hook checked for a relay: `sh -c`, then Junie (one more for a wrapper). */
 const HOOK_ANCESTORS = 3;
 
@@ -185,6 +188,8 @@ export async function runJunieRelay({
     // before any hook ran under the relay's own id; the first ending hook ends that turn and names the session.
     if (current === undefined && sessions.has(fallback)) {
       current = sessionId;
+      // The instructions a call already carried count for the session the relay now follows.
+      if (sessions.get(fallback).told) stateOf(sessionId).told = true;
       await finish(fallback, HOOK_EVENTS[event]);
       return {};
     }
@@ -264,9 +269,16 @@ export async function runJunieRelay({
         const result = await persistAudioContent(await client.call(name, args, {
           sessionId, turnId: turn.turnId, toolCallId: randomUUID(), signal: extra.signal,
         }));
-        if (!approvals.size) return result;
-        return { ...result, content: [...(result.content ?? []),
-          ...[...approvals].map(app => ({ type: 'text', text: approvalHint(app, lcu) }))] };
+        const added = [...approvals].map(app => ({ type: 'text', text: approvalHint(app, lcu) }));
+        // A session whose first prompt the hook could not reach (the relay started later) gets the original
+        // instructions with its first call result instead, once.
+        const state = stateOf(sessionId);
+        if (!state.told && client.instructions) {
+          state.told = true;
+          added.push({ type: 'text', text: `${INSTRUCTIONS_HEADER}\n\n${client.instructions}` });
+        }
+        if (!added.length) return result;
+        return { ...result, content: [...(result.content ?? []), ...added] };
       } finally {
         inFlight.delete(approvals);
         turn.calls--;

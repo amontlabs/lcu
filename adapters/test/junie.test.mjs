@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { approvalHint, controlDirectory, launcherOf, runJunieHook } from '../junie.mjs';
+import { approvalHint, controlDirectory, INSTRUCTIONS_HEADER, launcherOf, runJunieHook } from '../junie.mjs';
 
 // Junie is not supported on Windows (setup refuses it): the relay and its hooks meet on a Unix socket.
 const unix = { skip: process.platform === 'win32' && 'Junie is not supported on Windows' };
@@ -149,6 +149,35 @@ test('a relay Junie started after the prompt hooks ends its first turn on Stop a
     await hook('Stop', 'junie-session');
     await until(list => list.length === 4);
     assert.deepEqual([entries()[3].args.hook_event_name, entries()[3].args.session_id], ['Stop', 'junie-session']);
+  });
+});
+
+const INSTRUCTIONS_BLOCK = `${INSTRUCTIONS_HEADER}\n\nOriginal CUA initialization guide.`;
+
+test('a relay Junie started late gives the instructions with the first call, once, and not again on the next prompt', unix, async () => {
+  await withRelay(async ({ hook, js }) => {
+    // No hook reached this relay before its first call, so the call result carries the instructions.
+    assert.deepEqual(await js('early'), ['early', INSTRUCTIONS_BLOCK]);
+    assert.equal(INSTRUCTIONS_HEADER, 'LCU: Computer Use instructions for this session:');
+    assert.deepEqual(await js('again'), ['again']);
+    // Stop adopts the relay's own session as Junie's; that session's next prompt does not repeat them.
+    await hook('Stop', 'junie-session');
+    assert.deepEqual(await hook('UserPromptSubmit', 'junie-session'), { status: 0, stdout: '' });
+    assert.deepEqual(await js('next'), ['next']);
+    // A new session still gets them on its first prompt.
+    assert.match((await hook('UserPromptSubmit', 'cleared-session')).stdout, /Original CUA initialization guide/);
+    assert.deepEqual(await js('cleared'), ['cleared']);
+  });
+});
+
+test('a relay started before the first prompt gives the instructions only through the prompt hook', unix, async () => {
+  await withRelay(async ({ hook, js }) => {
+    const first = await hook('UserPromptSubmit', 'junie-session');
+    assert.equal(JSON.parse(first.stdout).hookSpecificOutput.additionalContext, 'Original CUA initialization guide.');
+    assert.deepEqual(await js('one'), ['one']);
+    assert.deepEqual(await js('two'), ['two']);
+    assert.match((await hook('UserPromptSubmit', 'cleared-session')).stdout, /Original CUA initialization guide/);
+    assert.deepEqual(await js('three'), ['three']);
   });
 });
 
