@@ -1705,3 +1705,46 @@ test('Claude relay still refuses a turn context without a session or tool-use id
     await bridge.close();
   }
 });
+
+test('Claude relay: a promptless background subagent keeps the id it bound under after the parent Stop, as a prompt id would', async () => {
+  for (const crossTurn of [false, true]) {
+    const bridge = await connectRelay({ crossTurn });
+    try {
+      const parent = 'strict-teammate-parent';
+      const child = 'strict-teammate-child';
+      const bind = (toolUseId, agentId) => bridge.client.callTool({ name: 'set_turn_context', arguments: {
+        session_id: parent, turn_id: '', tool_use_id: toolUseId, ...(agentId ? { agent_id: agentId } : {}) } });
+      const call = async (toolUseId, agentId) => {
+        await bind(toolUseId, agentId);
+        return bridge.client.callTool({ name: 'js', arguments: { code: toolUseId }, _meta: { 'claudecode/toolUseId': toolUseId } });
+      };
+      await call('plb-1');
+      const promptId = upstreamTurnOf(bridge, 'plb-1');
+      assert.equal((await call('plb-2', child)).isError, undefined);
+      assert.equal(upstreamTurnOf(bridge, 'plb-2'), subagentTurnId(child, promptId));
+      await stop(bridge.client, parent, '');
+      const ends = () => turnEnds(bridge).map(entry => [entry.args.session_id, entry.args.turn_id]);
+
+      // The parent's promptless id has been replaced, but the subagent stays on the one it bound under.
+      const later = await call('plb-3', child);
+      if (crossTurn) {
+        assert.equal(later.isError, undefined);
+        assert.equal(upstreamTurnOf(bridge, 'plb-3'), subagentTurnId(child, promptId));
+        assert.deepEqual(ends(), [[parent, promptId]], 'no cascade');
+      } else {
+        assert.equal(later.isError, true, 'refused like a subagent of an ended prompt id');
+        assert.equal(upstreamTurnOf(bridge, 'plb-3'), promptId);
+        assert.deepEqual(ends(), [[parent, promptId], [child, subagentTurnId(child, promptId)]],
+          'cascade to the live subagent');
+      }
+      // Its SubagentStop ends that same life, and none is left behind.
+      await stop(bridge.client, child, '', 'SubagentStop');
+      assert.ok(ends().some(([session, turn]) => session === child && turn === subagentTurnId(child, promptId)));
+      const count = ends().length;
+      assert.equal((await stop(bridge.client, child, '', 'SubagentStop')).content[0].text, 'Turn already ended.');
+      assert.equal(ends().length, count);
+    } finally {
+      await bridge.close();
+    }
+  }
+});

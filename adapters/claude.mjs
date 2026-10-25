@@ -485,7 +485,8 @@ export async function runClaudeBridge({
         // Match Claude's child cleanup identity while preserving the shared prompt ID.
         if (context.agentId) context.sessionId = context.agentId;
         if (!nonEmptyString(context.turnId)) {
-          context.turnId = promptlessTurnId;
+          // A subagent keeps the id it first bound under until its SubagentStop, as it would a prompt id.
+          context.turnId = (context.agentId && promptlessSubagentTurns.get(context.sessionId)) || promptlessTurnId;
           if (context.agentId) {
             promptlessSubagentTurns.delete(context.sessionId);
             promptlessSubagentTurns.set(context.sessionId, context.turnId);
