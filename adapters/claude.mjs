@@ -338,14 +338,18 @@ export async function runClaudeBridge({
   // A process whose turns start without user input (an agent-team teammate, driven by its inbox) has no prompt id,
   // so its hooks pass an empty `turn_id`. The relay is one process per host process, so it stands in with an id of its
   // own: one per promptless turn, replaced when a main Stop or Interrupt ends it, which is what a new prompt id does
-  // for a host that has them. A SubagentStop carries no turn of its own and takes the one its subagent last bound
-  // under (kept after the end, so a repeated SubagentStop is still deduplicated; bounded like the ended history).
+  // for a host that has them. A subagent keeps the id it first bound under until its SubagentStop; binding again after
+  // that (it was continued) starts a new life on the current id. A SubagentStop carries no turn of its own and takes
+  // the subagent's id (entries are kept after the end, so a repeated SubagentStop is still deduplicated; bounded like
+  // the ended history).
   let promptlessTurnId = randomUUID();
   const promptlessSubagentTurns = new Map();
+  // Only an absent, null or empty turn id means no prompt id; any other non-string is left for lifeForHook to refuse.
+  const hookWithoutPrompt = turnId => turnId === undefined || turnId === null || turnId === '';
   function resolveTurnId(sessionId, turnId, event) {
-    if (nonEmptyString(turnId)) return turnId;
+    if (!hookWithoutPrompt(turnId)) return turnId;
     if (event === 'SubagentStop' && promptlessSubagentTurns.has(sessionId)) {
-      return promptlessSubagentTurns.get(sessionId);
+      return promptlessSubagentTurns.get(sessionId).id;
     }
     return promptlessTurnId;
   }
@@ -485,11 +489,13 @@ export async function runClaudeBridge({
         // Match Claude's child cleanup identity while preserving the shared prompt ID.
         if (context.agentId) context.sessionId = context.agentId;
         if (!nonEmptyString(context.turnId)) {
-          // A subagent keeps the id it first bound under until its SubagentStop, as it would a prompt id.
-          context.turnId = (context.agentId && promptlessSubagentTurns.get(context.sessionId)) || promptlessTurnId;
+          context.turnId = promptlessTurnId;
           if (context.agentId) {
+            const bound = promptlessSubagentTurns.get(context.sessionId);
+            const entry = bound && !bound.ended ? bound : { id: promptlessTurnId, ended: false };
+            context.turnId = entry.id;
             promptlessSubagentTurns.delete(context.sessionId);
-            promptlessSubagentTurns.set(context.sessionId, context.turnId);
+            promptlessSubagentTurns.set(context.sessionId, entry);
             if (promptlessSubagentTurns.size > maxEndedTurns) {
               promptlessSubagentTurns.delete(promptlessSubagentTurns.keys().next().value);
             }
@@ -544,9 +550,13 @@ export async function runClaudeBridge({
       }
       if (name === TURN_END_TOOL) {
         const event = toolArgs.hook_event_name;
-        const promptless = !nonEmptyString(toolArgs.turn_id);
+        const promptless = hookWithoutPrompt(toolArgs.turn_id);
         const life = lifeForHook(toolArgs.session_id,
           resolveTurnId(toolArgs.session_id, toolArgs.turn_id, event), event);
+        if (promptless && event === 'SubagentStop') {
+          const entry = promptlessSubagentTurns.get(toolArgs.session_id);
+          if (entry) entry.ended = true;
+        }
         if (promptless && event !== 'SubagentStop') promptlessTurnId = randomUUID();
         if (!life) return { content: [{ type: 'text', text: 'Turn already ended.' }] };
         return turnEnded(life, event);

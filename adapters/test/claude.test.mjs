@@ -1706,18 +1706,20 @@ test('Claude relay still refuses a turn context without a session or tool-use id
   }
 });
 
+// A bind plus a js call from a host that passes an empty turn_id, optionally inside a subagent.
+const promptlessCaller = (bridge, sessionId) => async (toolUseId, agentId) => {
+  await bridge.client.callTool({ name: 'set_turn_context', arguments: {
+    session_id: sessionId, turn_id: '', tool_use_id: toolUseId, ...(agentId ? { agent_id: agentId } : {}) } });
+  return bridge.client.callTool({ name: 'js', arguments: { code: toolUseId }, _meta: { 'claudecode/toolUseId': toolUseId } });
+};
+
 test('Claude relay: a promptless background subagent keeps the id it bound under after the parent Stop, as a prompt id would', async () => {
   for (const crossTurn of [false, true]) {
     const bridge = await connectRelay({ crossTurn });
     try {
       const parent = 'strict-teammate-parent';
       const child = 'strict-teammate-child';
-      const bind = (toolUseId, agentId) => bridge.client.callTool({ name: 'set_turn_context', arguments: {
-        session_id: parent, turn_id: '', tool_use_id: toolUseId, ...(agentId ? { agent_id: agentId } : {}) } });
-      const call = async (toolUseId, agentId) => {
-        await bind(toolUseId, agentId);
-        return bridge.client.callTool({ name: 'js', arguments: { code: toolUseId }, _meta: { 'claudecode/toolUseId': toolUseId } });
-      };
+      const call = promptlessCaller(bridge, parent);
       await call('plb-1');
       const promptId = upstreamTurnOf(bridge, 'plb-1');
       assert.equal((await call('plb-2', child)).isError, undefined);
@@ -1746,5 +1748,59 @@ test('Claude relay: a promptless background subagent keeps the id it bound under
     } finally {
       await bridge.close();
     }
+  }
+});
+
+test('Claude relay: a promptless subagent that binds again after its SubagentStop starts a new life on the current id', async () => {
+  for (const crossTurn of [false, true]) {
+    const bridge = await connectRelay({ crossTurn });
+    try {
+      const parent = 'strict-teammate-parent';
+      const child = 'strict-teammate-child';
+      const call = promptlessCaller(bridge, parent);
+      const ends = () => turnEnds(bridge).map(entry => [entry.args.session_id, entry.args.turn_id]);
+      await call('plr-1');
+      const firstId = upstreamTurnOf(bridge, 'plr-1');
+      assert.equal((await call('plr-2', child)).isError, undefined);
+      await stop(bridge.client, child, '', 'SubagentStop');
+      assert.deepEqual(ends(), [[child, subagentTurnId(child, firstId)]]);
+      await stop(bridge.client, parent, '');
+
+      // The finished subagent is continued (SendMessage): the parent is on a new promptless turn by now.
+      await call('plr-3');
+      const secondId = upstreamTurnOf(bridge, 'plr-3');
+      assert.notEqual(secondId, firstId);
+      const again = await call('plr-4', child);
+      assert.equal(again.isError, undefined, 'a continued subagent works, as one with a new prompt id does');
+      assert.equal(upstreamTurnOf(bridge, 'plr-4'), subagentTurnId(child, secondId));
+
+      // Its next SubagentStop ends the new life, and a repeat is deduplicated.
+      await stop(bridge.client, child, '', 'SubagentStop');
+      assert.ok(ends().some(([session, turn]) => session === child && turn === subagentTurnId(child, secondId)));
+      const count = ends().length;
+      assert.equal((await stop(bridge.client, child, '', 'SubagentStop')).content[0].text, 'Turn already ended.');
+      assert.equal(ends().length, count);
+    } finally {
+      await bridge.close();
+    }
+  }
+});
+
+test('Claude relay: a turn_ended turn_id is promptless only when absent, null or empty', async () => {
+  const bridge = await connectRelay();
+  try {
+    for (const turnId of [7, true, {}, []]) {
+      for (const event of ['Stop', 'SubagentStop']) {
+        await assert.rejects(bridge.client.callTool({ name: 'turn_ended', arguments: {
+          hook_event_name: event, session_id: 's', turn_id: turnId } }), /requires an exact session, prompt, and supported event/);
+      }
+    }
+    for (const turnId of [undefined, null, '']) {
+      const end = await bridge.client.callTool({ name: 'turn_ended', arguments: {
+        hook_event_name: 'Stop', session_id: 's', ...(turnId === undefined ? {} : { turn_id: turnId }) } });
+      assert.equal(end.isError, undefined);
+    }
+  } finally {
+    await bridge.close();
   }
 });
