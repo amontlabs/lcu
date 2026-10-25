@@ -174,6 +174,14 @@ export async function runJunieRelay({
       return {};
     }
     if (event === 'UserPromptSubmit') {
+      // A relay Junie started after the first prompt's hooks meets the session here when no ending hook ran (chat
+      // mode, an interrupted task): that prompt's turn is over, and instructions its calls carried count.
+      const early = current === undefined ? sessions.get(fallback) : undefined;
+      if (early) {
+        current = sessionId;
+        if (early.told) stateOf(sessionId).told = true;
+        if (early.active) await finish(fallback, early.active.calls > 0 ? 'Interrupt' : 'Stop').catch(() => {});
+      }
       await announce(sessionId);
       const state = stateOf(sessionId);
       // Junie runs Stop only for a successful task, never for chat mode or an interrupted one: a new prompt

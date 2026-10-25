@@ -170,6 +170,19 @@ test('a relay Junie started late gives the instructions with the first call, onc
   });
 });
 
+test('a late-started relay\'s next prompt without an ending hook ends the first turn and does not repeat the instructions', unix, async () => {
+  await withRelay(async ({ hook, js, entries, until }) => {
+    assert.deepEqual(await js('early'), [INSTRUCTIONS_BLOCK, 'early']);
+    // Chat mode or an interrupted task: Junie sends the next prompt with no Stop.
+    assert.deepEqual(await hook('UserPromptSubmit', 'junie-session'), { status: 0, stdout: '' });
+    await until(list => list.length === 2);
+    const [early, end] = entries();
+    assert.deepEqual([end.args.hook_event_name, end.args.turn_id], ['Stop', turnOf(early).turn_id]);
+    assert.deepEqual(await js('next'), ['next']);
+    assert.equal(turnOf(entries()[2]).session_id, 'junie-session');
+  });
+});
+
 test('a relay started before the first prompt gives the instructions only through the prompt hook', unix, async () => {
   await withRelay(async ({ hook, js }) => {
     const first = await hook('UserPromptSubmit', 'junie-session');
