@@ -258,7 +258,14 @@ function applyJunie(mode, home) {
   }
   if (updated.length !== list.length) {
     mcpTools.rules = updated;
-    applyChanges([change(path, before, json(allowlist))]);
+    // Removing LCU's rules also removes the containers they leave empty, and the file when nothing is left
+    // (`auto` creates all of them when they are missing). A container that holds anything else stays.
+    if (mode !== 'auto' && !updated.length) {
+      delete mcpTools.rules;
+      if (!Object.keys(mcpTools).length) delete rules.mcpTools;
+      if (!Object.keys(rules).length) delete allowlist.rules;
+    }
+    applyChanges([change(path, before, Object.keys(allowlist).length ? json(allowlist) : null)]);
   }
   commit(home, key, mode === 'auto' && added.size ? { added: [...added].sort() } : null);
   return notes.length ? `${notes.join(', ')} in mcpTools rules (${path})` : 'unchanged';

@@ -285,6 +285,36 @@ test('Junie: auto appends exact allowlist patterns, keeps other rules; ask remov
   assert.deepEqual(approval.loadRecord(home), {});
 });
 
+test('Junie: ask removes the containers that LCU rules leave empty, never one that holds anything else', (t) => {
+  const home = temporary(t);
+  const path = approval.junieAllowlistPath(home);
+  const junie = (mode) => approval.apply(mode, 'junie', home, { scope: 'user', project: null, env: {} });
+  const cases = [
+    { defaultBehavior: 'ask' },
+    { rules: {} },
+    { rules: { executables: { rules: [{ prefix: 'git ', action: 'allow' }] } } },
+    { rules: { mcpTools: {} } },
+    { rules: { mcpTools: { defaultAction: 'ask' } } },
+    { rules: { mcpTools: { rules: [{ prefix: 'github:', action: 'allow' }] } } },
+  ];
+  for (const original of cases) {
+    write(path, setup.json(original));
+    junie('auto');
+    assert.match(junie('ask'), /removed `lcu:js`, removed `lcu:js_reset`/);
+    const pruned = structuredClone(original);
+    if (pruned.rules?.mcpTools && !Object.keys(pruned.rules.mcpTools).length) delete pruned.rules.mcpTools;
+    if (pruned.rules && !Object.keys(pruned.rules).length) delete pruned.rules;
+    if (Object.keys(pruned).length) assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), pruned, JSON.stringify(original));
+    else assert.equal(existsSync(path), false, JSON.stringify(original));
+  }
+  // The writer uses two-space JSON, so a file already in that form comes back byte for byte.
+  const formatted = setup.json({ defaultBehavior: 'ask', rules: { mcpTools: { rules: [{ prefix: 'github:', action: 'allow' }] } } });
+  write(path, formatted);
+  junie('auto');
+  junie('ask');
+  assert.equal(readFileSync(path, 'utf8'), formatted);
+});
+
 test('Junie: a rule the user wrote is kept by both modes; auto creates a missing allowlist; malformed ones are refused', (t) => {
   const home = temporary(t);
   const path = approval.junieAllowlistPath(home);
@@ -292,7 +322,8 @@ test('Junie: a rule the user wrote is kept by both modes; auto creates a missing
   assert.match(junie('auto'), /added `lcu:js`/);
   assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')),
     { rules: { mcpTools: { rules: [{ pattern: 'lcu:js', action: 'allow' }, { pattern: 'lcu:js_reset', action: 'allow' }] } } });
-  junie('ask');
+  assert.match(junie('ask'), /removed `lcu:js`, removed `lcu:js_reset`/);
+  assert.equal(existsSync(path), false);
   write(path, JSON.stringify({ rules: { mcpTools: { rules: [{ pattern: 'lcu:js', action: 'ask' }, { pattern: 'lcu:js_reset', action: 'allow' }] } } }));
   assert.match(junie('auto'), /kept your own `lcu:js` rule/);
   assert.match(junie('ask'), /kept your own `lcu:js` rule, which LCU did not add, kept your own `lcu:js_reset` rule/);
