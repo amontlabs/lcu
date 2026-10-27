@@ -1,0 +1,88 @@
+Failing-first, before implementation. Node v26.10.0, macOS arm64.
+
+node --test --test-name-pattern="LCU lifecycle|re-setup migrates" tests/node/claude.test.mjs
+✖ LCU lifecycle hooks execute without a connected MCP client and PreToolUse stays synchronous (10.785458ms)
+✖ re-setup migrates old LCU MCP hook entries without deleting neighboring user hooks (6.805083ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 0
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 60.072625
+
+✖ failing tests:
+
+test at tests/node/claude.test.mjs:111:1
+✖ LCU lifecycle hooks execute without a connected MCP client and PreToolUse stays synchronous (10.785458ms)
+  AssertionError [ERR_ASSERTION]: PreToolUse must not require a connected MCP server
+  + actual - expected
+  
+  + 'mcp_tool'
+  - 'command'
+  
+      at TestContext.<anonymous> (file:///private/var/folders/bq/fnyn1bq95d37b4q3lrwc_f600000gn/T/headroom-codex-worktrees/f47144ab-200a-4544-aa81-0d61044f404d/tests/node/claude.test.mjs:118:14)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.start (node:internal/test_runner/test:1262:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:387:17) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'mcp_tool',
+    expected: 'command',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/node/claude.test.mjs:124:1
+✖ re-setup migrates old LCU MCP hook entries without deleting neighboring user hooks (6.805083ms)
+  AssertionError [ERR_ASSERTION]: PreToolUse retains a noisy legacy hook
+  
+  1 !== 0
+  
+      at TestContext.<anonymous> (file:///private/var/folders/bq/fnyn1bq95d37b4q3lrwc_f600000gn/T/headroom-codex-worktrees/f47144ab-200a-4544-aa81-0d61044f404d/tests/node/claude.test.mjs:141:12)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 1,
+    expected: 0,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+node --test --test-name-pattern="lifecycle helper exits" adapters/test/claude.test.mjs
+✖ lifecycle helper exits silently without a relay and spawns no upstream (22.776792ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 104.235458
+
+✖ failing tests:
+
+test at adapters/test/claude.test.mjs:1809:1
+✖ lifecycle helper exits silently without a relay and spawns no upstream (22.776792ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  1 !== 0
+  
+      at TestContext.<anonymous> (file:///private/var/folders/bq/fnyn1bq95d37b4q3lrwc_f600000gn/T/headroom-codex-worktrees/f47144ab-200a-4544-aa81-0d61044f404d/adapters/test/claude.test.mjs:1825:10)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 1,
+    expected: 0,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

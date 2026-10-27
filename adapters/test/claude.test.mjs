@@ -1804,3 +1804,26 @@ test('Claude relay: a turn_ended turn_id is promptless only when absent, null or
     await bridge.close();
   }
 });
+
+
+test('lifecycle helper exits silently without a relay and spawns no upstream', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-hook-absent-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const logPath = join(directory, 'original.jsonl');
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../../lcu/claude_hook.mjs', import.meta.url))], {
+    env: { ...process.env, HOME: directory, USERPROFILE: directory, LCU_FIXTURE_LOG: logPath,
+      LCU_LOG_DIR: join(directory, 'diagnostics') }, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.stdin.end(JSON.stringify({ hook_event_name: 'Stop', session_id: 'absent', prompt_id: 'prompt' }));
+  const code = await new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', resolve);
+  });
+  assert.equal(code, 0);
+  assert.equal(stdout, '');
+  assert.equal(stderr, '');
+  assert.deepEqual(readdirSync(directory), []);
+});

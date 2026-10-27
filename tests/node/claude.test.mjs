@@ -99,3 +99,52 @@ test('an empty settings file or one with a byte order mark is read as before', (
     if (content) assert.equal(settings.model, 'sonnet');
   }
 });
+
+const events = ['PreToolUse', 'Stop', 'StopFailure', 'SubagentStop'];
+function fixture(t, settings = {}) {
+  const home = temporary(t);
+  mkdirSync(join(home, '.claude'));
+  const path = join(home, '.claude/settings.json');
+  writeFileSync(path, JSON.stringify(settings));
+  return { home, path, read: () => JSON.parse(readFileSync(path, 'utf8')) };
+}
+test('LCU lifecycle hooks execute without a connected MCP client and PreToolUse stays synchronous', t => {
+  const f = fixture(t);
+  visibility.install(f.home);
+  const { hooks } = f.read();
+  for (const event of events) {
+    assert.equal(hooks[event].length, 1, event);
+    for (const hook of hooks[event][0].hooks) {
+      assert.equal(hook.type, 'command', `${event} must not require a connected MCP server`);
+      assert.equal(hook.async ?? false, false, `${event} must await acknowledgement`);
+      assert.equal(typeof hook.command, 'string');
+    }
+  }
+});
+test('re-setup migrates old LCU MCP hook entries without deleting neighboring user hooks', t => {
+  const mine = { type: 'command', command: 'user-owned-hook' };
+  const foreign = { type: 'mcp_tool', server: 'lcu', tool: 'user_owned_tool' };
+  const end = (event, session) => ({ type: 'mcp_tool', server: 'lcu', tool: 'turn_ended', input: {
+    hook_event_name: event, session_id: session, turn_id: '${prompt_id}' } });
+  const old = {
+    PreToolUse: [{ matcher: 'mcp__lcu__js|mcp__lcu__js_reset', hooks: [{ type: 'mcp_tool', server: 'lcu', tool: 'set_turn_context',
+      input: { session_id: '${session_id}', turn_id: '${prompt_id}', tool_use_id: '${tool_use_id}', agent_id: '${agent_id}' } }] }],
+    Stop: [{ hooks: [mine, end('Stop', '${session_id}'), foreign] }],
+    StopFailure: [{ hooks: [end('Interrupt', '${session_id}')] }],
+    SubagentStop: [{ hooks: [end('SubagentStop', '${agent_id}')] }],
+  };
+  const f = fixture(t, { hooks: old, permissions: { allow: ['Bash(user-command)'] } });
+  visibility.install(f.home);
+  const installed = f.read();
+  for (const event of events) {
+    const hooks = installed.hooks[event].flatMap(group => group.hooks);
+    assert.equal(hooks.filter(h => h.type === 'mcp_tool' && h.server === 'lcu' &&
+      ['turn_ended', 'set_turn_context'].includes(h.tool)).length, 0, `${event} retains a noisy legacy hook`);
+  }
+  assert.ok(installed.hooks.Stop.some(g => g.hooks.some(h => JSON.stringify(h) === JSON.stringify(mine))));
+  assert.ok(installed.hooks.Stop.some(g => g.hooks.some(h => JSON.stringify(h) === JSON.stringify(foreign))));
+  assert.deepEqual(installed.permissions.allow, ['Bash(user-command)']);
+  const first = readFileSync(f.path, 'utf8');
+  visibility.install(f.home);
+  assert.equal(readFileSync(f.path, 'utf8'), first);
+});
