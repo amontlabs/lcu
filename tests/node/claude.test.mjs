@@ -1,7 +1,7 @@
 // The Claude Code approval mod (claude_mod.mjs) and host-only tool visibility (claude_visibility.mjs).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, sep } from 'node:path';
 import { test } from 'node:test';
 
@@ -221,4 +221,47 @@ test('installed lifecycle hooks stay silent after their release is rolled back a
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, '');
   }
+});
+
+
+test('helper installation ignores umask 000 and preserves user-owned parent modes', {
+  skip: process.platform === 'win32' && 'POSIX permission bits',
+}, t => {
+  for (const existingParents of [false, true]) {
+    const home = temporary(t);
+    const local = join(home, '.local');
+    const share = join(local, 'share');
+    if (existingParents) {
+      mkdirSync(share, { recursive: true });
+      chmodSync(local, 0o755);
+      chmodSync(share, 0o755);
+    }
+    const previousMask = process.umask(0);
+    try { visibility.install(home); } finally { process.umask(previousMask); }
+    for (const directory of [join(share, 'lcu'), join(share, 'lcu/claude')]) {
+      assert.equal(statSync(directory).mode & 0o777, 0o700, directory);
+    }
+    assert.equal(statSync(visibility.helperPath(home)).mode & 0o777, 0o600);
+    if (existingParents) {
+      assert.equal(statSync(local).mode & 0o777, 0o755);
+      assert.equal(statSync(share).mode & 0o777, 0o755);
+    }
+  }
+});
+
+test('refresh repairs a 0666 helper and its writable LCU directories even when bytes match', {
+  skip: process.platform === 'win32' && 'POSIX permission bits',
+}, t => {
+  const home = temporary(t);
+  visibility.install(home);
+  const helper = visibility.helperPath(home);
+  const directories = [join(home, '.local/share/lcu'), join(home, '.local/share/lcu/claude')];
+  const before = readFileSync(helper);
+  chmodSync(helper, 0o666);
+  for (const directory of directories) chmodSync(directory, 0o777);
+  const previousMask = process.umask(0);
+  try { visibility.refresh(home, REPO); } finally { process.umask(previousMask); }
+  assert.equal(statSync(helper).mode & 0o777, 0o600);
+  for (const directory of directories) assert.equal(statSync(directory).mode & 0o777, 0o700);
+  assert.deepEqual(readFileSync(helper), before);
 });

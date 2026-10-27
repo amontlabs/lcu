@@ -1,10 +1,11 @@
 // Keep the original CUA host-only tools out of Claude Code's model context and add LCU's lifecycle hooks.
 import { basename, dirname, isAbsolute, join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 
-import { applyChanges, change, json, member, parseJson, readFile } from './setup.mjs';
+import { applyChanges, change, json, member, parseJson, readFile, regularPath } from './setup.mjs';
+import { writePrivate } from './cross_turn.mjs';
 
 export const HOST_ONLY = ['mcp__lcu__turn_ended', 'mcp__lcu__js_add_node_module_dir', 'mcp__lcu__set_turn_context'];
 // The approval tools the lcu-approve mod calls. They cannot be in `permissions.deny` (a denied MCP tool leaves the
@@ -71,6 +72,23 @@ function installLifecycleHooks(settings, root, node, home) {
   }
 }
 
+function installHelper(home) {
+  const helper = regularPath(helperPath(home));
+  const root = dirname(dirname(helper));
+  // Existing account data parents belong to the user; only the LCU and Claude directories are repaired.
+  mkdirSync(dirname(root), { recursive: true, mode: 0o700 });
+  for (const directory of [root, dirname(helper)]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') chmodSync(regularPath(directory), 0o700);
+  }
+  const content = readFileSync(new URL('./claude_hook.mjs', import.meta.url));
+  const previous = readFile(helper);
+  if (previous === null || !previous.equals(content) ||
+      (process.platform !== 'win32' && (statSync(helper).mode & 0o777) !== 0o600)) {
+    writePrivate(helper, content);
+  }
+}
+
 /** Add exact deny rules and the lifecycle hooks at the selected Claude Code scope, preserving other settings. */
 export function install(home, { project = null, root = ROOT, node = process.execPath } = {}) {
   const path = project ? join(project, '.claude/settings.local.json') : join(home, '.claude/settings.json');
@@ -82,13 +100,8 @@ export function install(home, { project = null, root = ROOT, node = process.exec
   if (deny.some((rule) => typeof rule !== 'string')) throw new Error(`Claude deny rules must be a string array: ${path}`);
   for (const rule of HOST_ONLY) if (!deny.includes(rule)) deny.push(rule);
   installLifecycleHooks(settings, root, node, home);
-  const helper = helperPath(home);
-  const content = readFileSync(new URL('./claude_hook.mjs', import.meta.url));
-  const changes = [];
-  const previous = readFile(helper);
-  if (previous === null || !previous.equals(content)) changes.push(change(helper, previous, content));
-  if (before === null || !isDeepStrictEqual(parseJson(before), settings)) changes.push(change(path, before, json(settings)));
-  if (changes.length) applyChanges(changes);
+  installHelper(home);
+  if (before === null || !isDeepStrictEqual(parseJson(before), settings)) applyChanges([change(path, before, json(settings))]);
   return path;
 }
 
