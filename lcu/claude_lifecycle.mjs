@@ -113,9 +113,11 @@ export async function listenLifecycle(handle, { directory = registryDirectory(),
       if (!request || typeof request !== 'object' || Array.isArray(request) ||
           closing || process.ppid !== hostPid || request.v !== 1 || request.hostPid !== hostPid ||
           request.hostStart !== entry.hostStart || hostStart(hostPid) !== entry.hostStart ||
-          request.generation !== generation || request.token !== entry.token || !EVENTS.has(request.hook?.hook_event_name)) {
+          request.generation !== generation || request.token !== entry.token ||
+          !(request.probe === true || EVENTS.has(request.hook?.hook_event_name))) {
         return socket.end('{"refused":true}\n');
       }
+      if (request.probe === true) return socket.end('{"ready":true}\n');
       socket.setTimeout(0);
       // Acceptance ends the short detection budget. A disconnected helper never cancels accepted cleanup.
       socket.write('{"accepted":true}\n');
@@ -158,17 +160,24 @@ export async function deliverLifecycle(hook, { directory = registryDirectory(), 
   if (!EVENTS.has(hook?.hook_event_name)) return;
   let entries;
   try { entries = registrations(directory, hostPid); } catch { return; }
-  if (entries.length !== 1) return;
-  const entry = entries[0];
+  // PID liveness is only a cheap filter: a crashed relay's PID can belong to an unrelated process.
+  const ready = (await Promise.all(entries.map(async entry =>
+    await exchange(entry, { probe: true }, true) ? entry : null))).filter(Boolean);
+  if (ready.length !== 1) return;
+  const entry = ready[0];
   // Tool inputs and assistant messages can be large; lifecycle needs only these identities.
   const context = Object.fromEntries(['hook_event_name', 'session_id', 'prompt_id', 'tool_use_id', 'agent_id']
     .filter(key => hook[key] !== undefined).map(key => [key, hook[key]]));
-  const request = JSON.stringify({ ...entry, hook: context }) + '\n';
+  await exchange(entry, { hook: context });
+}
+
+function exchange(entry, payload, probe = false) {
+  const request = JSON.stringify({ ...entry, ...payload }) + '\n';
   if (Buffer.byteLength(request) > LIMIT) return;
   return new Promise((resolve, reject) => {
     const socket = createConnection(entry.endpoint);
     let data = '', accepted = false;
-    const finish = error => { socket.destroy(); error ? reject(error) : resolve(); };
+    const finish = (error, ready = false) => { socket.destroy(); error ? reject(error) : resolve(ready); };
     socket.setTimeout(ABSENCE_MS, () => finish(accepted ? new Error('Claude lifecycle acknowledgement timed out') : undefined));
     socket.on('error', () => finish());
     socket.on('close', () => resolve());
@@ -183,6 +192,7 @@ export async function deliverLifecycle(hook, { directory = registryDirectory(), 
         try { response = JSON.parse(data.slice(0, end)); } catch { return finish(); }
         data = data.slice(end + 1);
         if (!response || typeof response !== 'object' || Array.isArray(response)) return finish();
+        if (probe) return finish(undefined, response.ready === true);
         if (response.accepted) { accepted = true; socket.setTimeout(ACK_MS); }
         else return finish(response.error ? new Error(response.error) : undefined);
       }

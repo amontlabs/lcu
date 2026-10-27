@@ -1999,3 +1999,31 @@ test('disconnecting a hook does not cancel cleanup already accepted by the relay
     await waitFor(() => !existsSync(directory) || !readdirSync(directory).some(name => name.endsWith('.json')));
   } finally { await bridge.close(); }
 });
+
+test('a stale registration with an unrelated live PID does not block current bind or cleanup', async () => {
+  const bridge = await connectRelay();
+  try {
+    const { registryDirectory, endpointPath } = await import('../../lcu/claude_lifecycle.mjs');
+    const directory = registryDirectory({ HOME: bridge.directory, USERPROFILE: bridge.directory });
+    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')));
+    const entry = JSON.parse(readFileSync(join(directory, readdirSync(directory).find(name => name.endsWith('.json'))), 'utf8'));
+    const generation = 'f'.repeat(32);
+    const stalePath = join(directory, `${entry.hostPid}-${generation}.json`);
+    writeFileSync(stalePath, JSON.stringify({ ...entry, generation, relayPid: process.pid,
+      endpoint: endpointPath(directory, generation) }), { mode: 0o600 });
+    const hook = { hook_event_name: 'PreToolUse', session_id: 'replacement', prompt_id: 'replacement-prompt',
+      tool_use_id: 'replacement-use' };
+    assert.deepEqual(await runHook(bridge.directory, hook), quiet);
+    const result = await bridge.client.callTool({ name: 'js', arguments: { code: 'replacement' },
+      _meta: { 'claudecode/toolUseId': hook.tool_use_id } });
+    assert.deepEqual(result.content, [{ type: 'text', text: 'replacement' }]);
+    assert.deepEqual(bridge.logs().find(entry => entry.type === 'tool-call').meta['x-codex-turn-metadata'], {
+      session_id: hook.session_id, turn_id: hook.prompt_id, call_id: hook.tool_use_id,
+    });
+    assert.deepEqual(await runHook(bridge.directory, { ...hook, hook_event_name: 'Stop' }), quiet);
+    assert.deepEqual(bridge.logs().find(entry => entry.type === 'turn-ended').args, {
+      hook_event_name: 'Stop', session_id: hook.session_id, turn_id: hook.prompt_id,
+    });
+    assert.equal(existsSync(stalePath), true);
+  } finally { await bridge.close(); }
+});

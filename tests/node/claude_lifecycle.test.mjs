@@ -91,3 +91,21 @@ test('shutdown removes only its own registration and never a replacement generat
   assert.equal(existsSync(second.path), false);
   assert.deepEqual(readdirSync(directory), [first.path.split(/[\\/]/).at(-1)]);
 });
+
+test('an abandoned registration with a reused live PID cannot disable the current relay', async t => {
+  const directory = temporary(t);
+  const calls = [];
+  const listener = await listenLifecycle(value => { calls.push(value); }, { directory });
+  t.after(() => listener.close());
+  const generation = 'f'.repeat(32);
+  const abandoned = { ...listener.entry, relayPid: process.ppid, generation,
+    endpoint: endpointPath(directory, generation) };
+  const path = join(directory, `${abandoned.hostPid}-${generation}.json`);
+  writeFileSync(path, JSON.stringify(abandoned), { mode: 0o600 });
+  const bind = { hook_event_name: 'PreToolUse', session_id: 'current', prompt_id: 'p', tool_use_id: 'use' };
+  const end = { hook_event_name: 'Stop', session_id: 'current', prompt_id: 'p' };
+  await deliverLifecycle(bind, { directory });
+  await deliverLifecycle(end, { directory });
+  assert.deepEqual(calls, [bind, end]);
+  assert.equal(existsSync(path), true, 'a helper must not unlink an endpoint registration');
+});
