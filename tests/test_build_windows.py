@@ -36,6 +36,7 @@ class WindowsBuildTests(unittest.TestCase):
                 for name in ('bin/lcu.cmd', 'lcu/windows.mjs', 'lcu/windows_host.mjs', 'lcu/runtime.mjs',
                              'scripts/install.ps1', 'scripts/install_windows.mjs', 'scripts/install_windows.py',
                              'scripts/bundle.mjs', 'lcu/windows_host_analyze.cjs', 'lcu/vendor/acorn/acorn.js',
+                             'lcu/claude_hook.mjs', 'lcu/claude_lifecycle.mjs',
                              'lcu/vendor/acorn/LICENSE',
                              'scripts/windows_launcher.mjs', 'bundle.json',
                              'docs/verification/codex-interactive-2026-09-24.md'):

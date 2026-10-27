@@ -444,9 +444,27 @@ EXPECTED_ADDITIONS = (
 )
 
 
+def claude_command_hook(old, event):
+    """Only the exact shipped lifecycle handler changes; foreign MCP hooks still compare normally."""
+    if event == 'PreToolUse':
+        legacy = {'type': 'mcp_tool', 'server': 'lcu', 'tool': 'set_turn_context', 'input': {
+            'session_id': '${session_id}', 'turn_id': '${prompt_id}', 'tool_use_id': '${tool_use_id}',
+            'agent_id': '${agent_id}'}}
+    else:
+        legacy = {'type': 'mcp_tool', 'server': 'lcu', 'tool': 'turn_ended', 'input': {
+            'hook_event_name': 'Interrupt' if event == 'StopFailure' else event,
+            'session_id': '${agent_id}' if event == 'SubagentStop' else '${session_id}', 'turn_id': '${prompt_id}'}}
+    return {'type': 'command', 'command': '<SB>/app/chatgpt/resources/cua_node/bin/node',
+            'args': ['<SB>/opt/lcu/current/lcu/claude_hook.mjs'], 'timeout': 600} if old == legacy else old
+
+
 # Data the port changed on purpose: a difference whose path ends in the first item and whose NEW value equals
 # the OLD value with the second applied is not a difference. Anything else under the path still shows.
-EXPECTED_CHANGES = (
+EXPECTED_CHANGES = tuple(
+    (f'/.claude/{settings}/json/hooks/{event}[0]/hooks[0]', lambda old, event=event: claude_command_hook(old, event))
+    for settings in ('settings.json', 'settings.local.json')
+    for event in ('PreToolUse', 'Stop', 'StopFailure', 'SubagentStop')
+) + (
     # The Pi wrapper imports the adapter by plain path on POSIX so Pi-Bolt's compiler can compile it in
     # (Windows keeps the file:// URL; pull/65).
     ('/.local/share/lcu/pi/extension.mjs/code',
@@ -511,6 +529,8 @@ def expected_mod(files, release, normalize):
 
 def diff(old, new, path='', out=None):
     out = [] if out is None else out
+    if any(path.endswith(suffix) and change(old) == new for suffix, change in EXPECTED_CHANGES):
+        return out
     if isinstance(old, dict) and isinstance(new, dict):
         for key in sorted(set(old) | set(new), key=str):
             if key not in new:
@@ -525,8 +545,7 @@ def diff(old, new, path='', out=None):
     elif isinstance(old, list) and isinstance(new, list) and len(old) == len(new):
         for index, (a, b) in enumerate(zip(old, new)):
             diff(a, b, f'{path}[{index}]', out)
-    elif old != new and not any(path.endswith(suffix) and change(old) == new
-                                for suffix, change in EXPECTED_CHANGES):
+    elif old != new:
         out.append(f'{path}: OLD = {short(old)} | NEW = {short(new)}')
     return out
 

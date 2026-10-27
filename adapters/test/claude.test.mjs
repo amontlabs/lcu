@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { fork, spawn } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -20,6 +20,8 @@ function installedCurrentEntryPoint(directory) {
   mkdirSync(releaseAdapters, { recursive: true });
   copyFileSync(relay, join(releaseAdapters, 'claude.mjs'));
   copyFileSync(clientModule, join(releaseAdapters, 'client.mjs'));
+  mkdirSync(join(releaseAdapters, '../lcu'));
+  copyFileSync(fileURLToPath(new URL('../../lcu/claude_lifecycle.mjs', import.meta.url)), join(releaseAdapters, '../lcu/claude_lifecycle.mjs'));
   copyFileSync(fileURLToPath(new URL('../host-guard.mjs', import.meta.url)), join(releaseAdapters, 'host-guard.mjs'));
   copyFileSync(fileURLToPath(new URL('../cross-turn.mjs', import.meta.url)), join(releaseAdapters, 'cross-turn.mjs'));
   copyFileSync(fileURLToPath(new URL('../diagnostics.mjs', import.meta.url)), join(releaseAdapters, 'diagnostics.mjs'));
@@ -1826,4 +1828,174 @@ test('lifecycle helper exits silently without a relay and spawns no upstream', a
   assert.equal(stdout, '');
   assert.equal(stderr, '');
   assert.deepEqual(readdirSync(directory), []);
+});
+
+async function runHook(directory, hook, { instrument = false } = {}) {
+  const args = [];
+  if (instrument) {
+    const preload = join(directory, 'no-spawn.cjs');
+    writeFileSync(preload, `const cp = require('node:child_process');
+for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
+  cp[name] = () => { process.stderr.write('unexpected subprocess: ' + name); process.exit(91); };
+}
+process.execve = () => { process.stderr.write('unexpected execve'); process.exit(91); };
+require('node:module').syncBuiltinESMExports();`);
+    args.push('--require', preload);
+  }
+  args.push(fileURLToPath(new URL('../../lcu/claude_hook.mjs', import.meta.url)));
+  const child = spawn(process.execPath, args, { env: { ...process.env, HOME: directory, USERPROFILE: directory },
+    stdio: ['pipe', 'pipe', 'pipe'] });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.stdin.end(JSON.stringify(hook));
+  return new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', code => resolve({ code, stdout, stderr }));
+  });
+}
+
+const quiet = { code: 0, stdout: '', stderr: '' };
+
+test('exec helper cannot spawn a process when the relay is absent', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-no-spawn-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  assert.deepEqual(await runHook(directory, { hook_event_name: 'PreToolUse', session_id: 's',
+    prompt_id: 'p', tool_use_id: 'u' }, { instrument: true }), quiet);
+});
+
+test('exec lifecycle bind acknowledges exact current metadata before js and routes all cleanup events', async () => {
+  const bridge = await connectRelay();
+  try {
+    const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+    const directory = registryDirectory({ HOME: bridge.directory, USERPROFILE: bridge.directory });
+    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')));
+    for (const [index, event] of ['Stop', 'StopFailure', 'SubagentStop'].entries()) {
+      // The helper's current session changes while the relay process stays the same (/clear/resume).
+      const hook = { hook_event_name: 'PreToolUse', session_id: `current-session-${index}`,
+        prompt_id: `prompt-${index}`, tool_use_id: `use-${index}`,
+        ...(event === 'SubagentStop' ? { agent_id: 'child-agent' } : {}) };
+      assert.deepEqual(await runHook(bridge.directory, hook), quiet);
+      const result = await bridge.client.callTool({ name: 'js', arguments: { code: `ipc-${index}` },
+        _meta: { 'claudecode/toolUseId': hook.tool_use_id } });
+      assert.equal(result.isError, undefined);
+      const forwarded = bridge.logs().find(entry => entry.type === 'tool-call' && entry.args.code === `ipc-${index}`);
+      assert.deepEqual(forwarded.meta['x-codex-turn-metadata'], {
+        session_id: hook.agent_id || hook.session_id, call_id: hook.tool_use_id,
+        turn_id: hook.agent_id ? subagentTurnId(hook.agent_id, hook.prompt_id) : hook.prompt_id,
+      });
+      const end = { ...hook, hook_event_name: event, last_assistant_message: 'long answer '.repeat(10_000) };
+      assert.deepEqual(await runHook(bridge.directory, end), quiet);
+      assert.deepEqual(await runHook(bridge.directory, end), quiet);
+      const ended = bridge.logs().filter(entry => entry.type === 'turn-ended' &&
+        entry.args.session_id === (hook.agent_id || hook.session_id));
+      assert.equal(ended.length, 1);
+      assert.deepEqual(ended[0].args, { hook_event_name: event === 'StopFailure' ? 'Interrupt' : event,
+        session_id: hook.agent_id || hook.session_id,
+        turn_id: hook.agent_id ? subagentTurnId(hook.agent_id, hook.prompt_id) : hook.prompt_id });
+    }
+  } finally { await bridge.close(); }
+});
+
+test('an accepted cleanup outlives the absence budget and reports active upstream failures', async () => {
+  const bridge = await connectRelay();
+  try {
+    const hook = { session_id: 'hold-ipc', prompt_id: 'held-prompt', hook_event_name: 'Stop' };
+    let completed = false;
+    const pending = runHook(bridge.directory, hook).then(result => { completed = true; return result; });
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'turn-ended' && entry.args.session_id === 'hold-ipc'));
+    await new Promise(resolve => setTimeout(resolve, 3_100));
+    assert.equal(completed, false);
+    await callWithContext(bridge.client, 'js', { code: 'release-held-cleanup' }, { toolUseId: 'release-ipc' });
+    assert.deepEqual(await pending, quiet);
+    const failed = await runHook(bridge.directory, { ...hook, session_id: 'fail-ipc' });
+    assert.equal(failed.code, 1);
+    assert.equal(failed.stdout, '');
+    assert.match(failed.stderr, /Original cleanup failed/);
+  } finally { await bridge.close(); }
+});
+
+
+test('two concurrent Claude hosts sharing one account never cross-route hooks', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-host-routing-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  async function host(name) {
+    const logPath = join(directory, `${name}.jsonl`);
+    const child = fork(fileURLToPath(new URL('./claude-host-fixture.mjs', import.meta.url)), [], {
+      env: { ...process.env, HOME: directory, USERPROFILE: directory, LCU_FIXTURE_LOG: logPath,
+        LCU_LOG_DIR: join(directory, 'diagnostics') }, stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    });
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    await new Promise((resolve, reject) => {
+      child.on('message', message => { if (message.ready) resolve(); });
+      child.on('error', reject);
+      child.on('exit', code => reject(new Error(`Host exited ${code}: ${stderr}`)));
+    });
+    let next = 0;
+    const pending = new Map();
+    child.on('message', ({ id, result, error }) => {
+      const request = pending.get(id);
+      if (!request) return;
+      pending.delete(id);
+      error ? request.reject(new Error(error)) : request.resolve(result);
+    });
+    const send = (action, body = {}) => new Promise((resolve, reject) => {
+      const id = ++next;
+      pending.set(id, { resolve, reject });
+      child.send({ id, action, ...body });
+    });
+    return { send, logs: () => readRecords(logPath), close: async () => {
+      await send('close');
+      if (child.exitCode === null) await new Promise(resolve => child.once('exit', resolve));
+    } };
+  }
+  const a = await host('a');
+  const b = await host('b');
+  try {
+    // Same session, prompt and tool-use ids cannot identify the host. Only parent process routing can.
+    const hook = { hook_event_name: 'PreToolUse', session_id: 'shared-session', prompt_id: 'shared-prompt', tool_use_id: 'same-use' };
+    assert.deepEqual(await a.send('hook', { hook }), quiet);
+    const missing = await b.send('tool', { params: { name: 'js', arguments: { code: 'wrong-host' },
+      _meta: { 'claudecode/toolUseId': 'same-use' } } });
+    assert.equal(missing.isError, true);
+    assert.deepEqual(await b.send('hook', { hook }), quiet);
+    for (const [name, parent] of [['a', a], ['b', b]]) {
+      const result = await parent.send('tool', { params: { name: 'js', arguments: { code: name },
+        _meta: { 'claudecode/toolUseId': 'same-use' } } });
+      assert.deepEqual(result.content, [{ type: 'text', text: name }]);
+    }
+    assert.deepEqual(await a.send('hook', { hook: { ...hook, hook_event_name: 'Stop' } }), quiet);
+    assert.equal(a.logs().filter(entry => entry.type === 'turn-ended').length, 1);
+    assert.equal(b.logs().filter(entry => entry.type === 'turn-ended').length, 0);
+    assert.deepEqual(await b.send('hook', { hook: { ...hook, hook_event_name: 'StopFailure' } }), quiet);
+    assert.equal(b.logs().find(entry => entry.type === 'turn-ended').args.hook_event_name, 'Interrupt');
+  } finally { await Promise.all([a.close(), b.close()]); }
+});
+
+
+test('disconnecting a hook does not cancel cleanup already accepted by the relay', async () => {
+  const bridge = await connectRelay();
+  try {
+    const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+    const { createConnection } = await import('node:net');
+    const directory = registryDirectory({ HOME: bridge.directory, USERPROFILE: bridge.directory });
+    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')));
+    const entry = JSON.parse(readFileSync(join(directory, readdirSync(directory).find(name => name.endsWith('.json'))), 'utf8'));
+    await new Promise((resolve, reject) => {
+      const socket = createConnection(entry.endpoint);
+      socket.on('error', reject);
+      socket.on('connect', () => socket.write(JSON.stringify({ ...entry,
+        hook: { hook_event_name: 'Stop', session_id: 'hold-disconnected', prompt_id: 'disconnected' } }) + '\n'));
+      socket.on('data', () => { socket.destroy(); resolve(); });
+    });
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'turn-ended' && entry.args.session_id === 'hold-disconnected'));
+    await callWithContext(bridge.client, 'js', { code: 'release-held-cleanup' }, { toolUseId: 'release-disconnected' });
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'turn-ended-released'));
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'Stop', session_id: 'hold-disconnected',
+      prompt_id: 'disconnected' }), quiet);
+    assert.equal(bridge.logs().filter(entry => entry.type === 'turn-ended' && entry.args.session_id === 'hold-disconnected').length, 1);
+    await bridge.client.close();
+    await waitFor(() => !existsSync(directory) || !readdirSync(directory).some(name => name.endsWith('.json')));
+  } finally { await bridge.close(); }
 });

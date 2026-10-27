@@ -390,9 +390,14 @@ test('Claude Code registration forwards the command through the relay and instal
   assert.deepEqual(data.permissions.deny, ['Bash(rm *)', 'mcp__lcu__turn_ended', 'mcp__lcu__js_add_node_module_dir', 'mcp__lcu__set_turn_context']);
   assert.equal(data.hooks.UserPromptSubmit[0].hooks[0].command, 'keep-me');
   assert.equal(data.hooks.PreToolUse[0].matcher, 'mcp__lcu__js|mcp__lcu__js_reset');
-  assert.deepEqual(data.hooks.Stop[0].hooks[0].input, { hook_event_name: 'Stop', session_id: '${session_id}', turn_id: '${prompt_id}' });
+  assert.deepEqual(data.hooks.Stop[0].hooks[0], { type: 'command', command: r.node,
+    args: [join(r.release, 'lcu/claude_hook.mjs')], timeout: 600 });
   await register('user', base);
   assert.ok(readFileSync(join(r.home, '.claude/settings.json')).equals(configured));
+  const appNode = join(r.release, 'selected app', 'node');
+  write(join(r.release, 'node-path'), appNode + '\n');
+  await register('user', base);
+  assert.equal(JSON.parse(readFileSync(join(r.home, '.claude/settings.json'), 'utf8')).hooks.Stop[0].hooks[0].command, appNode);
   const projectCommand = [...base, '--chrome', '--audio'];
   assert.deepEqual(await register('project', projectCommand), [r.node, join(r.release, 'adapters/claude.mjs'), ...projectCommand]);
   assert.deepEqual(JSON.parse(readFileSync(join(project, '.claude/settings.local.json'), 'utf8')).permissions.deny,

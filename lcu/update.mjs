@@ -397,6 +397,12 @@ export async function postInstall(root, home = accountHome()) {
     await claudeMod.install(home, root);
     process.stdout.write(`Refreshed the Claude Code lcu-approve mod at ${target}.\n`);
   }
+  try {
+    const visibility = await deps.module('claude_visibility');
+    visibility.refresh(home, root);
+  } catch (error) {
+    process.stderr.write(`Claude: could not refresh lifecycle hooks: ${error.message}. Rerun setup --agent claude-code.\n`);
+  }
   await refreshChromeRelay(root);
   if (await codexNeedsSetup(home)) {
     process.stdout.write(`Codex: run \`${stableCommand(root)} setup --agent codex\` to add the LCU update-notice hook.\n`);

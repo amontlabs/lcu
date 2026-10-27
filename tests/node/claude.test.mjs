@@ -1,5 +1,6 @@
 // The Claude Code approval mod (claude_mod.mjs) and host-only tool visibility (claude_visibility.mjs).
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join, sep } from 'node:path';
 import { test } from 'node:test';
@@ -76,8 +77,8 @@ test('visibility denies exactly the host-only tools, adds the lifecycle hooks on
   assert.deepEqual(settings.permissions, { allow: ['mcp__lcu__js'], deny: ['Bash', ...visibility.HOST_ONLY] });
   assert.equal(settings.hooks.Stop.length, 2);
   assert.equal(settings.hooks.Stop[0].hooks[0].command, 'mine');
-  assert.equal(settings.hooks.SubagentStop[0].hooks[0].input.session_id, '${agent_id}');
-  assert.equal(settings.hooks.StopFailure[0].hooks[0].input.hook_event_name, 'Interrupt');
+  assert.deepEqual(settings.hooks.SubagentStop[0].hooks[0], visibility.lifecycleHooks().SubagentStop.hooks[0]);
+  assert.equal(settings.hooks.StopFailure[0].hooks[0].timeout, 600);
   assert.ok(!visibility.MOD_ONLY.some((tool) => settings.permissions.deny.includes(tool)));
   visibility.install(home);
   assert.equal(readFileSync(path, 'utf8'), first);
@@ -147,4 +148,52 @@ test('re-setup migrates old LCU MCP hook entries without deleting neighboring us
   const first = readFileSync(f.path, 'utf8');
   visibility.install(f.home);
   assert.equal(readFileSync(f.path, 'utf8'), first);
+});
+
+
+test('Windows installed hooks use the stable launcher directly with the selected app Node', () => {
+  const hook = visibility.lifecycleHooks('C:\\LCU\\releases\\new', 'C:\\LCU\\apps\\new\\node.exe', 'win32').Stop.hooks[0];
+  assert.deepEqual(hook, { type: 'command', command: 'C:\\LCU\\apps\\new\\node.exe',
+    args: ['C:\\LCU\\windows_launcher.mjs', 'claude-hook'], timeout: 600 });
+});
+
+
+test('migration recognizes only exact legacy handlers and keeps group fields and foreign variants', t => {
+  const home = temporary(t);
+  const legacy = { type: 'mcp_tool', server: 'lcu', tool: 'set_turn_context', input: {
+    session_id: '${session_id}', turn_id: '${prompt_id}', tool_use_id: '${tool_use_id}', agent_id: '${agent_id}' } };
+  const foreign = [{ ...legacy, timeout: 42 }, { ...legacy, input: { ...legacy.input, session_id: 'mine' } }];
+  const changedMatcher = { matcher: 'mcp__lcu__js', hooks: [legacy] };
+  const path = write(join(home, '.claude/settings.json'), JSON.stringify({ hooks: { PreToolUse: [
+    { matcher: 'mcp__lcu__js|mcp__lcu__js_reset', label: 'keep-group', hooks: [legacy, ...foreign] }, changedMatcher,
+  ] } }));
+  visibility.install(home);
+  const settings = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(settings.hooks.PreToolUse.slice(0, 2), [
+    { matcher: 'mcp__lcu__js|mcp__lcu__js_reset', label: 'keep-group', hooks: foreign }, changedMatcher,
+  ]);
+  const first = readFileSync(path, 'utf8');
+  visibility.install(home);
+  assert.equal(readFileSync(path, 'utf8'), first);
+});
+
+
+test('the Windows stable hook dispatch runs the helper without loading the app runtime', t => {
+  const home = temporary(t);
+  const prefix = join(home, 'prefix');
+  const release = join(prefix, 'releases/new');
+  write(join(release, 'lcu/runtime.mjs'), 'throw new Error("app runtime must not load for a hook");');
+  for (const name of ['claude_hook.mjs', 'claude_lifecycle.mjs', 'entry.mjs']) {
+    cpSync(join(REPO, 'lcu', name), join(release, 'lcu', name));
+  }
+  cpSync(join(REPO, 'scripts/windows_launcher.mjs'), join(prefix, 'windows_launcher.mjs'));
+  write(join(prefix, 'current.json'), JSON.stringify({ release: 'new' }));
+  const result = spawnSync(process.execPath, [join(prefix, 'windows_launcher.mjs'), 'claude-hook'], {
+    env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home }, encoding: 'utf8',
+    input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'absent', prompt_id: 'p' }),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, '');
+  assert.equal(existsSync(join(home, '.claude')), false);
 });

@@ -432,3 +432,30 @@ test('the Codex hint appears only while LCU is registered without both notice ho
   writeFileSync(join(codex, 'config.toml'), `[mcp_servers.lcu]\ncommand = "/p/current/bin/lcu"\n${hook('SessionStart')}${hook('UserPromptSubmit')}`);
   assert.equal(await update.codexNeedsSetup(home, env), false);
 });
+
+
+test('post-install migrates owned user lifecycle hooks without enabling an absent integration', async t => {
+  const { root, home } = setup(t);
+  const path = join(home, '.claude/settings.json');
+  await postInstall(t, root, home);
+  assert.equal(existsSync(path), false);
+  const mine = { type: 'command', command: 'mine' };
+  const foreign = { type: 'mcp_tool', server: 'lcu', tool: 'turn_ended', input: { session_id: 'foreign' } };
+  const permissions = { deny: ['my-deny'], allow: ['Read'] };
+  write(path, JSON.stringify({ permissions, hooks: { Stop: [{ hooks: [mine, foreign] }] } }));
+  const before = readFileSync(path, 'utf8');
+  await postInstall(t, root, home);
+  assert.equal(readFileSync(path, 'utf8'), before);
+  const data = JSON.parse(before);
+  data.hooks.Stop[0].hooks.push({ type: 'mcp_tool', server: 'lcu', tool: 'turn_ended',
+    input: { hook_event_name: 'Stop', session_id: '${session_id}', turn_id: '${prompt_id}' } });
+  writeFileSync(path, JSON.stringify(data));
+  await postInstall(t, root, home);
+  const installed = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(installed.hooks.Stop[0].hooks, [mine, foreign]);
+  const { lifecycleHooks } = await import('../../lcu/claude_visibility.mjs');
+  assert.deepEqual(installed.hooks.Stop[1], lifecycleHooks(root).Stop);
+  const migrated = readFileSync(path, 'utf8');
+  await postInstall(t, root, home);
+  assert.equal(readFileSync(path, 'utf8'), migrated);
+});

@@ -618,7 +618,9 @@ export async function configure(names, home, command, toolsRoot, releaseRoot,
         const cli = locateCodexTools(resources, { windows: windows() }).cli;
         await installHooks(cli, registered.path, cwd, env, originalPlugins, setupCommand);
       } else if (name === 'claude-code') {
-        hideHostOnlyTools(home, { project: projectScope });
+        const recordedNode = join(releaseRoot, 'node-path');
+        hideHostOnlyTools(home, { project: projectScope, root: releaseRoot,
+          node: existsSync(recordedNode) ? readFileSync(recordedNode, 'utf8').trim() : node });
         say(`${client.label}: approval mod installed at ${installApprovalMod(home, releaseRoot, { project: projectScope })}.`);
       }
       say(`${client.label}: ${phase} registered.`);

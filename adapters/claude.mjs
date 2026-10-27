@@ -29,6 +29,7 @@ import {
 import { crossTurnEnabled } from './cross-turn.mjs';
 import { openDiagnosticLog } from './diagnostics.mjs';
 import { declineAgentHostApp } from './host-guard.mjs';
+import { listenLifecycle } from '../lcu/claude_lifecycle.mjs';
 
 const PUBLIC_TOOLS = new Set(['js', 'js_reset']);
 const CONTEXT_TOOL = 'set_turn_context';
@@ -448,6 +449,73 @@ export async function runClaudeBridge({
     return restarting;
   }
 
+  function bindContext(toolArgs) {
+    const context = requireTurnContext(toolArgs);
+    // Match Claude's child cleanup identity while preserving the shared prompt ID.
+    if (context.agentId) context.sessionId = context.agentId;
+    if (!nonEmptyString(context.turnId)) {
+      context.turnId = promptlessTurnId;
+      if (context.agentId) {
+        const bound = promptlessSubagentTurns.get(context.sessionId);
+        const entry = bound && !bound.ended ? bound : { id: promptlessTurnId, ended: false };
+        context.turnId = entry.id;
+        promptlessSubagentTurns.delete(context.sessionId);
+        promptlessSubagentTurns.set(context.sessionId, entry);
+        if (promptlessSubagentTurns.size > maxEndedTurns) {
+          promptlessSubagentTurns.delete(promptlessSubagentTurns.keys().next().value);
+        }
+      }
+    }
+    const previous = contexts.get(context.toolUseId);
+    if (previous && (previous.sessionId !== context.sessionId || previous.turnId !== context.turnId ||
+        previous.agentId !== context.agentId)) {
+      throw new Error('Conflicting Claude identity for the same tool_use_id');
+    }
+    if (!previous && contexts.size >= 1024) {
+      throw new Error('Too many pending Claude tool identities; LCU rejected this call safely');
+    }
+    const key = turnKey(context.sessionId, context.turnId);
+    const subagent = Boolean(context.agentId);
+    const crossOn = crossTurn();
+    let life = lives.get(key);
+    const endedLife = Boolean(life?.endedUpstream);
+    // With cross-turn off, a subagent of an ended prompt shares the ended id and is refused, as before.
+    const sharesEnded = subagent && !crossOn && endedPrompts.has(context.turnId);
+    // A life whose id is already the closed prompt id cannot do better off-mode, so it is reused unless a
+    // cleanup is in flight (the next Stop must start its own).
+    const stale = endedLife && (life.cleanup || crossOn || life.upstreamId !== context.turnId);
+    if (!life || stale || (sharesEnded && life.upstreamId !== context.turnId)) {
+      admit(key);
+      // The key's earlier life already ended upstream (completed, or a cleanup in flight that this bind
+      // supersedes), so with cross-turn on this life needs a fresh upstream turn id. A random UUID, not a
+      // counter, so it needs no state beyond the life record and cannot collide with a prompt id.
+      const renew = crossOn && (endedLife || endedKeys.has(key));
+      if (renew) log.event('turn_renew', { in_flight: Boolean(life?.cleanup), subagent });
+      life = openLife(key, context.sessionId, context.turnId, subagent,
+        renew ? randomUUID() : sharesEnded ? context.turnId
+          : subagent ? subagentTurnId(context.sessionId, context.turnId) : context.turnId);
+    }
+    context.life = life;
+    contexts.set(context.toolUseId, context);
+    return { content: [{ type: 'text', text: 'Turn context bound.' }] };
+  }
+
+  function endContext(toolArgs) {
+    const event = toolArgs.hook_event_name;
+    const promptless = hookWithoutPrompt(toolArgs.turn_id);
+    const life = lifeForHook(toolArgs.session_id,
+      resolveTurnId(toolArgs.session_id, toolArgs.turn_id, event), event);
+    if (promptless && event === 'SubagentStop') {
+      const entry = promptlessSubagentTurns.get(toolArgs.session_id);
+      if (entry) entry.ended = true;
+    }
+    if (promptless && event !== 'SubagentStop') promptlessTurnId = randomUUID();
+    if (!life) return { content: [{ type: 'text', text: 'Turn already ended.' }] };
+    return turnEnded(life, event);
+  }
+
+  let lifecycle;
+
   try {
     link = await openUpstream();
     connected = true;
@@ -485,54 +553,7 @@ export async function runClaudeBridge({
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { name, arguments: toolArgs = {}, _meta } = request.params;
       if (name === CONTEXT_TOOL) {
-        const context = requireTurnContext(toolArgs);
-        // Match Claude's child cleanup identity while preserving the shared prompt ID.
-        if (context.agentId) context.sessionId = context.agentId;
-        if (!nonEmptyString(context.turnId)) {
-          context.turnId = promptlessTurnId;
-          if (context.agentId) {
-            const bound = promptlessSubagentTurns.get(context.sessionId);
-            const entry = bound && !bound.ended ? bound : { id: promptlessTurnId, ended: false };
-            context.turnId = entry.id;
-            promptlessSubagentTurns.delete(context.sessionId);
-            promptlessSubagentTurns.set(context.sessionId, entry);
-            if (promptlessSubagentTurns.size > maxEndedTurns) {
-              promptlessSubagentTurns.delete(promptlessSubagentTurns.keys().next().value);
-            }
-          }
-        }
-        const previous = contexts.get(context.toolUseId);
-        if (previous && (previous.sessionId !== context.sessionId || previous.turnId !== context.turnId ||
-            previous.agentId !== context.agentId)) {
-          throw new Error('Conflicting Claude identity for the same tool_use_id');
-        }
-        if (!previous && contexts.size >= 1024) {
-          throw new Error('Too many pending Claude tool identities; LCU rejected this call safely');
-        }
-        const key = turnKey(context.sessionId, context.turnId);
-        const subagent = Boolean(context.agentId);
-        const crossOn = crossTurn();
-        let life = lives.get(key);
-        const endedLife = Boolean(life?.endedUpstream);
-        // With cross-turn off, a subagent of an ended prompt shares the ended id and is refused, as before.
-        const sharesEnded = subagent && !crossOn && endedPrompts.has(context.turnId);
-        // A life whose id is already the closed prompt id cannot do better off-mode, so it is reused unless a
-        // cleanup is in flight (the next Stop must start its own).
-        const stale = endedLife && (life.cleanup || crossOn || life.upstreamId !== context.turnId);
-        if (!life || stale || (sharesEnded && life.upstreamId !== context.turnId)) {
-          admit(key);
-          // The key's earlier life already ended upstream (completed, or a cleanup in flight that this bind
-          // supersedes), so with cross-turn on this life needs a fresh upstream turn id. A random UUID, not a
-          // counter, so it needs no state beyond the life record and cannot collide with a prompt id.
-          const renew = crossOn && (endedLife || endedKeys.has(key));
-          if (renew) log.event('turn_renew', { in_flight: Boolean(life?.cleanup), subagent });
-          life = openLife(key, context.sessionId, context.turnId, subagent,
-            renew ? randomUUID() : sharesEnded ? context.turnId
-              : subagent ? subagentTurnId(context.sessionId, context.turnId) : context.turnId);
-        }
-        context.life = life;
-        contexts.set(context.toolUseId, context);
-        return { content: [{ type: 'text', text: 'Turn context bound.' }] };
+        return bindContext(toolArgs);
       }
       if (MOD_ONLY_TOOLS.has(name)) {
         // Host-only: answered for the lcu-approve mod, which Claude Code marks with a plugin tool-use id.
@@ -549,17 +570,7 @@ export async function runClaudeBridge({
         return { content: [{ type: 'text', text: JSON.stringify(body) }] };
       }
       if (name === TURN_END_TOOL) {
-        const event = toolArgs.hook_event_name;
-        const promptless = hookWithoutPrompt(toolArgs.turn_id);
-        const life = lifeForHook(toolArgs.session_id,
-          resolveTurnId(toolArgs.session_id, toolArgs.turn_id, event), event);
-        if (promptless && event === 'SubagentStop') {
-          const entry = promptlessSubagentTurns.get(toolArgs.session_id);
-          if (entry) entry.ended = true;
-        }
-        if (promptless && event !== 'SubagentStop') promptlessTurnId = randomUUID();
-        if (!life) return { content: [{ type: 'text', text: 'Turn already ended.' }] };
-        return turnEnded(life, event);
+        return endContext(toolArgs);
       }
       if (!PUBLIC_TOOLS.has(name)) {
         return { isError: true, content: [{ type: 'text', text: `Unknown LCU tool: ${name}` }] };
@@ -674,6 +685,7 @@ export async function runClaudeBridge({
     const closeUpstreamAfterTurnCleanup = () => {
       if (shutdown) return shutdown;
       shutdown = (async () => {
+        lifecycle?.close();
         const drain = (async () => {
           await settled();
           for (const life of [...lives.values()]) {
@@ -729,6 +741,16 @@ export async function runClaudeBridge({
     // EOF is the actual Claude-side connection-close signal; use it to drain exact
     // active turns before closing the original MCP client.
     process.stdin.once('end', closeDownstream);
+    lifecycle = await listenLifecycle(hook => {
+      if (hook.hook_event_name === 'PreToolUse') return bindContext({
+        session_id: hook.session_id, turn_id: hook.prompt_id, tool_use_id: hook.tool_use_id, agent_id: hook.agent_id,
+      });
+      const event = hook.hook_event_name === 'StopFailure' ? 'Interrupt' : hook.hook_event_name;
+      return endContext({ hook_event_name: event,
+        session_id: event === 'SubagentStop' ? hook.agent_id : hook.session_id, turn_id: hook.prompt_id });
+    });
+    // Shutdown may have started while the listener was opening. Never leave a late publication behind.
+    if (shutdown) lifecycle.close();
     return { server, get upstream() { return link?.client; }, contexts, activeTurns: lives, close: async () => {
       process.stdin.off('end', closeDownstream);
       await closeUpstreamAfterTurnCleanup();
@@ -736,6 +758,8 @@ export async function runClaudeBridge({
       await serverClose;
     } };
   } catch (error) {
+    lifecycle?.close();
+    await server?.close().catch(() => {});
     if (connected) await link.client.close().catch(() => {});
     throw error;
   }

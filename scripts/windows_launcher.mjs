@@ -31,8 +31,13 @@ const here = fileURLToPath(import.meta.url);
 if (realpathSync(process.argv[1]) === here) {
   try {
     const release = selectedRelease(dirname(here));
-    const { cli } = await import(pathToFileURL(join(release, 'lcu/runtime.mjs')).href);
-    await cli(realpathSync(release), process.argv.slice(2));
+    if (process.argv[2] === 'claude-hook') {
+      const { main } = await import(pathToFileURL(join(release, 'lcu/claude_hook.mjs')).href);
+      await main();
+    } else {
+      const { cli } = await import(pathToFileURL(join(release, 'lcu/runtime.mjs')).href);
+      await cli(realpathSync(release), process.argv.slice(2));
+    }
   } catch (error) {
     process.stderr.write(`LCU Windows launcher: ${error.message}\n`);
     process.exitCode = 1;

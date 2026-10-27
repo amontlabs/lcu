@@ -65,6 +65,8 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertNotIn(prefix + 'scripts/install_windows.mjs', names)
                 self.assertFalse(any(name.startswith(prefix + 'lcu/') and name.endswith('.py') for name in names))
                 self.assertIn(prefix + 'lcu/platforms.mjs', names)
+                self.assertIn(prefix + 'lcu/claude_hook.mjs', names)
+                self.assertIn(prefix + 'lcu/claude_lifecycle.mjs', names)
                 self.assertIn(prefix + 'lcu/macos_host.mjs', names)
                 self.assertIn(prefix + 'lcu/macos_sky_service.mjs', names)
                 self.assertNotIn(prefix + 'lcu/linux_sky_service.mjs', names)
