@@ -1,7 +1,7 @@
 // The Claude Code approval mod (claude_mod.mjs) and host-only tool visibility (claude_visibility.mjs).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, sep } from 'node:path';
 import { test } from 'node:test';
 
@@ -77,7 +77,7 @@ test('visibility denies exactly the host-only tools, adds the lifecycle hooks on
   assert.deepEqual(settings.permissions, { allow: ['mcp__lcu__js'], deny: ['Bash', ...visibility.HOST_ONLY] });
   assert.equal(settings.hooks.Stop.length, 2);
   assert.equal(settings.hooks.Stop[0].hooks[0].command, 'mine');
-  assert.deepEqual(settings.hooks.SubagentStop[0].hooks[0], visibility.lifecycleHooks().SubagentStop.hooks[0]);
+  assert.deepEqual(settings.hooks.SubagentStop[0].hooks[0], visibility.lifecycleHooks(home).SubagentStop.hooks[0]);
   assert.equal(settings.hooks.StopFailure[0].hooks[0].timeout, 600);
   assert.ok(!visibility.MOD_ONLY.some((tool) => settings.permissions.deny.includes(tool)));
   visibility.install(home);
@@ -151,12 +151,13 @@ test('re-setup migrates old LCU MCP hook entries without deleting neighboring us
 });
 
 
-test('Windows installed hooks use the stable launcher directly with the selected app Node', () => {
-  const hook = visibility.lifecycleHooks('C:\\LCU\\releases\\new', 'C:\\LCU\\apps\\new\\node.exe', 'win32').Stop.hooks[0];
-  assert.deepEqual(hook, { type: 'command', command: 'C:\\LCU\\apps\\new\\node.exe',
-    args: ['C:\\LCU\\windows_launcher.mjs', 'claude-hook'], timeout: 600 });
+test('Windows hooks run the account-data helper directly with the selected app Node', () => {
+  const home = 'C:\\Users\\fixture';
+  const node = 'C:\\LCU\\apps\\new\\node.exe';
+  const hook = visibility.lifecycleHooks(home, node, 'win32').Stop.hooks[0];
+  assert.deepEqual(hook, { type: 'command', command: node,
+    args: ['C:\\Users\\fixture\\AppData\\Local\\LCU\\claude\\claude-hook.mjs'], timeout: 600 });
 });
-
 
 test('migration recognizes only exact legacy handlers and keeps group fields and foreign variants', t => {
   const home = temporary(t);
@@ -178,22 +179,46 @@ test('migration recognizes only exact legacy handlers and keeps group fields and
 });
 
 
-test('the Windows stable hook dispatch runs the helper without loading the app runtime', t => {
+test('setup migrates release-bound command hooks and refreshes the standalone copy', t => {
   const home = temporary(t);
+  const root = join(home, 'prefix/releases/new');
   const prefix = join(home, 'prefix');
-  const release = join(prefix, 'releases/new');
-  write(join(release, 'lcu/runtime.mjs'), 'throw new Error("app runtime must not load for a hook");');
-  for (const name of ['claude_hook.mjs', 'claude_lifecycle.mjs', 'entry.mjs']) {
-    cpSync(join(REPO, 'lcu', name), join(release, 'lcu', name));
+  const previous = { type: 'command', command: process.execPath,
+    args: process.platform === 'win32' ? [join(prefix, 'windows_launcher.mjs'), 'claude-hook']
+      : [join(prefix, 'current/lcu/claude_hook.mjs')], timeout: 600 };
+  const mine = { ...previous, timeout: 42 };
+  const path = write(join(home, '.claude/settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [previous, mine] }] } }));
+  visibility.install(home, { root });
+  const settings = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(settings.hooks.Stop[0].hooks, [mine]);
+  assert.deepEqual(settings.hooks.Stop[1], visibility.lifecycleHooks(home).Stop);
+  const helper = visibility.helperPath(home);
+  const source = readFileSync(join(REPO, 'lcu/claude_hook.mjs'), 'utf8');
+  assert.equal(readFileSync(helper, 'utf8'), source);
+  writeFileSync(helper, source + '// earlier copy\n');
+  assert.equal(visibility.refresh(home, root), true);
+  assert.equal(readFileSync(helper, 'utf8'), source);
+  const before = readFileSync(path, 'utf8');
+  visibility.install(home, { root });
+  assert.equal(readFileSync(path, 'utf8'), before);
+});
+
+test('installed lifecycle hooks stay silent after their release is rolled back and pruned', t => {
+  const home = temporary(t);
+  const release = join(home, 'prefix/current');
+  cpSync(join(REPO, 'lcu'), join(release, 'lcu'), { recursive: true });
+  const path = visibility.install(home, { root: release });
+  const hook = JSON.parse(readFileSync(path, 'utf8')).hooks.Stop[0].hooks[0];
+  const standalone = join(home, 'standalone', 'hook.mjs');
+  mkdirSync(join(home, 'standalone'));
+  cpSync(hook.args[0], standalone);
+  rmSync(join(home, 'prefix'), { recursive: true, force: true });
+  for (const args of [hook.args, [standalone]]) {
+    const result = spawnSync(hook.command, args, { encoding: 'utf8', timeout: 2_000,
+      env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home },
+      input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'old-relay', prompt_id: 'p' }) });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, '');
   }
-  cpSync(join(REPO, 'scripts/windows_launcher.mjs'), join(prefix, 'windows_launcher.mjs'));
-  write(join(prefix, 'current.json'), JSON.stringify({ release: 'new' }));
-  const result = spawnSync(process.execPath, [join(prefix, 'windows_launcher.mjs'), 'claude-hook'], {
-    env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home }, encoding: 'utf8',
-    input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'absent', prompt_id: 'p' }),
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, '');
-  assert.equal(result.stderr, '');
-  assert.equal(existsSync(join(home, '.claude')), false);
 });

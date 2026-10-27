@@ -1,6 +1,7 @@
 // Keep the original CUA host-only tools out of Claude Code's model context and add LCU's lifecycle hooks.
 import { basename, dirname, isAbsolute, join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 
 import { applyChanges, change, json, member, parseJson, readFile } from './setup.mjs';
@@ -25,30 +26,36 @@ const LEGACY = {
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const stableRoot = (root) => basename(dirname(root)) === 'releases' ? join(dirname(dirname(root)), 'current') : root;
 
-export function lifecycleHooks(root = ROOT, node = process.execPath, platform = process.platform) {
+export function helperPath(home, platform = process.platform) {
+  return platform === 'win32' ? win32.join(home, 'AppData/Local/LCU/claude/claude-hook.mjs')
+    : join(home, '.local/share/lcu/claude/claude-hook.mjs');
+}
+
+export function lifecycleHooks(home, node = process.execPath, platform = process.platform) {
   if (!(platform === 'win32' ? win32.isAbsolute(node) : isAbsolute(node))) throw new Error('Claude hooks require an absolute Node executable path');
-  const installedWindows = platform === 'win32' && win32.basename(win32.dirname(root)) === 'releases';
-  const args = installedWindows ? [win32.join(win32.dirname(win32.dirname(root)), 'windows_launcher.mjs'), 'claude-hook']
-    : [join(stableRoot(root), 'lcu/claude_hook.mjs')];
-  const hook = { type: 'command', command: node, args, timeout: 600 };
+  const hook = { type: 'command', command: node, args: [helperPath(home, platform)], timeout: 600 };
   return Object.fromEntries(Object.entries(LEGACY).map(([event, group]) => [event,
     { ...('matcher' in group ? { matcher: group.matcher } : {}), hooks: [structuredClone(hook)] }]));
 }
 
 // All published Python and Node MCP templates used these exact handlers, including the pre-SubagentStop release.
-function ownedHandler(event, group, hook, root) {
+function ownedHandler(event, group, hook, root, home) {
   const legacy = LEGACY[event];
   if (group.matcher !== legacy.matcher) return false;
   if (isDeepStrictEqual(hook, legacy.hooks[0])) return true;
-  const args = lifecycleHooks(root)[event].hooks[0].args;
+  const previous = [[join(root, 'lcu/claude_hook.mjs')], [join(stableRoot(root), 'lcu/claude_hook.mjs')]];
+  if (process.platform === 'win32' && basename(dirname(root)) === 'releases') {
+    previous.push([join(dirname(dirname(root)), 'windows_launcher.mjs'), 'claude-hook']);
+  }
+  const args = [[helperPath(home)], ...previous];
   return hook.type === 'command' && typeof hook.command === 'string' && isAbsolute(hook.command) &&
-    isDeepStrictEqual(hook.args, args) &&
+    args.some(value => isDeepStrictEqual(hook.args, value)) &&
     isDeepStrictEqual(hook, { type: 'command', command: hook.command, args: hook.args, timeout: 600 });
 }
 
-function installLifecycleHooks(settings, root, node) {
+function installLifecycleHooks(settings, root, node, home) {
   const hooks = member(settings, 'hooks', {}, 'Claude hooks must be an object');
-  for (const [event, group] of Object.entries(lifecycleHooks(root, node))) {
+  for (const [event, group] of Object.entries(lifecycleHooks(home, node))) {
     const groups = member(hooks, event, [], `Claude ${event} hooks must be an array of objects`);
     for (const existing of groups) {
       if (!isObject(existing)) throw new Error(`Claude ${event} hooks must be an array of objects`);
@@ -57,7 +64,7 @@ function installLifecycleHooks(settings, root, node) {
     }
     // Remove handlers, not whole groups: a person's matcher and neighboring hooks survive migration.
     hooks[event] = groups.flatMap(existing => {
-      const kept = existing.hooks.filter(hook => !ownedHandler(event, existing, hook, root));
+      const kept = existing.hooks.filter(hook => !ownedHandler(event, existing, hook, root, home));
       return kept.length === existing.hooks.length ? [existing] : kept.length ? [{ ...existing, hooks: kept }] : [];
     });
     hooks[event].push(structuredClone(group));
@@ -74,8 +81,14 @@ export function install(home, { project = null, root = ROOT, node = process.exec
   const deny = member(permissions, 'deny', [], `Claude deny rules must be a string array: ${path}`);
   if (deny.some((rule) => typeof rule !== 'string')) throw new Error(`Claude deny rules must be a string array: ${path}`);
   for (const rule of HOST_ONLY) if (!deny.includes(rule)) deny.push(rule);
-  installLifecycleHooks(settings, root, node);
-  if (before === null || !isDeepStrictEqual(parseJson(before), settings)) applyChanges([change(path, before, json(settings))]);
+  installLifecycleHooks(settings, root, node, home);
+  const helper = helperPath(home);
+  const content = readFileSync(new URL('./claude_hook.mjs', import.meta.url));
+  const changes = [];
+  const previous = readFile(helper);
+  if (previous === null || !previous.equals(content)) changes.push(change(helper, previous, content));
+  if (before === null || !isDeepStrictEqual(parseJson(before), settings)) changes.push(change(path, before, json(settings)));
+  if (changes.length) applyChanges(changes);
   return path;
 }
 
@@ -85,7 +98,7 @@ export function refresh(home, root, node = process.execPath) {
   if (!isObject(settings?.hooks)) return false;
   const owned = Object.keys(LEGACY).some(event => Array.isArray(settings.hooks[event]) &&
     settings.hooks[event].some(group => isObject(group) && Array.isArray(group.hooks) &&
-      group.hooks.some(hook => ownedHandler(event, group, hook, root))));
+      group.hooks.some(hook => ownedHandler(event, group, hook, root, home))));
   if (!owned) return false;
   install(home, { root, node });
   return true;

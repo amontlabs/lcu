@@ -454,7 +454,7 @@ test('post-install migrates owned user lifecycle hooks without enabling an absen
   const installed = JSON.parse(readFileSync(path, 'utf8'));
   assert.deepEqual(installed.hooks.Stop[0].hooks, [mine, foreign]);
   const { lifecycleHooks } = await import('../../lcu/claude_visibility.mjs');
-  assert.deepEqual(installed.hooks.Stop[1], lifecycleHooks(root).Stop);
+  assert.deepEqual(installed.hooks.Stop[1], lifecycleHooks(home).Stop);
   const migrated = readFileSync(path, 'utf8');
   await postInstall(t, root, home);
   assert.equal(readFileSync(path, 'utf8'), migrated);

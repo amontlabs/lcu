@@ -391,7 +391,7 @@ test('Claude Code registration forwards the command through the relay and instal
   assert.equal(data.hooks.UserPromptSubmit[0].hooks[0].command, 'keep-me');
   assert.equal(data.hooks.PreToolUse[0].matcher, 'mcp__lcu__js|mcp__lcu__js_reset');
   assert.deepEqual(data.hooks.Stop[0].hooks[0], { type: 'command', command: r.node,
-    args: [join(r.release, 'lcu/claude_hook.mjs')], timeout: 600 });
+    args: [join(r.home, '.local/share/lcu/claude/claude-hook.mjs')], timeout: 600 });
   await register('user', base);
   assert.ok(readFileSync(join(r.home, '.claude/settings.json')).equals(configured));
   const appNode = join(r.release, 'selected app', 'node');

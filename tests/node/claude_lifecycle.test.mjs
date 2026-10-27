@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { createConnection } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -108,4 +108,29 @@ test('an abandoned registration with a reused live PID cannot disable the curren
   await deliverLifecycle(end, { directory });
   assert.deepEqual(calls, [bind, end]);
   assert.equal(existsSync(path), true, 'a helper must not unlink an endpoint registration');
+});
+
+
+test('refused and unresponsive candidates do not make a healthy listener ambiguous', async t => {
+  const directory = temporary(t);
+  const calls = [];
+  const current = await listenLifecycle(value => { calls.push(value); }, { directory });
+  const refused = await listenLifecycle(() => { assert.fail('a probe must not run lifecycle'); }, { directory });
+  t.after(() => { current.close(); refused.close(); });
+  writeFileSync(refused.path, JSON.stringify({ ...refused.entry, token: '0'.repeat(64) }));
+  const generation = 'e'.repeat(32);
+  const entry = { ...current.entry, generation, endpoint: endpointPath(directory, generation) };
+  const chatter = createServer(socket => {
+    // Incomplete replies must not reset the absolute handshake budget forever.
+    const timer = setInterval(() => socket.write(' '), 20);
+    socket.on('error', () => {});
+    socket.on('close', () => clearInterval(timer));
+  });
+  t.after(() => chatter.close());
+  await new Promise(resolve => chatter.listen(entry.endpoint, resolve));
+  writeFileSync(join(directory, `${entry.hostPid}-${generation}.json`), JSON.stringify(entry), { mode: 0o600 });
+  const started = Date.now();
+  await deliverLifecycle(hook, { directory });
+  assert.deepEqual(calls, [hook]);
+  assert.ok(Date.now() - started < 2_000);
 });

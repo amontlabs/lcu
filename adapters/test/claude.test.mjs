@@ -21,6 +21,7 @@ function installedCurrentEntryPoint(directory) {
   copyFileSync(relay, join(releaseAdapters, 'claude.mjs'));
   copyFileSync(clientModule, join(releaseAdapters, 'client.mjs'));
   mkdirSync(join(releaseAdapters, '../lcu'));
+  copyFileSync(fileURLToPath(new URL('../../lcu/claude_hook.mjs', import.meta.url)), join(releaseAdapters, '../lcu/claude_hook.mjs'));
   copyFileSync(fileURLToPath(new URL('../../lcu/claude_lifecycle.mjs', import.meta.url)), join(releaseAdapters, '../lcu/claude_lifecycle.mjs'));
   copyFileSync(fileURLToPath(new URL('../host-guard.mjs', import.meta.url)), join(releaseAdapters, 'host-guard.mjs'));
   copyFileSync(fileURLToPath(new URL('../cross-turn.mjs', import.meta.url)), join(releaseAdapters, 'cross-turn.mjs'));
