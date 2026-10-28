@@ -2216,6 +2216,39 @@ test('exec lifecycle bind acknowledges exact current metadata before js and rout
   } finally { await bridge.close(); }
 });
 
+for (const crossTurn of [false, true]) {
+  for (const boundBefore of [false, true]) {
+    test(`exec Stop closes an unbound parent with cross-turn ${crossTurn ? 'on' : 'off'}, child bound ${boundBefore ? 'before' : 'after'}`, async () => {
+      const bridge = await connectRelay({ crossTurn });
+      try {
+        const hook = { session_id: 'strict-idle-parent', prompt_id: 'idle-parent-prompt' };
+        const child = { ...hook, agent_id: 'strict-background-child', tool_use_id: 'background-call',
+          hook_event_name: 'PreToolUse' };
+        if (boundBefore) assert.deepEqual(await runHook(bridge.directory, child), quiet);
+        assert.deepEqual(await runHook(bridge.directory, { ...hook, hook_event_name: 'Stop' }), quiet);
+        if (!boundBefore) assert.deepEqual(await runHook(bridge.directory, child), quiet);
+        const result = await bridge.client.callTool({ name: 'js', arguments: { code: 'background-after-parent' },
+          _meta: { 'claudecode/toolUseId': child.tool_use_id } });
+        if (crossTurn) {
+          assert.equal(result.isError, undefined);
+          assert.equal(result.content[0].text, 'background-after-parent');
+          assert.equal(upstreamTurnOf(bridge, child.tool_use_id), subagentTurnId(child.agent_id, hook.prompt_id));
+        } else {
+          assert.equal(result.isError, true);
+          assert.match(result.content[0].text, /current turn ended/);
+          assert.equal(upstreamTurnOf(bridge, child.tool_use_id), hook.prompt_id);
+        }
+        const ended = turnEnds(bridge).map(entry => entry.args);
+        assert.deepEqual(ended, [
+          { hook_event_name: 'Stop', session_id: hook.session_id, turn_id: hook.prompt_id },
+          ...(!crossTurn && boundBefore ? [{ hook_event_name: 'SubagentStop', session_id: child.agent_id,
+            turn_id: subagentTurnId(child.agent_id, hook.prompt_id) }] : []),
+        ]);
+      } finally { await bridge.close(); }
+    });
+  }
+}
+
 test('an accepted cleanup outlives the absence budget and reports active upstream failures', async () => {
   const bridge = await connectRelay();
   try {
@@ -2224,8 +2257,7 @@ test('an accepted cleanup outlives the absence budget and reports active upstrea
     await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')),
       process.platform === 'win32' ? 35_000 : 5_000);
     const hook = { session_id: 'hold-ipc', prompt_id: 'held-prompt', hook_event_name: 'Stop' };
-    // Cleanup without a bound context is intentionally a no-op. Establish real exec-hook contexts
-    // before exercising the slow accepted cleanup and the active upstream failure.
+    // Establish exec-hook contexts before exercising slow cleanup and an active upstream failure.
     for (const session of ['hold-ipc', 'fail-ipc']) {
       const toolUseId = `${session}-use`;
       assert.deepEqual(await runHook(bridge.directory, { ...hook, hook_event_name: 'PreToolUse',

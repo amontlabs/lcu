@@ -373,10 +373,13 @@ export async function runClaudeBridge({
     const current = lives.get(key);
     if (current) return current;
     if (endedKeys.has(key)) return undefined;
-    // No bound context means no upstream work to clean. Remember the closure so a later bind still
-    // renews this key with cross-turn on, and children cannot reopen a closed prompt with it off.
+    // Even an unbound parent must end the upstream prompt and cascade to its bound children.
+    // Before upstream exists there can be no bound children or upstream work; keep that cleanup quiet.
     remember(endedKeys, key);
-    return undefined;
+    if (!link && !restarting) return undefined;
+    const subagent = event === 'SubagentStop';
+    return { key, sessionId, turnId, subagent, upstreamId: subagent ? subagentTurnId(sessionId, turnId) : turnId,
+      endedUpstream: true, cleanup: null, ended: false };
   }
 
   // Start and connect one original server and read the tools the relay lists; one that fails is closed.
