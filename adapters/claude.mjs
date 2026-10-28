@@ -46,6 +46,8 @@ const CLAUDE_TOOL_USE_META = 'claudecode/toolUseId';
  * timeouts (20 s per step on macOS) or after an in-flight call.
  */
 export const SHUTDOWN_DRAIN_TIMEOUT_MS = 2_000;
+/** Extra lifecycle startup budget after upstream readiness; do not spend the 30 s MCP budget on cold ACL setup. */
+export const LIFECYCLE_WAIT_MS = 2_000;
 /** Live (bound, not yet ended) turns a relay accepts at once. */
 const MAX_LIVE_TURNS = 1024;
 /**
@@ -150,7 +152,7 @@ function nativeForm(params, approval) {
 export async function runClaudeBridge({
   command, args = [], cwd, env, log = openDiagnosticLog({ adapter: 'claude' }),
   shutdownDrainMs = SHUTDOWN_DRAIN_TIMEOUT_MS, crossTurn = () => crossTurnEnabled(),
-  maxEndedTurns = MAX_ENDED_TURNS, appBuild, lifecycleOptions,
+  maxEndedTurns = MAX_ENDED_TURNS, appBuild, lifecycleOptions, lifecycleWaitMs = LIFECYCLE_WAIT_MS,
 } = {}) {
   if (!nonEmptyString(command) || !Array.isArray(args) ||
       args.some(argument => typeof argument !== 'string')) {
@@ -516,6 +518,28 @@ export async function runClaudeBridge({
 
   let lifecycle;
   const lifecycleAbort = new AbortController();
+  let lifecycleFailure;
+  const lifecycleFailed = reason => {
+    lifecycleFailure = reason;
+    log.event('lifecycle_listen', { ok: false, reason });
+  };
+  // Start the slow ACL step alongside original-host startup, not after advertising tools.
+  // Catch here so an early failure cannot reject unhandled while openUpstream is still pending.
+  const lifecycleReady = listenLifecycle(hook => {
+    if (hook.hook_event_name === 'PreToolUse') return bindContext({
+      session_id: hook.session_id, turn_id: hook.prompt_id, tool_use_id: hook.tool_use_id, agent_id: hook.agent_id,
+    });
+    const event = hook.hook_event_name === 'StopFailure' ? 'Interrupt' : hook.hook_event_name;
+    return endContext({ hook_event_name: event,
+      session_id: event === 'SubagentStop' ? hook.agent_id : hook.session_id, turn_id: hook.prompt_id });
+  }, { ...lifecycleOptions, signal: lifecycleAbort.signal }).then(listener => {
+    lifecycle = listener;
+    if (lifecycleAbort.signal.aborted) return listener.close();
+    lifecycleFailure = undefined;
+    log.event('lifecycle_listen', { ok: true });
+  }, error => {
+    if (!lifecycleAbort.signal.aborted) lifecycleFailed(error.lifecycleReason ?? 'listener_failed');
+  });
 
   try {
     link = await openUpstream();
@@ -580,8 +604,11 @@ export async function runClaudeBridge({
       const toolUseId = _meta?.[CLAUDE_TOOL_USE_META];
       const context = nonEmptyString(toolUseId) ? contexts.get(toolUseId) : undefined;
       if (!context || context.toolUseId !== toolUseId) {
-        return { isError: true, content: [{ type: 'text', text:
-          'Missing exact Claude PreToolUse identity; LCU did not run this tool call.' }] };
+        log.event('identity_refused', { tool: name, reason: lifecycleFailure ?? 'missing_pre_tool_use' });
+        return { isError: true, content: [{ type: 'text', text: lifecycleFailure
+          ? `LCU's lifecycle channel failed to start (${lifecycleFailure}); ` +
+            'the exact Claude PreToolUse identity is unavailable. LCU did not run this tool call.'
+          : 'Missing exact Claude PreToolUse identity; LCU did not run this tool call.' }] };
       }
       contexts.delete(toolUseId);
       // A call that arrives while a restart replaces the original server runs on the fresh one.
@@ -738,26 +765,19 @@ export async function runClaudeBridge({
       });
       void closeUpstreamAfterTurnCleanup();
     };
+    // Keep MCP diagnosable if lifecycle setup fails or exceeds this extra budget. Do not abort on
+    // timeout: a late ACL success still publishes, so the next PreToolUse can recover without a restart.
+    let lifecycleTimer;
+    try {
+      await Promise.race([lifecycleReady, new Promise(resolve => {
+        lifecycleTimer = setTimeout(() => { lifecycleFailed('startup_timeout'); resolve(); }, lifecycleWaitMs);
+      })]);
+    } finally { clearTimeout(lifecycleTimer); }
     await server.connect(transport);
     // The SDK's stdio server transport owns MCP framing but does not surface stdin EOF.
     // EOF is the actual Claude-side connection-close signal; use it to drain exact
     // active turns before closing the original MCP client.
     process.stdin.once('end', closeDownstream);
-    try {
-      lifecycle = await listenLifecycle(hook => {
-        if (hook.hook_event_name === 'PreToolUse') return bindContext({
-          session_id: hook.session_id, turn_id: hook.prompt_id, tool_use_id: hook.tool_use_id, agent_id: hook.agent_id,
-        });
-        const event = hook.hook_event_name === 'StopFailure' ? 'Interrupt' : hook.hook_event_name;
-        return endContext({ hook_event_name: event,
-          session_id: event === 'SubagentStop' ? hook.agent_id : hook.session_id, turn_id: hook.prompt_id });
-      }, { ...lifecycleOptions, signal: lifecycleAbort.signal });
-    } catch {
-      // Lifecycle IPC is optional. A directory, ACL, listener or publication failure must not close MCP.
-      log.event('lifecycle_listen', { ok: false });
-    }
-    // Shutdown may have started while the listener was opening. Never leave a late publication behind.
-    if (shutdown) lifecycle?.close();
     return { server, get upstream() { return link?.client; }, contexts, activeTurns: lives, close: async () => {
       process.stdin.off('end', closeDownstream);
       await closeUpstreamAfterTurnCleanup();

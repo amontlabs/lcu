@@ -50,7 +50,7 @@ async function waitFor(predicate, timeoutMs = 5_000) {
   assert.fail(`Condition did not become true within ${timeoutMs} ms`);
 }
 
-async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false, slowAcl = false } = {}) {
+async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false, slowAcl = false, acl, lifecycleWaitMs, beforeConnect } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-relay-test-'));
   if (failLifecycle) {
     const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
@@ -71,6 +71,8 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
     TMPDIR: directory,
     LCU_FIXTURE_LOG: logPath,
     LCU_LOG_DIR: join(directory, 'diagnostics'),
+    ...(acl ? { LCU_TEST_ACL: acl } : {}),
+    ...(lifecycleWaitMs === undefined ? {} : { LCU_TEST_LIFECYCLE_WAIT_MS: String(lifecycleWaitMs) }),
   };
   const scriptPath = throughCurrentSymlink ? installedCurrentEntryPoint(directory) : relay;
   const transport = new StdioClientTransport({
@@ -95,7 +97,11 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
     return (typeof next === 'function' ? await next(request.params) : next) ?? { action: 'cancel' };
   });
   try {
-    await client.connect(transport, slowAcl ? { timeout: 3_000 } : undefined);
+    let connected = false;
+    const connection = client.connect(transport, slowAcl ? { timeout: 5_000 } : undefined)
+      .then(() => { connected = true; });
+    if (beforeConnect) await beforeConnect({ directory, connected: () => connected, logs: () => readRecords(logPath) });
+    await connection;
   } catch (error) {
     await client.close().catch(() => {});
     if (failLifecycle) {
@@ -228,13 +234,73 @@ test('Claude relay preserves original tool contract and forwards the exact corre
   }
 });
 
-test('lifecycle setup failure leaves the relay serving the original MCP tools', async () => {
-  const bridge = await connectRelay({ failLifecycle: true });
+test('slow ACL publishes before MCP serves: the first exec PreToolUse binds js', async () => {
+  const bridge = await connectRelay({ slowAcl: true, lifecycleWaitMs: 2_000,
+    async beforeConnect({ directory, connected, logs }) {
+      await waitFor(() => existsSync(join(directory, 'acl-pid')) && logs().some(e => e.type === 'fixture-start'));
+      await new Promise(resolve => setTimeout(resolve, 150));
+      assert.equal(connected(), false, 'MCP must not serve before the lifecycle channel is ready');
+      writeFileSync(join(directory, 'acl-release'), 'ready');
+    },
+  });
   try {
-    await waitFor(() => bridge.diagnostics().some(entry => entry.event === 'lifecycle_listen' && entry.ok === false));
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'PreToolUse', session_id: 'first-session',
+      prompt_id: 'first-prompt', tool_use_id: 'first-use' }), quiet);
+    const result = await bridge.client.callTool({ name: 'js', arguments: { code: 'first-call' },
+      _meta: { 'claudecode/toolUseId': 'first-use' } });
+    assert.equal(result.isError, undefined);
+    assert.equal(result.content[0].text, 'first-call');
+    assert.deepEqual(bridge.logs().find(e => e.name === 'js').meta['x-codex-turn-metadata'], {
+      session_id: 'first-session', turn_id: 'first-prompt', call_id: 'first-use',
+    });
+  } finally { await bridge.close(); }
+});
+
+for (const [options, reason] of [
+  [{ failLifecycle: true }, 'registry_unavailable'],
+  [{ slowAcl: true, acl: 'fail' }, 'acl_failed'],
+  [{ slowAcl: true, acl: 'timeout' }, 'acl_timeout'],
+]) test(`lifecycle failure (${reason}) is diagnosed through exec hooks while MCP keeps serving`, async () => {
+  const bridge = await connectRelay(options);
+  try {
+    assert.ok(bridge.diagnostics().some(e => e.event === 'lifecycle_listen' && e.ok === false && e.reason === reason));
+    assert.ok((await bridge.client.listTools()).tools.some(t => t.name === 'js'));
+    for (const name of ['js', 'js_reset']) {
+      assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'PreToolUse', session_id: 'failed',
+        prompt_id: 'failed-prompt', tool_use_id: name }), quiet);
+      const result = await bridge.client.callTool({ name, arguments: name === 'js' ? { code: 'never-forward' } : {},
+        _meta: { 'claudecode/toolUseId': name } });
+      assert.equal(result.isError, true);
+      assert.ok(result.content[0].text.includes(`LCU's lifecycle channel failed to start (${reason})`));
+      assert.ok(bridge.diagnostics().some(e => e.event === 'identity_refused' && e.tool === name && e.reason === reason));
+    }
+    await bridge.client.ping();
+    assert.equal(bridge.logs().filter(e => e.type === 'tool-call').length, 0);
     await assertOriginalProtocol(bridge);
-    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'Stop', session_id: 'absent',
-      prompt_id: 'absent' }), quiet);
+  } finally { await bridge.close(); }
+});
+
+test('late ACL success after the startup cap publishes and the next exec hook binds', async () => {
+  const bridge = await connectRelay({ slowAcl: true });
+  try {
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'PreToolUse', session_id: 'late',
+      prompt_id: 'before-ready', tool_use_id: 'before-ready' }), quiet);
+    const refused = await bridge.client.callTool({ name: 'js', arguments: { code: 'never-forward' },
+      _meta: { 'claudecode/toolUseId': 'before-ready' } });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /lifecycle channel failed to start.*startup_timeout/);
+    await bridge.client.ping();
+    writeFileSync(join(bridge.directory, 'acl-release'), 'ready');
+    await waitFor(() => bridge.diagnostics().some(e => e.event === 'lifecycle_listen' && e.ok === true));
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'PreToolUse', session_id: 'late',
+      prompt_id: 'after-ready', tool_use_id: 'after-ready' }), quiet);
+    const result = await bridge.client.callTool({ name: 'js', arguments: { code: 'recovered' },
+      _meta: { 'claudecode/toolUseId': 'after-ready' } });
+    assert.equal(result.isError, undefined);
+    assert.equal(result.content[0].text, 'recovered');
+    const unbound = await bridge.client.callTool({ name: 'js', arguments: { code: 'unbound' } });
+    assert.match(unbound.content[0].text, /Missing exact Claude PreToolUse identity/);
+    assert.doesNotMatch(unbound.content[0].text, /failed to start/);
   } finally { await bridge.close(); }
 });
 
@@ -262,6 +328,37 @@ test('a slow Windows ACL step leaves MCP serving and is killed on relay shutdown
     assert.ok(Date.now() - started < 3_000, 'shutdown must not wait for the 30-second ACL timeout');
     assert.equal(registered(), false, 'shutdown must not publish a late registration');
   } finally { await bridge.close(); }
+});
+
+test('host EOF during the lifecycle startup wait aborts the ACL child without publishing', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-startup-eof-'));
+  const logPath = join(directory, 'original.jsonl');
+  const child = spawn(process.execPath, [slowAclRelay, process.execPath, fixture], {
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: directory, USERPROFILE: directory,
+      LCU_FIXTURE_LOG: logPath, LCU_LOG_DIR: join(directory, 'diagnostics'), LCU_TEST_LIFECYCLE_WAIT_MS: '1000' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  child.stdout.resume();
+  child.stderr.resume();
+  try {
+    await waitFor(() => existsSync(join(directory, 'acl-pid')) && readRecords(logPath).some(e => e.type === 'fixture-start'));
+    const pid = Number(readFileSync(join(directory, 'acl-pid'), 'utf8'));
+    const started = Date.now();
+    child.stdin.end();
+    await waitFor(() => child.exitCode !== null || child.signalCode !== null, 3_000);
+    assert.ok(Date.now() - started < 3_000);
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+    const registry = registryDirectory({ HOME: directory, USERPROFILE: directory });
+    assert.equal(existsSync(registry) && readdirSync(registry).some(name => name.endsWith('.json')), false);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    const upstream = readRecords(logPath).find(e => e.type === 'fixture-start');
+    if (upstream && !readRecords(logPath).some(e => e.type === 'fixture-exit')) {
+      try { process.kill(upstream.pid, 'SIGKILL'); } catch {}
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('Claude relay starts and preserves its protocol through an installed current symlink', async () => {

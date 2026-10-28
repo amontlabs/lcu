@@ -11,7 +11,7 @@ const relay = fileURLToPath(new URL('../claude.mjs', import.meta.url));
 const fixture = fileURLToPath(new URL('./claude-fixture.mjs', import.meta.url));
 await client.connect(new StdioClientTransport({ command: process.execPath, args: [relay, process.execPath, fixture],
   env: process.env, stderr: 'inherit' }));
-// MCP serves before optional lifecycle publication. Routing tests require both.
+// Normal startup publishes before MCP serves. Also allow a cold native ACL step to recover after the startup cap.
 const directory = registryDirectory();
 const deadline = Date.now() + 35_000;
 while (!existsSync(directory) ||
