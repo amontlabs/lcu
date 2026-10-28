@@ -1,7 +1,7 @@
 // Private lifecycle listener for an already running Claude relay.
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import {
@@ -111,25 +111,40 @@ async function publishLifecycle(handle, { directory, hostPid, signal }) {
         if (JSON.parse(readFileSync(path, 'utf8')).generation === generation) unlinkSync(path);
       } catch {}
     };
-    try {
-      stage = 'listen_failed';
-      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(entry.endpoint, resolve); });
-      signal?.throwIfAborted();
-      stage = 'publication_failed';
+    const writeRegistration = () => {
       const temporary = `${path}.tmp`;
       try {
         writeFileSync(temporary, JSON.stringify(entry), { flag: 'wx', mode: 0o600 });
         renameSync(temporary, path);
       } finally { try { unlinkSync(temporary); } catch {} }
+    };
+    try {
+      stage = 'listen_failed';
+      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(entry.endpoint, resolve); });
+      signal?.throwIfAborted();
+      stage = 'publication_failed';
+      writeRegistration();
     } catch (error) {
       server.close();
       for (const socket of sockets) socket.destroy();
       throw error;
     }
+    // Temp cleaners can remove the JSON while its socket remains live. Never replace an existing file.
+    const repair = setInterval(() => {
+      if (closing) return;
+      try {
+        try { lstatSync(path); return; } catch (error) { if (error.code !== 'ENOENT') return; }
+        privatePath(directory, true);
+        if (process.platform === 'win32') windowsParents(directory);
+        writeRegistration();
+      } catch { /* Registry recovery is best effort; a missing socket/directory needs a relay restart. */ }
+    }, 60_000);
+    repair.unref();
     process.once('exit', remove);
     return { entry, path, close() {
       if (closing) return;
       closing = true;
+      clearInterval(repair);
       remove();
       process.off('exit', remove);
       server.close();

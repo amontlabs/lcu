@@ -191,6 +191,40 @@ test('a stale, dead, ambiguous or unsafe registration never delivers lifecycle',
   assert.deepEqual(calls, []);
 });
 
+test('a removed registration is republished and routes hooks without restarting the relay', async t => {
+  const directory = temporary(t);
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const calls = [];
+  const listener = await listenLifecycle(value => { calls.push(value); }, { directory });
+  t.after(() => listener.close());
+  rmSync(listener.path);
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(JSON.parse(readFileSync(listener.path, 'utf8')), listener.entry);
+  await deliverLifecycle(hook, { directory });
+  assert.deepEqual(calls, [hook]);
+  listener.close();
+  t.mock.timers.tick(60_000);
+  assert.equal(existsSync(listener.path), false, 'shutdown must stop registration repair');
+});
+
+test('registration repair preserves replacements and refuses an unsafe directory', async t => {
+  const directory = temporary(t);
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const listener = await listenLifecycle(() => {}, { directory });
+  t.after(() => listener.close());
+  const replacement = JSON.stringify({ ...listener.entry, generation: 'replacement' });
+  writeFileSync(listener.path, replacement);
+  t.mock.timers.tick(60_000);
+  assert.equal(readFileSync(listener.path, 'utf8'), replacement);
+  if (process.platform !== 'win32') {
+    rmSync(listener.path);
+    chmodSync(directory, 0o755);
+    t.mock.timers.tick(60_000);
+    assert.equal(existsSync(listener.path), false);
+    chmodSync(directory, 0o700);
+  }
+});
+
 test('shutdown removes only its own registration and never a replacement generation', async t => {
   const directory = temporary(t);
   const first = await listenLifecycle(() => {}, { directory });
