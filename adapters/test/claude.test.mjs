@@ -282,13 +282,15 @@ test('exec Stop during slow upstream startup is quiet and publication waits for 
       const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
       const registry = registryDirectory({ HOME: directory, USERPROFILE: directory });
       assert.equal(existsSync(registry) && readdirSync(registry).some(n => n.endsWith('.json')), false);
+      assert.equal(logs().filter(e => e.type === 'turn-ended').length, 0);
     },
   });
   try {
-    // Once published, cleanup of a never-bound turn also acknowledges without upstream work.
+    // Once published, an unbound parent must close its prompt upstream, just as on main.
     assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'Stop', session_id: 'no-cua',
       prompt_id: 'after-startup' }), quiet);
-    assert.equal(bridge.logs().filter(e => e.type === 'turn-ended').length, 0);
+    assert.deepEqual(turnEnds(bridge).map(e => e.args), [{ hook_event_name: 'Stop', session_id: 'no-cua',
+      turn_id: 'after-startup' }]);
   } finally { await bridge.close(); }
 });
 
