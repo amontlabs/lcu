@@ -16,10 +16,10 @@ it does not establish a cause or fix for the separately reported 30-second upstr
   path limits and survive crashes; Windows named pipes have a different namespace and OS-managed lifetime.
   LCU uses short account-private `/tmp` directories on POSIX, and random named pipes on Windows. Registrations
   contain a random token, protocol and relay generation, and are published by atomic rename after readiness.
-  Windows registration directories receive an explicit current-account-only inheritable ACL from PowerShell
-  in the relay, using Microsoft’s [Set-Acl](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/set-acl?view=powershell-5.1)
+  Windows registrations live below the selected profile’s `AppData\Local\LCU\claude\hooks`. Setup/update
+  applies an explicit current-account-only inheritable ACL there through Microsoft’s [Set-Acl](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/set-acl?view=powershell-5.1)
   and [FileSystemAccessRule](https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.filesystemaccessrule.-ctor?view=netframework-4.8.1)
-  APIs and checking the resulting ACL; the helper never spawns a process. Neither plain chmod nor this macOS run proves Windows ACLs.
+  APIs in a setup-time PowerShell subprocess and checks the result; the helper never spawns a process. Neither plain chmod nor this macOS run proves Windows ACLs.
 
 The helper bounds stdin at 16 MiB and sends only lifecycle identities, with a 64 KiB IPC limit; long assistant
 messages and tool inputs are not forwarded. `lcu/claude_hook.mjs` is a self-contained script importing only Node
@@ -173,7 +173,7 @@ under `HOME`; the complete rerun used a disposable home. Docker's daemon is unav
 registration and upgrade gates remain CI checks. These results add no native Windows or desktop verification.
 
 
-## Windows relay startup follow-up (superseded readiness behavior)
+## Windows relay startup follow-up (per-start ACL hardening superseded below)
 
 CI run `40608137067`, job `Build tooling and adapters (windows-latest)`, confirms the startup regression:
 Claude relay tests repeatedly took 24–49 seconds, the host-loss test failed its five-second wait for tool
@@ -300,8 +300,8 @@ reached cleanup without an upstream client and exited 1. An old relay whose stdi
 could continue answering probes beside a replacement, making the helper silently refuse both routes. These
 findings supersede the earlier claim that startup EOF reliably aborted preparation.
 
-Preparation and publication are now separate operations. Directory creation and asynchronous Windows ACL
-hardening overlap upstream startup. Only after initialize and listTools complete and the relay owns the upstream
+Preparation and publication are now separate operations. Directory creation and any explicitly requested asynchronous hardening overlap upstream startup.
+The Windows hot-path follow-up below removes the default per-relay PowerShell invocation. Only after initialize and listTools complete and the relay owns the upstream
 link does it open its socket/pipe and write the registration. Path and cancellation checks run again at publication.
 Preparation failure remains non-fatal and classified; late ACL success after the readiness cap still recovers.
 Cleanup of a never-bound turn succeeds without upstream work while retaining bounded prompt-closure history.
@@ -374,3 +374,78 @@ Validation on macOS arm64, Node 22.22.2, with disposable homes, `CLAUDE_CONFIG_D
 
 No personal configuration or desktop session was used. The runtime and platform evidence limits above remain
 unchanged; these are adapter/IPC integration tests with fixture upstream servers.
+
+
+## Windows lifecycle hot path: AppData registry and setup-time ACL hardening
+
+The supplied windows-latest log for `36162b6` (`win-122566498598.log`) confirms that the two-second readiness
+cap regularly expires during real PowerShell startup. The existing identity-isolation tests at their then-lines
+373 and 451 expected `Missing exact Claude PreToolUse identity` but received `startup_timeout`. That is a
+usable-channel failure, not a reason to weaken those assertions. A two-second cap only bounds the delay;
+it cannot make cold PowerShell predictably complete before tools become available.
+
+We chose the AppData option. Both relay and standalone helper now use
+`<selected USERPROFILE>\AppData\Local\LCU\claude\hooks`, beside the existing account-data helper.
+The old `<profile>\.lcu-claude-hooks` registry is no longer read, copied or pruned. An arbitrary `LOCALAPPDATA`
+override cannot redirect just the lifecycle registry to a shared location. This follows LCU's existing helper
+path policy. Update refreshes that helper's bytes; restart the Claude MCP connection after upgrading so helper
+and relay both use the new route. POSIX registry paths and mode checks are unchanged.
+
+Default relay preparation creates/checks the directory and rechecks every Windows path component for links,
+then waits only for the original upstream before publication. It never launches PowerShell, including on first
+creation and after a directory is removed. Startup is therefore independent of PowerShell availability and cold
+start time. The previous two-second extra wait and 28-second total lifecycle deadline remain for explicitly
+requested asynchronous preparation; normal Windows startup has no ACL subprocess to wait for.
+
+The privacy baseline is the standard per-user profile/AppData ACL, allowing the account, SYSTEM and
+Administrators rather than other unprivileged accounts. This is the chosen Windows trust boundary, not a claim
+that Node audits a manually altered DACL on every launch. Setup and update additionally create and harden only
+the LCU-owned hooks directory with the existing current-SID-only inheritable ACL and verification script.
+They do not change AppData or other user-owned parent ACLs. A hardening error fails setup/refresh through its
+existing error path. The relay leaves this Windows directory in place when it unpublishes its registration,
+so the setup-time hardening survives subsequent starts. There is no ACL-success marker or per-start ACL probe.
+
+This supersedes the earlier decision to check a DACL on every relay start. That approach's measured cold-start
+cost makes the channel unusable on ordinary Windows CI starts. Requiring that work on every launch, or merely
+raising its timeout, cannot satisfy the connection budget. AppData supplies the normal profile boundary;
+setup-time hardening supplies the narrower explicit ACL without putting a subprocess in that budget.
+
+Primary-source evidence:
+
+- Microsoft's [KNOWNFOLDERID reference](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid)
+  defines LocalAppData as a per-user directory, with default path `%USERPROFILE%\AppData\Local`.
+- Microsoft's [ACE inheritance rules](https://learn.microsoft.com/en-us/windows/win32/secauthz/ace-inheritance-rules)
+  document how child files/directories inherit access rules. Using the standard private profile inheritance
+  as the hot-path baseline is our explicit design choice, not an assertion that this reference proves every
+  customized profile private.
+- The existing [Set-Acl API](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/set-acl?view=powershell-5.1)
+  remains the setup-time hardening mechanism. The script still removes inherited/explicit rules, grants the
+  current account inheritable FullControl, verifies the result, and removes inherited PS7 `PSModulePath` only
+  from that subprocess's environment.
+
+Deterministic regressions now run preparation in a subprocess forced down the Windows branch with both
+`execFile` and `execFileSync` forbidden, then publish successfully. An adapter regression forbids PowerShell
+launches while starting the real relay, executes standalone PreToolUse plus js, checks successful publication,
+retains the exact missing-identity refusal for an unbound call, and acknowledges Stop. Neither test grants
+PowerShell a larger deadline or accepts `startup_timeout`. The existing slow injected preparation, EOF,
+replacement, startup budget and late recovery cases remain enabled. The native Windows PS7-module regression
+now exercises setup-time hardening separately from MCP startup. These tests add no claim of new native Windows
+or original-host desktop verification on the macOS development host.
+
+A disposable copy of `a8c3b6e` fails the forced-Windows no-PowerShell preparation probe with
+`PowerShell forbidden`, classified `acl_failed`; the current implementation completes preparation and
+publication with empty output. This establishes that the new test detects the old default launch rather
+than relying on how quickly a real PowerShell happens to finish.
+
+Hot-path follow-up validation on macOS arm64, Node 22.22.2, with disposable homes,
+`CLAUDE_CONFIG_DIR` unset and 240-second limits:
+
+- Full Node suite: 477 pass, 40 platform skips, zero failures (15.6 s).
+- Full adapter suite with the diagnostic-log preload: 250 pass, 8 opt-in/platform skips, zero failures (134.4 s).
+- Python unittests: 45 pass (21.7 s).
+- Focused no-PowerShell, AppData-path, setup-script and registry-failure checks: five pass, one native Windows skip.
+- Changed runtime modules parse, and `git diff --check main..HEAD` passes.
+
+The Windows-specific no-PowerShell preparation branch is exercised on POSIX by the subprocess probe; the
+actual Windows named pipe, native DACL setup and the unchanged identity-isolation tests remain Windows CI
+checks. No personal configuration or desktop session was used.
