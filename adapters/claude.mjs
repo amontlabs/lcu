@@ -150,7 +150,7 @@ function nativeForm(params, approval) {
 export async function runClaudeBridge({
   command, args = [], cwd, env, log = openDiagnosticLog({ adapter: 'claude' }),
   shutdownDrainMs = SHUTDOWN_DRAIN_TIMEOUT_MS, crossTurn = () => crossTurnEnabled(),
-  maxEndedTurns = MAX_ENDED_TURNS, appBuild,
+  maxEndedTurns = MAX_ENDED_TURNS, appBuild, lifecycleOptions,
 } = {}) {
   if (!nonEmptyString(command) || !Array.isArray(args) ||
       args.some(argument => typeof argument !== 'string')) {
@@ -515,6 +515,7 @@ export async function runClaudeBridge({
   }
 
   let lifecycle;
+  const lifecycleAbort = new AbortController();
 
   try {
     link = await openUpstream();
@@ -685,6 +686,7 @@ export async function runClaudeBridge({
     const closeUpstreamAfterTurnCleanup = () => {
       if (shutdown) return shutdown;
       shutdown = (async () => {
+        lifecycleAbort.abort();
         lifecycle?.close();
         const drain = (async () => {
           await settled();
@@ -749,7 +751,7 @@ export async function runClaudeBridge({
         const event = hook.hook_event_name === 'StopFailure' ? 'Interrupt' : hook.hook_event_name;
         return endContext({ hook_event_name: event,
           session_id: event === 'SubagentStop' ? hook.agent_id : hook.session_id, turn_id: hook.prompt_id });
-      });
+      }, { ...lifecycleOptions, signal: lifecycleAbort.signal });
     } catch {
       // Lifecycle IPC is optional. A directory, ACL, listener or publication failure must not close MCP.
       log.event('lifecycle_listen', { ok: false });
@@ -763,6 +765,7 @@ export async function runClaudeBridge({
       await serverClose;
     } };
   } catch (error) {
+    lifecycleAbort.abort();
     lifecycle?.close();
     await server?.close().catch(() => {});
     if (connected) await link.client.close().catch(() => {});

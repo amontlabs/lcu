@@ -1,4 +1,5 @@
 // Private lifecycle listener for an already running Claude relay.
+import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -9,17 +10,21 @@ import {
 export { deliverLifecycle, endpointPath, registryDirectory } from './claude_hook.mjs';
 
 /** Publish only after upstream and downstream are ready. Each relay owns one unpredictable generation. */
-export async function listenLifecycle(handle, { directory = registryDirectory(), hostPid = process.ppid } = {}) {
+export async function listenLifecycle(handle, {
+  directory = registryDirectory(), hostPid = process.ppid, signal,
+  // An execFile-compatible runner lets tests exercise slow Windows ACL startup on every platform.
+  runAcl = process.platform === 'win32' ? execFile : undefined,
+} = {}) {
+  signal?.throwIfAborted();
   mkdirSync(directory, { mode: 0o700, recursive: true });
   privatePath(directory, true);
-  if (process.platform === 'win32') {
-    windowsParents(directory);
+  if (process.platform === 'win32') windowsParents(directory);
+  if (runAcl) {
     // chmod is not a Windows ACL. New registration files inherit only the current account's full access.
-    const { execFileSync } = await import('node:child_process');
     // Through Node, Windows PowerShell inherits PS7 module paths and can resolve incompatible cmdlets.
     // Let powershell.exe construct its own module path (environment keys are case-insensitive on Windows).
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'));
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    await new Promise((resolve, reject) => runAcl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       '$ErrorActionPreference="Stop"; $p=$env:LCU_CLAUDE_HOOK_DIRECTORY; $acl=Get-Acl -LiteralPath $p; ' +
       '$acl.SetAccessRuleProtection($true,$false); foreach($r in @($acl.Access)){$acl.RemoveAccessRuleSpecific($r)}; ' +
       '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; ' +
@@ -29,8 +34,13 @@ export async function listenLifecycle(handle, { directory = registryDirectory(),
       'foreach($r in $check.Access){if($r.AccessControlType -eq "Allow" -and ' +
       '$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value)' +
       '{throw "Foreign lifecycle directory access"}}'],
-    { env: { ...env, LCU_CLAUDE_HOOK_DIRECTORY: directory }, windowsHide: true, stdio: 'pipe', timeout: 30_000 });
+    { env: { ...env, LCU_CLAUDE_HOOK_DIRECTORY: directory }, windowsHide: true, timeout: 30_000, signal },
+    error => error ? reject(error) : resolve()));
   }
+  // Cancellation can win even if an ACL runner completes successfully at the same time.
+  signal?.throwIfAborted();
+  privatePath(directory, true);
+  if (process.platform === 'win32') windowsParents(directory);
   const generation = randomBytes(16).toString('hex');
   const entry = { v: 1, hostPid, hostStart: hostStart(hostPid), relayPid: process.pid, generation,
     token: randomBytes(32).toString('hex'), endpoint: endpointPath(directory, generation) };
@@ -76,6 +86,7 @@ export async function listenLifecycle(handle, { directory = registryDirectory(),
   };
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(entry.endpoint, resolve); });
+    signal?.throwIfAborted();
     const temporary = `${path}.tmp`;
     try {
       writeFileSync(temporary, JSON.stringify(entry), { flag: 'wx', mode: 0o600 });

@@ -33,6 +33,39 @@ test('lifecycle endpoint paths use private Unix sockets or unpredictable Windows
   assert.equal(endpointPath('C:\\private', 'abc', 'win32'), '\\\\.\\pipe\\lcu-claude-abc');
 });
 
+test('lifecycle publication waits for ACL success', async t => {
+  const directory = temporary(t);
+  let finish;
+  const pending = listenLifecycle(() => {}, { directory, runAcl(file, args, options, callback) {
+    assert.equal(file, 'powershell.exe');
+    assert.equal(options.timeout, 30_000);
+    assert.equal(options.windowsHide, true);
+    assert.equal(Object.keys(options.env).some(key => key.toUpperCase() === 'PSMODULEPATH'), false);
+    finish = callback;
+  } });
+  assert.deepEqual(readdirSync(directory), []);
+  finish(null);
+  const listener = await pending;
+  t.after(() => listener.close());
+  assert.equal(existsSync(listener.path), true);
+});
+
+test('ACL failure or cancellation never publishes a lifecycle endpoint', async t => {
+  for (const cancelled of [false, true]) {
+    const directory = temporary(t);
+    const controller = new AbortController();
+    let finish;
+    const pending = listenLifecycle(() => {}, { directory, signal: controller.signal,
+      runAcl(file, args, options, callback) { finish = callback; } });
+    // Even a runner that reports success after cancellation cannot publish.
+    if (cancelled) controller.abort();
+    const refused = assert.rejects(pending, cancelled ? { name: 'AbortError' } : /ACL failed/);
+    finish(cancelled ? null : new Error('ACL failed'));
+    await refused;
+    assert.deepEqual(readdirSync(directory), []);
+  }
+});
+
 test('Windows ACL setup ignores modules inherited through Node from PowerShell 7',
   { skip: process.platform !== 'win32' && 'requires Windows PowerShell and native directory ACLs' }, async t => {
     const directory = temporary(t);

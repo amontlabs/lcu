@@ -12,6 +12,7 @@ import { subagentTurnId } from '../claude.mjs';
 import { crossTurnEnabled, crossTurnSettingPath } from '../cross-turn.mjs';
 
 const relay = fileURLToPath(new URL('../claude.mjs', import.meta.url));
+const slowAclRelay = fileURLToPath(new URL('./claude-slow-acl-fixture.mjs', import.meta.url));
 const fixture = fileURLToPath(new URL('./claude-fixture.mjs', import.meta.url));
 const clientModule = fileURLToPath(new URL('../client.mjs', import.meta.url));
 
@@ -49,7 +50,7 @@ async function waitFor(predicate, timeoutMs = 5_000) {
   assert.fail(`Condition did not become true within ${timeoutMs} ms`);
 }
 
-async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false } = {}) {
+async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false, slowAcl = false } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-relay-test-'));
   if (failLifecycle) {
     const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
@@ -74,7 +75,7 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
   const scriptPath = throughCurrentSymlink ? installedCurrentEntryPoint(directory) : relay;
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: maxEndedTurns === undefined ? [scriptPath, process.execPath, fixture] : ['--input-type=module', '-e',
+    args: maxEndedTurns === undefined ? [slowAcl ? slowAclRelay : scriptPath, process.execPath, fixture] : ['--input-type=module', '-e',
       `import { runClaudeBridge } from ${JSON.stringify(pathToFileURL(relay).href)};` +
       `await runClaudeBridge({ command: ${JSON.stringify(process.execPath)}, ` +
       `args: [${JSON.stringify(fixture)}], maxEndedTurns: ${maxEndedTurns} });`],
@@ -94,7 +95,7 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
     return (typeof next === 'function' ? await next(request.params) : next) ?? { action: 'cancel' };
   });
   try {
-    await client.connect(transport);
+    await client.connect(transport, slowAcl ? { timeout: 3_000 } : undefined);
   } catch (error) {
     await client.close().catch(() => {});
     if (failLifecycle) {
@@ -234,6 +235,32 @@ test('lifecycle setup failure leaves the relay serving the original MCP tools', 
     await assertOriginalProtocol(bridge);
     assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'Stop', session_id: 'absent',
       prompt_id: 'absent' }), quiet);
+  } finally { await bridge.close(); }
+});
+
+test('a slow Windows ACL step leaves MCP serving and is killed on relay shutdown', { timeout: 10_000 }, async () => {
+  const bridge = await connectRelay({ slowAcl: true });
+  try {
+    const pidPath = join(bridge.directory, 'acl-pid');
+    await waitFor(() => existsSync(pidPath));
+    const pid = Number(readFileSync(pidPath, 'utf8'));
+    process.kill(pid, 0);
+    const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+    const directory = registryDirectory({ HOME: bridge.directory, USERPROFILE: bridge.directory });
+    const registered = () => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json'));
+    assert.equal(registered(), false, 'no registration before ACL success');
+    await assertOriginalProtocol(bridge);
+    await bridge.client.ping();
+    process.kill(pid, 0); // The MCP round trips completed while ACL setup was still running.
+    const started = Date.now();
+    await bridge.client.close();
+    await waitFor(() => bridge.logs().some(entry => entry.type === 'fixture-exit'), 3_000);
+    await waitFor(() => { try { process.kill(pid, 0); return false; } catch (error) {
+      if (error.code !== 'ESRCH') throw error;
+      return true;
+    } }, 3_000);
+    assert.ok(Date.now() - started < 3_000, 'shutdown must not wait for the 30-second ACL timeout');
+    assert.equal(registered(), false, 'shutdown must not publish a late registration');
   } finally { await bridge.close(); }
 });
 
@@ -624,13 +651,14 @@ test('Claude relay interrupts an active turn on cancel and drains cleanup before
   }
 });
 
-test('Claude relay ends within seconds when its host goes away during a call whose cleanup never finishes', async () => {
+for (const slowAcl of [false, true]) test('Claude relay ends within seconds when its host goes away during a call whose cleanup never finishes' +
+  (slowAcl ? ' while Windows ACL setup is pending' : ''), async () => {
   // The host is killed: the relay only sees stdin EOF and nobody sends it a signal.
   const { SHUTDOWN_DRAIN_TIMEOUT_MS } = await import('../claude.mjs');
   const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-relay-gone-'));
   const logPath = join(directory, 'original-fixture.jsonl');
   const logs = () => readRecords(logPath);
-  const child = spawn(process.execPath, [relay, process.execPath, fixture], {
+  const child = spawn(process.execPath, [slowAcl ? slowAclRelay : relay, process.execPath, fixture], {
     env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: directory, TMPDIR: directory,
       LCU_FIXTURE_LOG: logPath, LCU_LOG_DIR: join(directory, 'diagnostics') },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -649,12 +677,20 @@ test('Claude relay ends within seconds when its host goes away during a call who
     send({ id: 3, method: 'tools/call', params: { name: 'js', arguments: { code: 'ignore-cancel' },
       _meta: { 'claudecode/toolUseId': 'gone-use' } } });
     await waitFor(() => logs().some(entry => entry.type === 'active-call-start' && entry.code === 'ignore-cancel'));
+    if (slowAcl) await waitFor(() => existsSync(join(directory, 'acl-pid')));
     const started = Date.now();
     child.stdin.end();
     await Promise.race([exited, new Promise(resolve => setTimeout(resolve, SHUTDOWN_DRAIN_TIMEOUT_MS + 8_000))]);
     const elapsed = Date.now() - started;
     assert.notEqual(child.exitCode ?? child.signalCode, null, `relay still running ${elapsed} ms after its host went away`);
     assert.ok(elapsed < SHUTDOWN_DRAIN_TIMEOUT_MS + 3_000, `relay took ${elapsed} ms to exit`);
+    if (slowAcl) {
+      const pid = Number(readFileSync(join(directory, 'acl-pid'), 'utf8'));
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+      const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+      const registry = registryDirectory({ HOME: directory, USERPROFILE: directory });
+      assert.equal(existsSync(registry) && readdirSync(registry).some(name => name.endsWith('.json')), false);
+    }
     const events = logs();
     const aborted = events.findIndex(entry => entry.type === 'active-call-aborted' && entry.code === 'ignore-cancel');
     const cleanup = events.findIndex(entry => entry.type === 'turn-ended' && entry.args.session_id === 'hold-gone' &&
@@ -1893,7 +1929,8 @@ test('exec lifecycle bind acknowledges exact current metadata before js and rout
   try {
     const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
     const directory = registryDirectory({ HOME: bridge.directory, USERPROFILE: bridge.directory });
-    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')));
+    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')),
+      process.platform === 'win32' ? 35_000 : 5_000);
     for (const [index, event] of ['Stop', 'StopFailure', 'SubagentStop'].entries()) {
       // The helper's current session changes while the relay process stays the same (/clear/resume).
       const hook = { hook_event_name: 'PreToolUse', session_id: `current-session-${index}`,
@@ -1924,6 +1961,10 @@ test('exec lifecycle bind acknowledges exact current metadata before js and rout
 test('an accepted cleanup outlives the absence budget and reports active upstream failures', async () => {
   const bridge = await connectRelay();
   try {
+    const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+    const directory = registryDirectory({ HOME: bridge.directory, USERPROFILE: bridge.directory });
+    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')),
+      process.platform === 'win32' ? 35_000 : 5_000);
     const hook = { session_id: 'hold-ipc', prompt_id: 'held-prompt', hook_event_name: 'Stop' };
     let completed = false;
     const pending = runHook(bridge.directory, hook).then(result => { completed = true; return result; });
@@ -2004,7 +2045,8 @@ test('disconnecting a hook does not cancel cleanup already accepted by the relay
     const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
     const { createConnection } = await import('node:net');
     const directory = registryDirectory({ HOME: bridge.directory, USERPROFILE: bridge.directory });
-    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')));
+    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')),
+      process.platform === 'win32' ? 35_000 : 5_000);
     const entry = JSON.parse(readFileSync(join(directory, readdirSync(directory).find(name => name.endsWith('.json'))), 'utf8'));
     await new Promise((resolve, reject) => {
       const socket = createConnection(entry.endpoint);
@@ -2029,7 +2071,8 @@ test('a stale registration with an unrelated live PID does not block current bin
   try {
     const { registryDirectory, endpointPath } = await import('../../lcu/claude_lifecycle.mjs');
     const directory = registryDirectory({ HOME: bridge.directory, USERPROFILE: bridge.directory });
-    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')));
+    await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')),
+      process.platform === 'win32' ? 35_000 : 5_000);
     const entry = JSON.parse(readFileSync(join(directory, readdirSync(directory).find(name => name.endsWith('.json'))), 'utf8'));
     const generation = 'f'.repeat(32);
     const stalePath = join(directory, `${entry.hostPid}-${generation}.json`);
