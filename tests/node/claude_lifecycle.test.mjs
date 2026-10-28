@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deliverLifecycle, endpointPath, listenLifecycle } from '../../lcu/claude_lifecycle.mjs';
+import { deliverLifecycle, endpointPath, listenLifecycle, prepareLifecycle } from '../../lcu/claude_lifecycle.mjs';
 
 function temporary(t) {
   const path = mkdtempSync(join(process.platform === 'win32' ? tmpdir() : '/tmp', 'lcu-ipc-'));
@@ -48,6 +48,25 @@ test('lifecycle publication waits for ACL success', async t => {
   const listener = await pending;
   t.after(() => listener.close());
   assert.equal(existsSync(listener.path), true);
+});
+
+test('completed preparation stays unpublished until explicitly committed and cancellation prevents publication', async t => {
+  for (const cancelled of [false, true]) {
+    const directory = temporary(t);
+    const controller = new AbortController();
+    const publish = await prepareLifecycle({ directory, signal: controller.signal,
+      runAcl(file, args, options, callback) { callback(null); } });
+    assert.deepEqual(readdirSync(directory), [], 'preparation opens no socket and writes no capability');
+    if (cancelled) {
+      controller.abort();
+      await assert.rejects(publish(() => {}), { name: 'AbortError' });
+      assert.deepEqual(readdirSync(directory), []);
+    } else {
+      const listener = await publish(() => {});
+      t.after(() => listener.close());
+      assert.equal(existsSync(listener.path), true);
+    }
+  }
 });
 
 test('ACL failure or cancellation never publishes a lifecycle endpoint', async t => {

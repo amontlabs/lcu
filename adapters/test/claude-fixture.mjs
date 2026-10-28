@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -160,4 +160,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 log({ type: 'fixture-start', pid: process.pid });
 process.on('exit', code => log({ type: 'fixture-exit', pid: process.pid, code }));
 process.stdin.on('end', () => process.exit(0));
+// Delay initialize/listTools readiness without delaying EOF handling in the original fixture.
+if (process.env.LCU_FIXTURE_STARTUP_DELAY_MS) {
+  await new Promise(resolve => setTimeout(resolve, Number(process.env.LCU_FIXTURE_STARTUP_DELAY_MS)));
+}
+if (process.env.LCU_FIXTURE_STARTUP_GATE) {
+  await new Promise(resolve => {
+    const timer = setInterval(() => {
+      if (existsSync(process.env.LCU_FIXTURE_STARTUP_GATE)) { clearInterval(timer); resolve(); }
+    }, 20);
+  });
+}
 await server.connect(new StdioServerTransport());

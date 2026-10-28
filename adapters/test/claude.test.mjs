@@ -50,7 +50,7 @@ async function waitFor(predicate, timeoutMs = 5_000) {
   assert.fail(`Condition did not become true within ${timeoutMs} ms`);
 }
 
-async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false, slowAcl = false, acl, lifecycleWaitMs, beforeConnect } = {}) {
+async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false, slowAcl = false, acl, lifecycleWaitMs, lifecycleStartupBudgetMs, startupDelayMs, beforeConnect } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-relay-test-'));
   if (failLifecycle) {
     const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
@@ -72,7 +72,9 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
     LCU_FIXTURE_LOG: logPath,
     LCU_LOG_DIR: join(directory, 'diagnostics'),
     ...(acl ? { LCU_TEST_ACL: acl } : {}),
+    ...(startupDelayMs === undefined ? {} : { LCU_FIXTURE_STARTUP_DELAY_MS: String(startupDelayMs) }),
     ...(lifecycleWaitMs === undefined ? {} : { LCU_TEST_LIFECYCLE_WAIT_MS: String(lifecycleWaitMs) }),
+    ...(lifecycleStartupBudgetMs === undefined ? {} : { LCU_TEST_LIFECYCLE_STARTUP_BUDGET_MS: String(lifecycleStartupBudgetMs) }),
   };
   const scriptPath = throughCurrentSymlink ? installedCurrentEntryPoint(directory) : relay;
   const transport = new StdioClientTransport({
@@ -100,6 +102,7 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
     let connected = false;
     const connection = client.connect(transport, slowAcl ? { timeout: 5_000 } : undefined)
       .then(() => { connected = true; });
+    connection.catch(() => {}); // beforeConnect can fail while initialization is still pending.
     if (beforeConnect) await beforeConnect({ directory, connected: () => connected, logs: () => readRecords(logPath) });
     await connection;
   } catch (error) {
@@ -232,6 +235,114 @@ test('Claude relay preserves original tool contract and forwards the exact corre
   } finally {
     await bridge.close();
   }
+});
+
+test('exec Stop during slow upstream startup is quiet and publication waits for upstream', async () => {
+  const bridge = await connectRelay({ startupDelayMs: 1_200,
+    async beforeConnect({ directory, logs }) {
+      await waitFor(() => logs().some(e => e.type === 'fixture-start'));
+      assert.deepEqual(await runHook(directory, { hook_event_name: 'Stop', session_id: 'no-cua',
+        prompt_id: 'no-cua-prompt' }), quiet);
+      const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+      const registry = registryDirectory({ HOME: directory, USERPROFILE: directory });
+      assert.equal(existsSync(registry) && readdirSync(registry).some(n => n.endsWith('.json')), false);
+    },
+  });
+  try {
+    // Once published, cleanup of a never-bound turn also acknowledges without upstream work.
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'Stop', session_id: 'no-cua',
+      prompt_id: 'after-startup' }), quiet);
+    assert.equal(bridge.logs().filter(e => e.type === 'turn-ended').length, 0);
+  } finally { await bridge.close(); }
+});
+
+for (const slowAcl of [false, true]) test(`EOF during stalled upstream permits replacement exec hooks (slow ACL: ${slowAcl})`,
+  { timeout: 10_000 }, async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'lcu-startup-replacement-'));
+    const logPath = join(directory, 'old.jsonl');
+    const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: directory, USERPROFILE: directory,
+      LCU_FIXTURE_LOG: logPath, LCU_LOG_DIR: join(directory, 'diagnostics'),
+      LCU_FIXTURE_STARTUP_GATE: join(directory, 'upstream-release'),
+      ...(!slowAcl ? { LCU_TEST_ACL: 'success' } : {}) };
+    const child = spawn(process.execPath, [slowAclRelay, process.execPath, fixture], {
+      env, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    child.stdout.resume();
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const client = new Client({ name: 'replacement', version: '1' });
+    const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+    const registry = registryDirectory(env);
+    const entries = () => existsSync(registry) ? readdirSync(registry).filter(n => n.endsWith('.json')) : [];
+    try {
+      await waitFor(() => readRecords(logPath).some(e => e.type === 'fixture-start') &&
+        existsSync(join(directory, slowAcl ? 'acl-pid' : 'acl-complete')));
+      // Give the old implementation time to publish while initialize remains stalled.
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const oldEntries = entries();
+      child.stdin.end();
+      await waitFor(() => entries().every(name => !oldEntries.includes(name)), 1_000);
+      if (slowAcl) {
+        const pid = Number(readFileSync(join(directory, 'acl-pid'), 'utf8'));
+        await waitFor(() => { try { process.kill(pid, 0); return false; } catch (e) {
+          if (e.code !== 'ESRCH') throw e;
+          return true;
+        } }, 1_000);
+        // A callback reporting success after EOF must still never publish.
+        writeFileSync(join(directory, 'acl-release'), 'ready');
+      }
+      await client.connect(new StdioClientTransport({ command: process.execPath,
+        args: [slowAclRelay, process.execPath, fixture], env: { ...env, LCU_FIXTURE_STARTUP_GATE: '',
+          LCU_TEST_ACL: 'success', LCU_TEST_LIFECYCLE_WAIT_MS: '2000',
+          LCU_FIXTURE_LOG: join(directory, 'replacement.jsonl') }, stderr: 'pipe' }));
+      assert.deepEqual(await runHook(directory, { hook_event_name: 'PreToolUse', session_id: 'replacement',
+        prompt_id: 'replacement-prompt', tool_use_id: 'replacement-use' }), quiet);
+      const result = await client.callTool({ name: 'js', arguments: { code: 'replacement-works' },
+        _meta: { 'claudecode/toolUseId': 'replacement-use' } });
+      assert.equal(result.isError, undefined);
+      assert.equal(result.content[0].text, 'replacement-works');
+      assert.equal(entries().length, 1, 'only the replacement is published');
+      writeFileSync(join(directory, 'upstream-release'), 'ready');
+      await waitFor(() => child.exitCode !== null || child.signalCode !== null, 1_000);
+      assert.equal(child.exitCode, 0, stderr);
+    } finally {
+      await client.close().catch(() => {});
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      for (const file of [logPath, join(directory, 'replacement.jsonl')]) {
+        const upstream = readRecords(file).find(e => e.type === 'fixture-start');
+        if (upstream && !readRecords(file).some(e => e.type === 'fixture-exit')) {
+          try { process.kill(upstream.pid, 'SIGKILL'); } catch {}
+        }
+      }
+      if (existsSync(join(directory, 'acl-pid'))) {
+        try { process.kill(Number(readFileSync(join(directory, 'acl-pid'), 'utf8')), 'SIGKILL'); } catch {}
+      }
+      rmSync(registry, { recursive: true, force: true });
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+test('slow upstream exhausts the total lifecycle budget without adding the extra readiness wait', async () => {
+  let upstreamStarted;
+  const bridge = await connectRelay({ slowAcl: true, startupDelayMs: 500,
+    lifecycleStartupBudgetMs: 100, lifecycleWaitMs: 2_000,
+    async beforeConnect({ logs }) {
+      await waitFor(() => logs().some(e => e.type === 'fixture-start'));
+      upstreamStarted = performance.now();
+    },
+  });
+  try {
+    assert.ok(performance.now() - upstreamStarted < 1_500, 'must skip the extra two seconds after the total cap');
+    assert.ok(bridge.diagnostics().some(e => e.event === 'lifecycle_listen' && e.reason === 'startup_timeout'));
+    await bridge.client.ping();
+    writeFileSync(join(bridge.directory, 'acl-release'), 'ready');
+    await waitFor(() => bridge.diagnostics().some(e => e.event === 'lifecycle_listen' && e.ok));
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'PreToolUse', session_id: 'budget',
+      prompt_id: 'budget-prompt', tool_use_id: 'budget-use' }), quiet);
+    const result = await bridge.client.callTool({ name: 'js', arguments: { code: 'after-budget' },
+      _meta: { 'claudecode/toolUseId': 'budget-use' } });
+    assert.equal(result.content[0].text, 'after-budget');
+  } finally { await bridge.close(); }
 });
 
 test('slow ACL publishes before MCP serves: the first exec PreToolUse binds js', async () => {
@@ -775,8 +886,22 @@ for (const slowAcl of [false, true]) test('Claude relay ends within seconds when
       _meta: { 'claudecode/toolUseId': 'gone-use' } } });
     await waitFor(() => logs().some(entry => entry.type === 'active-call-start' && entry.code === 'ignore-cancel'));
     if (slowAcl) await waitFor(() => existsSync(join(directory, 'acl-pid')));
+    const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+    const registry = registryDirectory({ HOME: directory, USERPROFILE: directory });
+    const registration = existsSync(registry) && readdirSync(registry).find(n => n.endsWith('.json'));
+    const endpoint = registration && JSON.parse(readFileSync(join(registry, registration), 'utf8')).endpoint;
     const started = Date.now();
     child.stdin.end();
+    await waitFor(() => !existsSync(registry) || !readdirSync(registry).some(n => n.endsWith('.json')), 1_000);
+    assert.equal(child.exitCode, null, 'registration disappears before the slow cleanup drain completes');
+    if (endpoint) {
+      const { createConnection } = await import('node:net');
+      await new Promise((resolve, reject) => {
+        const socket = createConnection(endpoint);
+        socket.on('error', resolve);
+        socket.on('connect', () => { socket.destroy(); reject(new Error('closing relay still accepts connections')); });
+      });
+    }
     await Promise.race([exited, new Promise(resolve => setTimeout(resolve, SHUTDOWN_DRAIN_TIMEOUT_MS + 8_000))]);
     const elapsed = Date.now() - started;
     assert.notEqual(child.exitCode ?? child.signalCode, null, `relay still running ${elapsed} ms after its host went away`);
@@ -2063,6 +2188,15 @@ test('an accepted cleanup outlives the absence budget and reports active upstrea
     await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')),
       process.platform === 'win32' ? 35_000 : 5_000);
     const hook = { session_id: 'hold-ipc', prompt_id: 'held-prompt', hook_event_name: 'Stop' };
+    // Cleanup without a bound context is intentionally a no-op. Establish real exec-hook contexts
+    // before exercising the slow accepted cleanup and the active upstream failure.
+    for (const session of ['hold-ipc', 'fail-ipc']) {
+      const toolUseId = `${session}-use`;
+      assert.deepEqual(await runHook(bridge.directory, { ...hook, hook_event_name: 'PreToolUse',
+        session_id: session, tool_use_id: toolUseId }), quiet);
+      await bridge.client.callTool({ name: 'js', arguments: { code: 'before-cleanup' },
+        _meta: { 'claudecode/toolUseId': toolUseId } });
+    }
     let completed = false;
     const pending = runHook(bridge.directory, hook).then(result => { completed = true; return result; });
     await waitFor(() => bridge.logs().some(entry => entry.type === 'turn-ended' && entry.args.session_id === 'hold-ipc'));
@@ -2145,6 +2279,8 @@ test('disconnecting a hook does not cancel cleanup already accepted by the relay
     await waitFor(() => existsSync(directory) && readdirSync(directory).some(name => name.endsWith('.json')),
       process.platform === 'win32' ? 35_000 : 5_000);
     const entry = JSON.parse(readFileSync(join(directory, readdirSync(directory).find(name => name.endsWith('.json'))), 'utf8'));
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'PreToolUse',
+      session_id: 'hold-disconnected', prompt_id: 'disconnected', tool_use_id: 'disconnected-use' }), quiet);
     await new Promise((resolve, reject) => {
       const socket = createConnection(entry.endpoint);
       socket.on('error', reject);

@@ -9,8 +9,8 @@ import {
 } from './claude_hook.mjs';
 export { deliverLifecycle, endpointPath, registryDirectory } from './claude_hook.mjs';
 
-/** Publish after ACL and listener readiness. Each relay owns one unpredictable generation. */
-export async function listenLifecycle(handle, {
+/** Prepare private storage without opening an endpoint or writing a registration. */
+export async function prepareLifecycle({
   directory = registryDirectory(), hostPid = process.ppid, signal,
   // An execFile-compatible runner lets tests exercise slow Windows ACL startup on every platform.
   runAcl = process.platform === 'win32' ? execFile : undefined,
@@ -42,7 +42,19 @@ export async function listenLifecycle(handle, {
     }
     // Cancellation can win even if an ACL runner completes successfully at the same time.
     signal?.throwIfAborted();
-    stage = 'registry_unavailable';
+    return handle => publishLifecycle(handle, { directory, hostPid, signal });
+  } catch (error) {
+    // Fixed categories keep paths, subprocess stderr and hook identities out of diagnostic logs.
+    error.lifecycleReason = stage === 'acl_failed' && error.killed && !signal?.aborted ? 'acl_timeout' : stage;
+    throw error;
+  }
+}
+
+/** Publish only when the caller can serve lifecycle requests. Recheck paths after asynchronous preparation. */
+async function publishLifecycle(handle, { directory, hostPid, signal }) {
+  let stage = 'registry_unavailable';
+  try {
+    signal?.throwIfAborted();
     privatePath(directory, true);
     if (process.platform === 'win32') windowsParents(directory);
     const generation = randomBytes(16).toString('hex');
@@ -115,7 +127,13 @@ export async function listenLifecycle(handle, {
     } };
   } catch (error) {
     // Fixed categories keep paths, subprocess stderr and hook identities out of diagnostic logs.
-    error.lifecycleReason = stage === 'acl_failed' && error.killed && !signal?.aborted ? 'acl_timeout' : stage;
+    error.lifecycleReason = stage;
     throw error;
   }
+}
+
+/** Convenience for callers that are already ready to serve requests. */
+export async function listenLifecycle(handle, options) {
+  const publish = await prepareLifecycle(options);
+  return publish(handle);
 }
