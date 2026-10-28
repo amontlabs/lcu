@@ -231,7 +231,7 @@ These checks add no native Windows ACL, named-pipe, or original-host desktop ver
 exercise the real PowerShell path.
 
 
-## PR 66 lifecycle readiness regression
+## PR 66 lifecycle readiness regression (publication and EOF ordering superseded below)
 
 The asynchronous ACL fix removed event-loop blocking but advertised MCP tools before command hooks could
 bind them. The earlier slow-ACL test used the legacy `set_turn_context` MCP seam, so it missed that the real
@@ -291,3 +291,86 @@ checks correctly refused that cache location, producing 15 Pi cache failures. Th
 resolved the home to its real `/private/var` path. The installed Node 24 command could not launch because its
 Homebrew binary referenced a missing library; no system installation was changed, and all reported Node suites
 used the working Node 22.22.2 executable. No personal configuration or desktop session was used.
+
+## PR 66 startup publication and disconnect regressions
+
+The readiness change above published a lifecycle endpoint before `openUpstream` assigned its link, and attached
+stdin EOF handling only after startup. A Stop during a 1.2-second original-server initialization delay therefore
+reached cleanup without an upstream client and exited 1. An old relay whose stdin closed during stalled startup
+could continue answering probes beside a replacement, making the helper silently refuse both routes. These
+findings supersede the earlier claim that startup EOF reliably aborted preparation.
+
+Preparation and publication are now separate operations. Directory creation and asynchronous Windows ACL
+hardening overlap upstream startup. Only after initialize and listTools complete and the relay owns the upstream
+link does it open its socket/pipe and write the registration. Path and cancellation checks run again at publication.
+Preparation failure remains non-fatal and classified; late ACL success after the readiness cap still recovers.
+Cleanup of a never-bound turn succeeds without upstream work while retaining bounded prompt-closure history.
+A missing upstream client also makes cleanup a no-op. A defensive bind without a live link returns a classified
+`upstream_unavailable` error rather than binding an unusable context.
+
+The official SDK stdio transport starts reading at relay startup, before upstream initialization or ACL waits.
+LCU temporarily retains its decoded messages, then transfers that same transport to the downstream SDK server
+and replays them after readiness. The instance's second `start` call performs that handoff instead of starting a
+second reader. Framing, JSON-RPC validation, dispatch and serialization remain in SDK 1.30.0; this adaptation is
+transport lifetime wiring only. No MCP parser or original computer-use implementation was added.
+
+Primary sources checked for this change:
+
+- [Node readable stream EOF](https://nodejs.org/api/stream.html#event-end) requires consuming input before `end`
+  fires. Merely attaching an early EOF listener while leaving stdin paused does not solve the regression.
+- The [official SDK stdio transport](https://github.com/modelcontextprotocol/typescript-sdk/blob/v1.x/src/server/stdio.ts)
+  consumes input in `start`, validates through its shared ReadBuffer and refuses a second start. Its
+  [Protocol.connect implementation](https://github.com/modelcontextprotocol/typescript-sdk/blob/v1.x/src/shared/protocol.ts)
+  installs protocol callbacks before invoking transport.start. Both behaviors were also checked in the locally
+  installed SDK 1.30.0 `dist/esm/server/stdio.js` and `dist/esm/shared/protocol.js`.
+- [Node execFile cancellation](https://nodejs.org/api/child_process.html#child_processexecfilefile-args-options-callback)
+  supports the existing AbortSignal and timeout. EOF aborts the ACL subprocess and pending upstream startup
+  requests; the starting client closes even before it has become the relay's active link.
+
+Shutdown first removes its own registration, closes the listener and destroys its sockets, then aborts preparation
+and drains active turns. A replacement cannot see a closing endpoint as ready during the two-second cleanup
+window. Cancellation before or during publication prevents a late listener from surviving shutdown. Helpers
+still never remove another relay's registration.
+
+The extra readiness wait is `max(0, min(2000, 28000 - elapsedStartupMs))`, measured with a monotonic clock from
+entry to runClaudeBridge. Upstream startup consumes the same budget, so an upstream that already took 28 seconds
+adds no readiness wait. This reserves two seconds of Claude's documented default
+[30-second MCP_TIMEOUT](https://code.claude.com/docs/en/env-vars) for the downstream handshake. It cannot guarantee
+a successful connection if upstream startup, module loading or the host itself exhausts the budget. Custom
+shorter Claude timeouts remain caller policy. ACL preparation is still allowed to finish later and recover.
+
+Regression fixtures use disposable homes, real exec helpers and fake original MCP servers on POSIX as well as
+Windows. They cover Stop during a 1.2-second initialization delay, no publication before upstream readiness,
+never-bound cleanup after publication, and EOF during file-gated upstream startup both with and without an
+indefinitely pending ACL child. A same-parent replacement must acknowledge exec PreToolUse and execute js;
+the old registration must disappear and its ACL child must die within one second. Releasing both gates after
+EOF cannot resurrect the old endpoint. The active-call shutdown regression checks unpublication and connection refusal within one
+second, before cleanup drains. A scaled 100-ms total startup budget with 500-ms upstream delay proves the
+extra two-second wait is skipped and late ACL readiness still recovers. Listener tests separately verify that
+completed preparation creates neither a socket nor a registration and cannot publish after cancellation.
+
+The accepted-cleanup duration/failure and disconnected-helper regressions now bind contexts before cleanup.
+They retain their slow acknowledgement, upstream failure reporting and uncancelled accepted-cleanup assertions;
+never-bound cleanup is covered by the new successful no-op case instead.
+
+These checks add no native Windows ACL, named-pipe, browser or original-host desktop verification.
+
+A disposable baseline copy of `36162b6`, using the new regression fixtures, failed all three symptom cases:
+Stop exited 1 with `The original CUA server is not running`, the published old registration survived the
+one-second EOF bound, and the stalled ACL child survived that bound. The fixed replacement cases each finish
+in approximately 0.7 seconds, including replacement startup and exec-helper tool binding.
+
+Validation on macOS arm64, Node 22.22.2, with disposable homes, `CLAUDE_CONFIG_DIR` unset, and a
+240-second subprocess limit per suite:
+
+- Full Node suite (`node --test tests/node/*.test.mjs`): 474 pass, 40 platform skips, zero failures (15.0 s).
+- Full adapter suite with `adapters/test/no-diagnostic-log.mjs`: 249 pass, 8 opt-in/platform skips, zero
+  failures (132.9 s). This final run includes the injected fast ACL replacement and direct endpoint-refusal
+  assertions. The earlier complete run also passed before those fixture refinements.
+- Python unittests (`python3 -I -m unittest discover -b -s tests -p 'test_*.py'`): 45 pass (20.6 s).
+- The three startup symptom cases fail against the disposable original-head baseline and pass with the fix.
+  Existing accepted cleanup, host-loss, readiness failure, recovery and routing tests pass in the full suite.
+- Changed runtime modules parse; `git diff --check main..HEAD` passes.
+
+No personal configuration or desktop session was used. The runtime and platform evidence limits above remain
+unchanged; these are adapter/IPC integration tests with fixture upstream servers.
