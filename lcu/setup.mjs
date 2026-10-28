@@ -621,13 +621,21 @@ export async function configure(names, home, command, toolsRoot, releaseRoot,
         const recordedNode = join(releaseRoot, 'node-path');
         hideHostOnlyTools(home, { project: projectScope, root: releaseRoot,
           node: existsSync(recordedNode) ? readFileSync(recordedNode, 'utf8').trim() : node });
-        say(`${client.label}: approval mod installed at ${installApprovalMod(home, releaseRoot, { project: projectScope })}.`);
       }
       say(`${client.label}: ${phase} registered.`);
-      applyApproval(name, codexPlan);
     } catch (error) {
       fail(name, phase, error);
+      continue;
     }
+    // Its own phase: the MCP server is registered by now, and the approval mode applies without the mod.
+    if (name === 'claude-code') {
+      try {
+        say(`${client.label}: approval mod installed at ${installApprovalMod(home, releaseRoot, { project: projectScope })}.`);
+      } catch (error) {
+        fail(name, 'approval mod', error);
+      }
+    }
+    applyApproval(name, codexPlan);
   }
   return failures;
 }

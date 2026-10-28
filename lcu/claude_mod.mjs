@@ -4,7 +4,7 @@
 // and in the Claude app's Code tab, where the host cannot render the runtime's MCP form. It is a plugin folder
 // under the `skills` directory, which Claude Code loads without a hot-reload question and watches for changes:
 // `~/.claude/skills/lcu-approve` for user scope and `<project>/.claude/skills/lcu-approve` for project scope.
-import { existsSync, lstatSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';
 
 import { applyChanges, change, json, readFile } from './setup.mjs';
@@ -37,7 +37,16 @@ function lcuCommand(releaseRoot) {
   return join(root, 'bin', 'lcu');
 }
 
-export const destination = (home, project = null) => join(project ? join(project, '.claude') : join(home, '.claude'), 'skills', NAME);
+const skillsFolder = (home, project) => join(project ? join(project, '.claude') : join(home, '.claude'), 'skills');
+
+export const destination = (home, project = null) => join(skillsFolder(home, project), NAME);
+
+/** The folder the mod is written to: a linked skills folder (one kept in a dotfiles repository, say) is followed to its
+ * real path once, so setup's refusal of links still holds for the mod folder and everything in it. */
+function writtenDestination(home, project) {
+  const skills = skillsFolder(home, project);
+  return join(existsSync(skills) ? realpathSync(skills) : skills, NAME);
+}
 
 /** True when the folder holds LCU's mod (never touch a plugin of that name that is not ours). */
 export function owned(path) {
@@ -50,7 +59,7 @@ export function owned(path) {
 
 /** Copy the mod into the selected scope's skills folder; returns the folder. */
 export function install(home, releaseRoot, { project = null } = {}) {
-  const target = destination(home, project);
+  const target = writtenDestination(home, project);
   if (existsSync(target) && !owned(target)) throw new Error(`${target} exists and is not the LCU mod; move it aside, then rerun setup.`);
   const files = sourceFiles(releaseRoot);
   // The approved-apps panel runs `lcu apps`; this is where it finds the command.

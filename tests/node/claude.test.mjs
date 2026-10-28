@@ -1,13 +1,13 @@
 // The Claude Code approval mod (claude_mod.mjs) and host-only tool visibility (claude_visibility.mjs).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, join, sep } from 'node:path';
 import { test } from 'node:test';
 
 import * as mod from '../../lcu/claude_mod.mjs';
 import * as visibility from '../../lcu/claude_visibility.mjs';
-import { REPO, temporary, write } from './fixtures.mjs';
+import { REPO, posixOnly, temporary, write } from './fixtures.mjs';
 
 const MOD = join(REPO, 'adapters/claude-mod/lcu-approve');
 const snapshot = (root) => Object.fromEntries(readdirSync(root, { recursive: true }).sort()
@@ -49,6 +49,20 @@ test('project scope installs under the project; a reinstall replaces changed and
   mod.install(root, REPO);
   assert.equal(readFileSync(join(target, 'hooks/register.tsx'), 'utf8'), readFileSync(join(MOD, 'hooks/register.tsx'), 'utf8'));
   assert.equal(existsSync(join(target, 'hooks/old.tsx')), false);
+});
+
+test('a linked skills folder is followed to its real folder; a linked mod folder is still refused', { skip: posixOnly('symlinks') }, (t) => {
+  const root = temporary(t);
+  const skills = join(root, 'dotfiles/skills');
+  mkdirSync(skills, { recursive: true });
+  mkdirSync(join(root, 'home/.claude'), { recursive: true });
+  symlinkSync(skills, join(root, 'home/.claude/skills'));
+  assert.equal(mod.install(join(root, 'home'), REPO), join(skills, 'lcu-approve'));
+  assert.ok(existsSync(join(skills, 'lcu-approve/hooks/register.tsx')));
+  assert.equal(mod.owned(mod.destination(join(root, 'home'))), true);
+  renameSync(join(skills, 'lcu-approve'), join(root, 'elsewhere'));
+  symlinkSync(join(root, 'elsewhere'), join(skills, 'lcu-approve'));
+  assert.throws(() => mod.install(join(root, 'home'), REPO), /Refusing a symlink/);
 });
 
 test('a foreign plugin of the same name is refused and kept; remove deletes only the mod', (t) => {

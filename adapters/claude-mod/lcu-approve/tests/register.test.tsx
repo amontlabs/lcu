@@ -144,7 +144,7 @@ test('the model may not call the host-only tools', async ($, on) => {
 })
 
 // The host beneath the mod: processes, files, the store, the session, toasts.
-function host(on: any, { files = {} as Record<string, string>, processes = (argv: string[]): any => undefined, session = 'sess-1', terminal = 'ghostty' } = {}) {
+function host(on: any, { files = {} as Record<string, string>, processes = (argv: string[]): any => undefined, session = (): string => 'sess-1', terminal = 'ghostty' } = {}) {
   const ran: string[][] = []
   const toasts: string[] = []
   const store = new Map<string, unknown>()
@@ -161,7 +161,7 @@ function host(on: any, { files = {} as Record<string, string>, processes = (argv
       ? { value: e.as === 'bytes' ? { base64: files[key(e.path)] } : files[key(e.path)] }
       : { deny: `no such file: ${e.path}` })
   on('env.get', (_$: any, e: any) => ({ value: ({ HOME: '/home/me', TERM_PROGRAM: terminal } as Record<string, string>)[e.name] }))
-  on('session.id', () => ({ value: session }))
+  on('session.id', () => ({ value: session() }))
   on('store.get', (_$: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', (_$: any, e: any) => { store.set(e.key, e.value); return { value: undefined } })
   on('ui.toast', (_$: any, e: any) => { toasts.push(e.text); return { value: undefined } })
@@ -461,48 +461,54 @@ const NOTICE = {
   message: 'LCU 0.9.2 is available (installed: 0.9.1). Run `lcu update`, then restart the agents that use LCU.',
 }
 
+// The test switches sessions by setting `session.id`, what `$.session.id()` answers.
 function noticeHost(on: any, processes: (argv: string[]) => any, surfaces: string[] = ['terminal'], files: Record<string, string> = { [LCU]: '' }) {
-  on('classic.SessionStart', () => ({}))
+  const session = { id: 's1' }
+  on('session.start', () => ({ cwd: '/work' }))
+  on('command.register', () => ({ value: undefined }))
   on('session.surfaces', () => ({ value: surfaces }))
-  return host(on, { files, processes })
+  return { ...host(on, { files, processes, session: () => session.id }), session }
 }
+
+const start = ($: any) => $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as any)
 
 const noticeRun = (stdout: string) => (argv: string[]) => (argv[1] === 'update' ? { stdout } : undefined)
 
 // The notice is for the person: a toast, and the hook's result unchanged, so the model never receives it.
 test('an update notice becomes one toast and never model context', async ($, on) => {
   const { ran, toasts } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)))
-  const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
+  const result: any = await start($)
   expect(ran.find(argv => argv[1] === 'update')?.slice(0, 4)).toEqual([LCU, 'update', '--notice', '--json'])
   expect(ran.find(argv => argv[1] === 'update')?.[4]).toMatch(/^--announce/)
-  expect(result.additionalContext).toBeUndefined()
+  expect(result).toEqual({ cwd: '/work' })
   expect(toasts).toEqual(['LCU 0.9.2 is available \u2014 ask Claude to update it, or run lcu update'])
 })
 
 test('the session id goes to lcu, which applies the account-wide cooldown', async ($, on) => {
   const { ran } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)))
-  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  await start($)
   expect(ran.find(argv => argv[1] === 'update')).toEqual([LCU, 'update', '--notice', '--json', '--announce=s1'])
 })
 
 test('a release lcu already announced on the account today: no toast', async ($, on) => {
-  const { toasts } = noticeHost(on, argv => (argv[1] === 'update' ? { stdout: argv[4] === '--announce=s2' ? '{}' : JSON.stringify(NOTICE) } : undefined))
-  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  const { toasts, session } = noticeHost(on, argv => (argv[1] === 'update' ? { stdout: argv[4] === '--announce=s2' ? '{}' : JSON.stringify(NOTICE) } : undefined))
+  await start($)
   expect(toasts.length).toBe(1)
-  await $.classic.SessionStart({ source: 'startup', session_id: 's2' } as any)
+  session.id = 's2'
+  await start($)
   expect(toasts.length).toBe(1)
 })
 
 test('a headless run gets neither context nor a toast', async ($, on) => {
   const { toasts } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)), [])
-  const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
-  expect(result.additionalContext).toBeUndefined()
+  const result: any = await start($)
+  expect(result).toEqual({ cwd: '/work' })
   expect(toasts).toEqual([])
 })
 
 test('a security notice toast is prefixed', async ($, on) => {
   const { toasts } = noticeHost(on, noticeRun(JSON.stringify({ ...NOTICE, severity: 'security' })))
-  await $.classic.SessionStart({ source: 'startup' } as any)
+  await start($)
   expect(toasts[0].startsWith('Security update: LCU 0.9.2')).toBe(true)
 })
 
@@ -516,25 +522,25 @@ const quiet: [string, (argv: string[]) => any][] = [
 for (const [name, processes] of quiet) {
   test(`${name}: no toast, no throw`, async ($, on) => {
     const { toasts } = noticeHost(on, processes)
-    const result: any = await $.classic.SessionStart({ source: 'startup' } as any)
-    expect(result.additionalContext).toBeUndefined()
+    const result: any = await start($)
+    expect(result).toEqual({ cwd: '/work' })
     expect(toasts).toEqual([])
   })
 }
 
 test('without lcu installed nothing is run for the notice', async ($, on) => {
   const { ran } = noticeHost(on, noticeRun(JSON.stringify(NOTICE)), ['terminal'], {})
-  await $.classic.SessionStart({ source: 'startup' } as any)
+  await start($)
   expect(ran.some(argv => argv[1] === 'update')).toBe(false)
 })
 
 // Prompts after the session started: the first checks, later ones at most every ten minutes.
 const MIN = 60000
 function promptHost(on: any, processes: (argv: string[]) => any) {
-  on('classic.UserPromptSubmit', () => ({}))
+  on('prompt.submit', (_$: any, e: any) => ({ text: e.text }))
   return noticeHost(on, processes)
 }
-const prompt = ($: any, session_id = 's1') => $.classic.UserPromptSubmit({ prompt: 'hi', session_id } as any)
+const prompt = ($: any) => $.prompt.submit({ text: 'hi' } as any)
 const checks = (ran: string[][]) => ran.filter(argv => argv[1] === 'update').length
 const NEWER = { ...NOTICE, latest: '0.9.3', message: 'LCU 0.9.3 is available.' }
 
@@ -542,7 +548,7 @@ test('the first prompt checks for a notice', async ($, on) => {
   const { ran, toasts } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
   const result: any = await prompt($)
   expect(checks(ran)).toBe(1)
-  expect(result.additionalContext).toBeUndefined()
+  expect(result).toEqual({ text: 'hi' })
   expect(toasts.length).toBe(1)
 })
 
@@ -561,7 +567,7 @@ test('a prompt within ten minutes of a check does not run the command', async ($
 test('a version announced at session start is not repeated', async ($, on) => {
   const clock = mock.clock(on)
   const { ran, toasts } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
-  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  await start($)
   await clock.advance(11 * MIN)
   await prompt($)
   expect(checks(ran)).toBe(2)
@@ -572,7 +578,7 @@ test('after the cooldown lcu announces again: a session told nothing yet gets it
   const clock = mock.clock(on)
   let out = '{}'
   const { toasts } = promptHost(on, argv => (argv[1] === 'update' ? { stdout: out } : undefined))
-  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  await start($)
   out = JSON.stringify(NOTICE)
   expect(toasts.length).toBe(0)
   await clock.advance(11 * MIN)
@@ -587,7 +593,7 @@ test('a newer version is announced once', async ($, on) => {
   const clock = mock.clock(on)
   let out = JSON.stringify(NOTICE)
   const { toasts } = promptHost(on, argv => (argv[1] === 'update' ? { stdout: out } : undefined))
-  await $.classic.SessionStart({ source: 'startup', session_id: 's1' } as any)
+  await start($)
   out = JSON.stringify(NEWER)
   await clock.advance(11 * MIN)
   await prompt($)
@@ -598,9 +604,10 @@ test('a newer version is announced once', async ($, on) => {
 })
 
 test('sessions are independent', async ($, on) => {
-  const { ran, toasts } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
-  await prompt($, 'a')
-  await prompt($, 'b')
+  const { ran, toasts, session } = promptHost(on, noticeRun(JSON.stringify(NOTICE)))
+  await prompt($)
+  session.id = 's2'
+  await prompt($)
   expect(checks(ran)).toBe(2)
   expect(toasts.length).toBe(2)
 })
@@ -608,7 +615,7 @@ test('sessions are independent', async ($, on) => {
 test('a failing check on a prompt gives nothing and does not throw', async ($, on) => {
   const { toasts } = promptHost(on, () => { throw new Error('no processes') })
   const result: any = await prompt($)
-  expect(result.additionalContext).toBeUndefined()
+  expect(result).toEqual({ text: 'hi' })
   expect(toasts).toEqual([])
 })
 

@@ -30,7 +30,7 @@ type McpResult = { isError?: boolean; content?: { type: string; text?: string }[
 const textOf = (result: McpResult) =>
   (result.content ?? []).map(item => item.text ?? '').join('')
 
-// Update notices: per session (the classic event's session_id), what was last announced and when the cache
+// Update notices: per session (`$.session.id()`), what was last announced and when the cache
 // was last asked. Whether to announce at all is `lcu update --notice --announce`'s decision (once per session
 // and release, at most once a day per release across the account), so the toast follows it.
 const NOTICE_RECHECK_MS = 600000
@@ -137,38 +137,42 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // The update notices hook native events: in Team and Enterprise organizations Claude Code's sec-default guard
+  // skips the classic hooks of mods a person installs.
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: APPS_COMMAND,
       description: 'Show the apps Computer use may control, and allow or revoke them',
     })
-    return next(e)
-  })
-
-  // An update notice from the cache `lcu update --notice` keeps: the person gets one toast. The model never
-  // receives it; the hook's result is returned unchanged.
-  on('classic.SessionStart', async ($, e, next) => {
     const result = await next(e)
-    const state = sessionState(e)
-    state.lastCheck = await now($)
-    const notice = await updateNotice($, sessionId(e))
-    if (!notice) return result
-    state.announced = notice.latest ?? notice.message
-    await toast($, notice)
-    return result
+    // An update notice from the cache `lcu update --notice` keeps: the person gets one toast. The model never
+    // receives it; the hook's result is returned unchanged.
+    try {
+      const session = await sessionId($)
+      const state = sessionState(session)
+      state.lastCheck = await now($)
+      const notice = await updateNotice($, session)
+      if (!notice) return result
+      state.announced = notice.latest ?? notice.message
+      await toast($, notice)
+      return result
+    } catch {
+      return result
+    }
   })
 
   // A release published while the session is open: the cache refreshes in the background, so the first
   // prompt and then at most one check per NOTICE_RECHECK_MS reads it; each version is announced once per
   // session, and once a day across the account.
-  on('classic.UserPromptSubmit', async ($, e, next) => {
+  on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
     try {
-      const state = sessionState(e)
+      const session = await sessionId($)
+      const state = sessionState(session)
       const at = await now($)
       if (state.lastCheck !== undefined && at - state.lastCheck < NOTICE_RECHECK_MS) return result
       state.lastCheck = at
-      const notice = await updateNotice($, sessionId(e))
+      const notice = await updateNotice($, session)
       if (!notice) return result
       const version = notice.latest ?? notice.message
       if (version === state.announced) return result
@@ -212,11 +216,13 @@ const now = async ($: any): Promise<number> => {
   }
 }
 
-const sessionId = (e: any): string | undefined =>
-  typeof e?.session_id === 'string' && e.session_id ? e.session_id : undefined
+const sessionId = async ($: any): Promise<string | undefined> => {
+  const id = await $.session.id().catch(() => undefined)
+  return typeof id === 'string' && id ? id : undefined
+}
 
-const sessionState = (e: any) => {
-  const id = sessionId(e) ?? DEFAULT_SESSION
+const sessionState = (session: string | undefined) => {
+  const id = session ?? DEFAULT_SESSION
   let state = noticeSessions.get(id)
   if (!state) noticeSessions.set(id, (state = {}))
   return state

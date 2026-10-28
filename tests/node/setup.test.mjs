@@ -433,6 +433,19 @@ for (const code of ['EACCES', 'ETIMEDOUT']) {
   });
 }
 
+test('a Claude approval mod failure is its own phase: MCP stays registered and the approval mode still applies', async (t) => {
+  const r = release(t);
+  write(join(r.release, 'adapters/claude.mjs'), 'fixture relay');
+  override(t, setup.seams, 'run', () => result(0, '{}'));
+  const seen = await output(t);
+  const failures = await setup.configure(['claude-code'], r.home, ['/usr/bin/lcu'], r.tools, r.release,
+    { scope: 'user', approval: 'auto', environ: { HOME: r.home } });
+  assert.deepEqual(failures.map(([name, phase]) => [name, phase]), [['claude-code', 'approval mod']]);
+  assert.match(failures[0][2], /LCU Claude mod missing/);
+  assert.match(seen.out, /Claude Code: MCP registered\./);
+  assert.match(seen.out, /Claude Code: approval auto: /);
+});
+
 test('Codex registration wraps the command in the relay and carries the host policy', async (t) => {
   const r = release(t);
   write(join(r.release, 'adapters/codex.mjs'), 'fixture relay');
