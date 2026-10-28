@@ -173,7 +173,7 @@ under `HOME`; the complete rerun used a disposable home. Docker's daemon is unav
 registration and upgrade gates remain CI checks. These results add no native Windows or desktop verification.
 
 
-## Windows relay startup follow-up
+## Windows relay startup follow-up (superseded readiness behavior)
 
 CI run `40608137067`, job `Build tooling and adapters (windows-latest)`, confirms the startup regression:
 Claude relay tests repeatedly took 24–49 seconds, the host-loss test failed its five-second wait for tool
@@ -229,3 +229,65 @@ Local validation on macOS arm64 used disposable homes, unset `CLAUDE_CONFIG_DIR`
 
 These checks add no native Windows ACL, named-pipe, or original-host desktop verification; Windows CI must
 exercise the real PowerShell path.
+
+
+## PR 66 lifecycle readiness regression
+
+The asynchronous ACL fix removed event-loop blocking but advertised MCP tools before command hooks could
+bind them. The earlier slow-ACL test used the legacy `set_turn_context` MCP seam, so it missed that the real
+exec helper silently found no endpoint. Its MCP-serving assertions above do not establish usable exec hooks.
+
+Lifecycle setup now starts concurrently with `openUpstream` (including its `listTools`). Before connecting
+the downstream SDK transport, the relay waits for lifecycle publication, capped at two additional seconds
+after upstream readiness. This overlaps ordinary original-host startup with cold PowerShell startup and
+avoids spending the full 30-second ACL timeout on Claude's connection budget. Claude's official
+[environment reference](https://code.claude.com/docs/en/env-vars) documents the 30,000 ms `MCP_TIMEOUT` default.
+This changes only relay startup wiring; it does not bound or fix the separately reported upstream startup delay.
+The official SDK 1.30.0's installed `server/stdio.js` starts reading MCP requests in `start()`, which `server.connect`
+invokes; delaying that call prevents tool discovery and calls during the readiness wait.
+
+A failure or exhausted startup cap still connects MCP for diagnosis. Missing-identity refusals for both `js`
+and `js_reset` say `LCU's lifecycle channel failed to start (<reason>)`. `lifecycle_listen` failure events
+and `identity_refused` events record fixed categories, never paths, hook identities, or subprocess stderr:
+`registry_unavailable`, `acl_failed`, `acl_timeout`, `listen_failed`, `publication_failed`, or
+`startup_timeout` (with `listener_failed` as a defensive fallback). A healthy channel's unbound call retains
+the ordinary missing-PreToolUse error. A timed-out readiness wait does not abort ACL setup: late publication
+clears the failure state, logs `lifecycle_listen` with `ok: true`, and lets the next exec PreToolUse bind.
+Actual setup failure supersedes an earlier startup-cap reason. Stdin EOF, explicit close and upstream startup
+failure still abort the ACL child; cancellation checks prevent a racing success from publishing after shutdown.
+The asynchronous child timeout and cancellation use the existing
+[Node execFile API](https://nodejs.org/api/child_process.html#child_processexecfilefile-args-options-callback).
+
+The new failing-first adapter tests exercise the actual standalone exec helper:
+
+- A file-gated ACL child holds readiness while upstream starts. MCP initialization remains pending until ACL
+  release; the first helper PreToolUse then binds and `js` forwards the exact session, prompt and tool-use ids.
+- A blocked registry, failed ACL child and timed-out ACL child leave MCP discovery and ping alive. The helper
+  finds no route; `js` and `js_reset` refuse with the matching classification and log it without forwarding work.
+- ACL setup survives the shorter startup cap. The first helper/call pair fails with `startup_timeout`; releasing
+  the child publishes the endpoint, and the next helper/call pair succeeds without restarting MCP.
+- Host EOF during the startup wait kills the child without publishing. The existing post-cap shutdown and
+  in-flight host-loss tests still require bounded cancellation and upstream Interrupt cleanup.
+
+The fixture injects the ACL runner on POSIX as well as Windows. Five new behavior cases failed against the
+previous relay before the implementation changed. Tests use disposable homes and fake original MCP servers;
+they add no native Windows ACL, named-pipe, browser, or original-host desktop verification. Stale-registration
+pruning remains unchanged; this fix does not delete another relay's registrations or socket files.
+
+
+Readiness follow-up validation on macOS arm64, using disposable homes, no `CLAUDE_CONFIG_DIR`, and
+240-second limits per suite:
+
+- Full Node suite, Node 22.22.2: 473 pass, 40 platform skips, no failures (15.5 s).
+- Full adapter suite with the diagnostic-log preload, Node 22.22.2: 245 pass, 8 opt-in/platform skips,
+  no failures (132.9 s).
+- Python unittests (`python3 -I -m unittest discover -b -s tests -p 'test_*.py'`): 45 pass (21.4 s).
+- Focused Claude adapter and lifecycle listener suites, Node 22.22.2: 77 pass, one native Windows skip,
+  no failures (34.9 s).
+- Changed Node modules parse, and `git diff --check main..HEAD` passes.
+
+The first adapter run used a disposable home under macOS's symlinked `/var` path; Pi's existing private-path
+checks correctly refused that cache location, producing 15 Pi cache failures. The complete passing rerun
+resolved the home to its real `/private/var` path. The installed Node 24 command could not launch because its
+Homebrew binary referenced a missing library; no system installation was changed, and all reported Node suites
+used the working Node 22.22.2 executable. No personal configuration or desktop session was used.
