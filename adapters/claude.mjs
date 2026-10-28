@@ -741,16 +741,21 @@ export async function runClaudeBridge({
     // EOF is the actual Claude-side connection-close signal; use it to drain exact
     // active turns before closing the original MCP client.
     process.stdin.once('end', closeDownstream);
-    lifecycle = await listenLifecycle(hook => {
-      if (hook.hook_event_name === 'PreToolUse') return bindContext({
-        session_id: hook.session_id, turn_id: hook.prompt_id, tool_use_id: hook.tool_use_id, agent_id: hook.agent_id,
+    try {
+      lifecycle = await listenLifecycle(hook => {
+        if (hook.hook_event_name === 'PreToolUse') return bindContext({
+          session_id: hook.session_id, turn_id: hook.prompt_id, tool_use_id: hook.tool_use_id, agent_id: hook.agent_id,
+        });
+        const event = hook.hook_event_name === 'StopFailure' ? 'Interrupt' : hook.hook_event_name;
+        return endContext({ hook_event_name: event,
+          session_id: event === 'SubagentStop' ? hook.agent_id : hook.session_id, turn_id: hook.prompt_id });
       });
-      const event = hook.hook_event_name === 'StopFailure' ? 'Interrupt' : hook.hook_event_name;
-      return endContext({ hook_event_name: event,
-        session_id: event === 'SubagentStop' ? hook.agent_id : hook.session_id, turn_id: hook.prompt_id });
-    });
+    } catch {
+      // Lifecycle IPC is optional. A directory, ACL, listener or publication failure must not close MCP.
+      log.event('lifecycle_listen', { ok: false });
+    }
     // Shutdown may have started while the listener was opening. Never leave a late publication behind.
-    if (shutdown) lifecycle.close();
+    if (shutdown) lifecycle?.close();
     return { server, get upstream() { return link?.client; }, contexts, activeTurns: lives, close: async () => {
       process.stdin.off('end', closeDownstream);
       await closeUpstreamAfterTurnCleanup();

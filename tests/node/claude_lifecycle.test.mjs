@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +32,26 @@ test('lifecycle endpoint paths use private Unix sockets or unpredictable Windows
   assert.equal(endpointPath('/private', 'abc', 'darwin'), '/private/abc.sock');
   assert.equal(endpointPath('C:\\private', 'abc', 'win32'), '\\\\.\\pipe\\lcu-claude-abc');
 });
+
+test('Windows ACL setup ignores modules inherited through Node from PowerShell 7',
+  { skip: process.platform !== 'win32' && 'requires Windows PowerShell and native directory ACLs' }, async t => {
+    const directory = temporary(t);
+    const modules = join(directory, 'modules');
+    const security = join(modules, 'Microsoft.PowerShell.Security');
+    mkdirSync(security, { recursive: true });
+    // If module autoload uses the inherited path, Get-Acl fails just like an incompatible PS7 module.
+    writeFileSync(join(security, 'Microsoft.PowerShell.Security.psm1'),
+      'function Get-Acl { throw "Inherited incompatible module" }; Export-ModuleMember -Function Get-Acl');
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'));
+    const script = `import { listenLifecycle } from ${JSON.stringify(new URL('../../lcu/claude_lifecycle.mjs', import.meta.url).href)};
+      const listener = await listenLifecycle(() => {}, { directory: ${JSON.stringify(join(directory, 'registry'))} });
+      listener.close();`;
+    const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script], {
+      env: { ...env, PsMoDuLePaTh: modules }, windowsHide: true, timeout: 45_000,
+    });
+    assert.equal(result.stderr, '');
+    assert.equal(result.stdout, '');
+  });
 
 test('lifecycle transport refuses token, generation, route and non-lifecycle messages', async t => {
   const directory = temporary(t);

@@ -16,6 +16,9 @@ export async function listenLifecycle(handle, { directory = registryDirectory(),
     windowsParents(directory);
     // chmod is not a Windows ACL. New registration files inherit only the current account's full access.
     const { execFileSync } = await import('node:child_process');
+    // Through Node, Windows PowerShell inherits PS7 module paths and can resolve incompatible cmdlets.
+    // Let powershell.exe construct its own module path (environment keys are case-insensitive on Windows).
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'));
     execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       '$ErrorActionPreference="Stop"; $p=$env:LCU_CLAUDE_HOOK_DIRECTORY; $acl=Get-Acl -LiteralPath $p; ' +
       '$acl.SetAccessRuleProtection($true,$false); foreach($r in @($acl.Access)){$acl.RemoveAccessRuleSpecific($r)}; ' +
@@ -26,7 +29,7 @@ export async function listenLifecycle(handle, { directory = registryDirectory(),
       'foreach($r in $check.Access){if($r.AccessControlType -eq "Allow" -and ' +
       '$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value)' +
       '{throw "Foreign lifecycle directory access"}}'],
-    { env: { ...process.env, LCU_CLAUDE_HOOK_DIRECTORY: directory }, windowsHide: true, stdio: 'pipe', timeout: 10_000 });
+    { env: { ...env, LCU_CLAUDE_HOOK_DIRECTORY: directory }, windowsHide: true, stdio: 'pipe', timeout: 30_000 });
   }
   const generation = randomBytes(16).toString('hex');
   const entry = { v: 1, hostPid, hostStart: hostStart(hostPid), relayPid: process.pid, generation,
@@ -80,6 +83,7 @@ export async function listenLifecycle(handle, { directory = registryDirectory(),
     } finally { try { unlinkSync(temporary); } catch {} }
   } catch (error) {
     server.close();
+    for (const socket of sockets) socket.destroy();
     throw error;
   }
   process.once('exit', remove);

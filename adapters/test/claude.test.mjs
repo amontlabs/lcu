@@ -49,8 +49,13 @@ async function waitFor(predicate, timeoutMs = 5_000) {
   assert.fail(`Condition did not become true within ${timeoutMs} ms`);
 }
 
-async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns } = {}) {
+async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-relay-test-'));
+  if (failLifecycle) {
+    const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+    // A real filesystem failure, before any registration or listener can be published.
+    writeFileSync(registryDirectory({ HOME: directory, USERPROFILE: directory }), 'blocked');
+  }
   // The relay reads the setting from the account's state directory, which HOME points at below.
   if (crossTurn !== undefined) {
     const setting = crossTurnSettingPath(directory);
@@ -92,6 +97,10 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
     await client.connect(transport);
   } catch (error) {
     await client.close().catch(() => {});
+    if (failLifecycle) {
+      const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+      rmSync(registryDirectory({ HOME: directory, USERPROFILE: directory }), { force: true });
+    }
     rmSync(directory, { recursive: true, force: true });
     throw error;
   }
@@ -111,6 +120,10 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
         if (error.code !== 'ESRCH') throw error;
       }
       await waitFor(() => logs().some(entry => entry.type === 'fixture-exit')).catch(() => {});
+    }
+    if (failLifecycle) {
+      const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
+      rmSync(registryDirectory({ HOME: directory, USERPROFILE: directory }), { force: true });
     }
     rmSync(directory, { recursive: true, force: true });
   }
@@ -212,6 +225,16 @@ test('Claude relay preserves original tool contract and forwards the exact corre
   } finally {
     await bridge.close();
   }
+});
+
+test('lifecycle setup failure leaves the relay serving the original MCP tools', async () => {
+  const bridge = await connectRelay({ failLifecycle: true });
+  try {
+    await waitFor(() => bridge.diagnostics().some(entry => entry.event === 'lifecycle_listen' && entry.ok === false));
+    await assertOriginalProtocol(bridge);
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'Stop', session_id: 'absent',
+      prompt_id: 'absent' }), quiet);
+  } finally { await bridge.close(); }
 });
 
 test('Claude relay starts and preserves its protocol through an installed current symlink', async () => {
