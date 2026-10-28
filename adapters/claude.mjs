@@ -373,10 +373,9 @@ export async function runClaudeBridge({
     const current = lives.get(key);
     if (current) return current;
     if (endedKeys.has(key)) return undefined;
-    // Even an unbound parent must end the upstream prompt and cascade to its bound children.
-    // Before upstream exists there can be no bound children or upstream work; keep that cleanup quiet.
+    // Even an unbound parent must close its prompt and cascade to bound children, as on main.
+    // sendTurnEnded skips the upstream call itself when no upstream exists.
     remember(endedKeys, key);
-    if (!link && !restarting) return undefined;
     const subagent = event === 'SubagentStop';
     return { key, sessionId, turnId, subagent, upstreamId: subagent ? subagentTurnId(sessionId, turnId) : turnId,
       endedUpstream: true, cleanup: null, ended: false };
