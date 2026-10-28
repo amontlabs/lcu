@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deliverLifecycle, endpointPath, listenLifecycle, prepareLifecycle } from '../../lcu/claude_lifecycle.mjs';
+import { deliverLifecycle, endpointPath, listenLifecycle, prepareLifecycle, registryDirectory, hardenLifecycleDirectory } from '../../lcu/claude_lifecycle.mjs';
 
 function temporary(t) {
   const path = mkdtempSync(join(process.platform === 'win32' ? tmpdir() : '/tmp', 'lcu-ipc-'));
@@ -31,6 +31,47 @@ async function request(entry, changes) {
 test('lifecycle endpoint paths use private Unix sockets or unpredictable Windows pipes', () => {
   assert.equal(endpointPath('/private', 'abc', 'darwin'), '/private/abc.sock');
   assert.equal(endpointPath('C:\\private', 'abc', 'win32'), '\\\\.\\pipe\\lcu-claude-abc');
+});
+
+test('Windows registry is beside the installed helper under the selected profile, never the old root or a shared override', () => {
+  assert.equal(registryDirectory({ USERPROFILE: 'C:\\Users\\fixture', HOME: 'C:\\other',
+    LOCALAPPDATA: 'C:\\shared' }, 'win32'), 'C:\\Users\\fixture\\AppData\\Local\\LCU\\claude\\hooks');
+});
+
+test('Windows preparation and publication work when every PowerShell launch is forbidden', async t => {
+  const directory = realpathSync(temporary(t));
+  const script = `import cp from 'node:child_process';
+    import { syncBuiltinESMExports } from 'node:module';
+    const platform = process.platform;
+    cp.execFile = cp.execFileSync = () => { throw new Error('PowerShell is forbidden on the relay hot path'); };
+    syncBuiltinESMExports();
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const { prepareLifecycle } = await import(${JSON.stringify(new URL('../../lcu/claude_lifecycle.mjs', import.meta.url).href)});
+    const publish = await prepareLifecycle({ directory: ${JSON.stringify(join(directory, 'hooks'))} });
+    Object.defineProperty(process, 'platform', { value: platform });
+    const listener = await publish(() => {});
+    listener.close();`;
+  const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script], { timeout: 5_000 });
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, '');
+});
+
+test('setup hardening retains private inheritable ACLs and ignores inherited PS7 module paths', t => {
+  const directory = temporary(t);
+  let ran = false;
+  hardenLifecycleDirectory(join(directory, 'hooks'), { runAcl(file, args, options) {
+    ran = true;
+    assert.equal(file, 'powershell.exe');
+    assert.equal(options.timeout, 30_000);
+    assert.equal(options.windowsHide, true);
+    assert.equal(Object.keys(options.env).some(key => key.toUpperCase() === 'PSMODULEPATH'), false);
+    assert.ok(args.at(-1).includes('SetAccessRuleProtection($true,$false)'));
+    assert.ok(args.at(-1).includes('FullControl'));
+    assert.ok(args.at(-1).includes('Foreign lifecycle directory access'));
+    assert.equal(options.env.LCU_CLAUDE_HOOK_DIRECTORY, join(directory, 'hooks'));
+  } });
+  assert.equal(ran, true);
+  assert.deepEqual(readdirSync(join(directory, 'hooks')), []);
 });
 
 test('lifecycle publication waits for ACL success', async t => {
@@ -85,7 +126,7 @@ test('ACL failure or cancellation never publishes a lifecycle endpoint', async t
   }
 });
 
-test('Windows ACL setup ignores modules inherited through Node from PowerShell 7',
+test('Windows setup-time ACL hardening ignores modules inherited through Node from PowerShell 7',
   { skip: process.platform !== 'win32' && 'requires Windows PowerShell and native directory ACLs' }, async t => {
     const directory = temporary(t);
     const modules = join(directory, 'modules');
@@ -95,9 +136,8 @@ test('Windows ACL setup ignores modules inherited through Node from PowerShell 7
     writeFileSync(join(security, 'Microsoft.PowerShell.Security.psm1'),
       'function Get-Acl { throw "Inherited incompatible module" }; Export-ModuleMember -Function Get-Acl');
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'));
-    const script = `import { listenLifecycle } from ${JSON.stringify(new URL('../../lcu/claude_lifecycle.mjs', import.meta.url).href)};
-      const listener = await listenLifecycle(() => {}, { directory: ${JSON.stringify(join(directory, 'registry'))} });
-      listener.close();`;
+    const script = `import { hardenLifecycleDirectory } from ${JSON.stringify(new URL('../../lcu/claude_lifecycle.mjs', import.meta.url).href)};
+      hardenLifecycleDirectory(${JSON.stringify(join(directory, 'registry'))});`;
     const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script], {
       env: { ...env, PsMoDuLePaTh: modules }, windowsHide: true, timeout: 45_000,
     });

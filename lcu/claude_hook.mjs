@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { homedir } from 'node:os';
-import { dirname, join, parse, posix, resolve } from 'node:path';
+import { dirname, join, parse, posix, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const LIMIT = 64 * 1024;
@@ -14,7 +14,7 @@ export const EVENTS = new Set(['PreToolUse', 'Stop', 'StopFailure', 'SubagentSto
 
 export function registryDirectory(env = process.env, platform = process.platform) {
   const home = env.USERPROFILE && platform === 'win32' ? env.USERPROFILE : env.HOME || homedir();
-  if (platform === 'win32') return join(home, '.lcu-claude-hooks');
+  if (platform === 'win32') return win32.join(home, 'AppData', 'Local', 'LCU', 'claude', 'hooks');
   const account = createHash('sha256').update(resolve(home)).digest('hex').slice(0, 12);
   return `/tmp/lcu-claude-${process.getuid()}-${account}`;
 }

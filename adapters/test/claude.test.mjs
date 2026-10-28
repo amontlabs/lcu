@@ -50,12 +50,14 @@ async function waitFor(predicate, timeoutMs = 5_000) {
   assert.fail(`Condition did not become true within ${timeoutMs} ms`);
 }
 
-async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false, slowAcl = false, acl, lifecycleWaitMs, lifecycleStartupBudgetMs, startupDelayMs, beforeConnect } = {}) {
+async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false, noPowerShell = false, slowAcl = false, acl, lifecycleWaitMs, lifecycleStartupBudgetMs, startupDelayMs, beforeConnect } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-relay-test-'));
   if (failLifecycle) {
     const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
     // A real filesystem failure, before any registration or listener can be published.
-    writeFileSync(registryDirectory({ HOME: directory, USERPROFILE: directory }), 'blocked');
+    const registry = registryDirectory({ HOME: directory, USERPROFILE: directory });
+    mkdirSync(dirname(registry), { recursive: true });
+    writeFileSync(registry, 'blocked');
   }
   // The relay reads the setting from the account's state directory, which HOME points at below.
   if (crossTurn !== undefined) {
@@ -77,9 +79,24 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
     ...(lifecycleStartupBudgetMs === undefined ? {} : { LCU_TEST_LIFECYCLE_STARTUP_BUDGET_MS: String(lifecycleStartupBudgetMs) }),
   };
   const scriptPath = throughCurrentSymlink ? installedCurrentEntryPoint(directory) : relay;
+  const startupArgs = [];
+  if (noPowerShell) {
+    const preload = join(directory, 'no-powershell.mjs');
+    writeFileSync(preload, `import cp from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      for (const name of ['execFile', 'execFileSync']) {
+        const original = cp[name];
+        cp[name] = (file, ...args) => {
+          if (/powershell/i.test(String(file))) throw new Error('PowerShell is forbidden at relay startup');
+          return original(file, ...args);
+        };
+      }
+      syncBuiltinESMExports();`);
+    startupArgs.push('--import', pathToFileURL(preload).href);
+  }
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: maxEndedTurns === undefined ? [slowAcl ? slowAclRelay : scriptPath, process.execPath, fixture] : ['--input-type=module', '-e',
+    args: maxEndedTurns === undefined ? [...startupArgs, slowAcl ? slowAclRelay : scriptPath, process.execPath, fixture] : ['--input-type=module', '-e',
       `import { runClaudeBridge } from ${JSON.stringify(pathToFileURL(relay).href)};` +
       `await runClaudeBridge({ command: ${JSON.stringify(process.execPath)}, ` +
       `args: [${JSON.stringify(fixture)}], maxEndedTurns: ${maxEndedTurns} });`],
@@ -235,6 +252,25 @@ test('Claude relay preserves original tool contract and forwards the exact corre
   } finally {
     await bridge.close();
   }
+});
+
+test('the default relay binds real exec hooks and preserves missing-identity errors with PowerShell forbidden', async () => {
+  const bridge = await connectRelay({ noPowerShell: true });
+  try {
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'PreToolUse', session_id: 'no-powershell',
+      prompt_id: 'ready', tool_use_id: 'ready-use' }), quiet);
+    const result = await bridge.client.callTool({ name: 'js', arguments: { code: 'ready-without-powershell' },
+      _meta: { 'claudecode/toolUseId': 'ready-use' } });
+    assert.equal(result.isError, undefined);
+    assert.equal(result.content[0].text, 'ready-without-powershell');
+    assert.ok(bridge.diagnostics().some(e => e.event === 'lifecycle_listen' && e.ok));
+    assert.equal(bridge.diagnostics().some(e => e.reason === 'startup_timeout'), false);
+    const unbound = await bridge.client.callTool({ name: 'js', arguments: { code: 'no-identity' } });
+    assert.equal(unbound.isError, true);
+    assert.match(unbound.content[0].text, /Missing exact Claude PreToolUse identity/);
+    assert.deepEqual(await runHook(bridge.directory, { hook_event_name: 'Stop', session_id: 'no-powershell',
+      prompt_id: 'ready' }), quiet);
+  } finally { await bridge.close(); }
 });
 
 test('exec Stop during slow upstream startup is quiet and publication waits for upstream', async () => {

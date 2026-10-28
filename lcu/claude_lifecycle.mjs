@@ -1,5 +1,5 @@
 // Private lifecycle listener for an already running Claude relay.
-import { execFile } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -9,11 +9,36 @@ import {
 } from './claude_hook.mjs';
 export { deliverLifecycle, endpointPath, registryDirectory } from './claude_hook.mjs';
 
+// Setup/update hardening is separate from the relay hot path. AppData inheritance supplies the baseline.
+function aclInvocation(directory, signal) {
+  // Windows PowerShell must construct its own module path when launched through Node from PS7.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'));
+  return ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    '$ErrorActionPreference="Stop"; $p=$env:LCU_CLAUDE_HOOK_DIRECTORY; $acl=Get-Acl -LiteralPath $p; ' +
+    '$acl.SetAccessRuleProtection($true,$false); foreach($r in @($acl.Access)){$acl.RemoveAccessRuleSpecific($r)}; ' +
+    '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; ' +
+    '$rule=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,"FullControl","ContainerInherit,ObjectInherit","None","Allow"); ' +
+    '$acl.AddAccessRule($rule); Set-Acl -LiteralPath $p -AclObject $acl; $check=Get-Acl -LiteralPath $p; ' +
+    'if(!$check.AreAccessRulesProtected){throw "Unprotected lifecycle directory ACL"}; ' +
+    'foreach($r in $check.Access){if($r.AccessControlType -eq "Allow" -and ' +
+    '$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value)' +
+    '{throw "Foreign lifecycle directory access"}}'],
+    { env: { ...env, LCU_CLAUDE_HOOK_DIRECTORY: directory }, windowsHide: true, timeout: 30_000, signal }];
+}
+
+/** Setup-time defence in depth; relay startup never invokes PowerShell by default. */
+export function hardenLifecycleDirectory(directory, { runAcl = execFileSync } = {}) {
+  mkdirSync(directory, { mode: 0o700, recursive: true });
+  privatePath(directory, true);
+  if (process.platform === 'win32') windowsParents(directory);
+  runAcl(...aclInvocation(directory));
+}
+
 /** Prepare private storage without opening an endpoint or writing a registration. */
 export async function prepareLifecycle({
   directory = registryDirectory(), hostPid = process.ppid, signal,
-  // An execFile-compatible runner lets tests exercise slow Windows ACL startup on every platform.
-  runAcl = process.platform === 'win32' ? execFile : undefined,
+  // Optional asynchronous hardening for callers that request it; the relay uses AppData inheritance.
+  runAcl,
 } = {}) {
   let stage = 'registry_unavailable';
   try {
@@ -23,22 +48,8 @@ export async function prepareLifecycle({
     if (process.platform === 'win32') windowsParents(directory);
     if (runAcl) {
       stage = 'acl_failed';
-      // chmod is not a Windows ACL. New registration files inherit only the current account's full access.
-      // Through Node, Windows PowerShell inherits PS7 module paths and can resolve incompatible cmdlets.
-      // Let powershell.exe construct its own module path (environment keys are case-insensitive on Windows).
-      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'));
-      await new Promise((resolve, reject) => runAcl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-        '$ErrorActionPreference="Stop"; $p=$env:LCU_CLAUDE_HOOK_DIRECTORY; $acl=Get-Acl -LiteralPath $p; ' +
-        '$acl.SetAccessRuleProtection($true,$false); foreach($r in @($acl.Access)){$acl.RemoveAccessRuleSpecific($r)}; ' +
-        '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; ' +
-        '$rule=[System.Security.AccessControl.FileSystemAccessRule]::new($sid,"FullControl","ContainerInherit,ObjectInherit","None","Allow"); ' +
-        '$acl.AddAccessRule($rule); Set-Acl -LiteralPath $p -AclObject $acl; $check=Get-Acl -LiteralPath $p; ' +
-        'if(!$check.AreAccessRulesProtected){throw "Unprotected lifecycle directory ACL"}; ' +
-        'foreach($r in $check.Access){if($r.AccessControlType -eq "Allow" -and ' +
-        '$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value)' +
-        '{throw "Foreign lifecycle directory access"}}'],
-      { env: { ...env, LCU_CLAUDE_HOOK_DIRECTORY: directory }, windowsHide: true, timeout: 30_000, signal },
-      error => error ? reject(error) : resolve()));
+      await new Promise((resolve, reject) => runAcl(...aclInvocation(directory, signal),
+        error => error ? reject(error) : resolve()));
     }
     // Cancellation can win even if an ACL runner completes successfully at the same time.
     signal?.throwIfAborted();
@@ -123,7 +134,8 @@ async function publishLifecycle(handle, { directory, hostPid, signal }) {
       process.off('exit', remove);
       server.close();
       for (const socket of sockets) socket.destroy();
-      try { rmdirSync(directory); } catch {}
+      // Keep setup's hardened Windows directory across relay generations.
+      if (process.platform !== 'win32') { try { rmdirSync(directory); } catch {} }
     } };
   } catch (error) {
     // Fixed categories keep paths, subprocess stderr and hook identities out of diagnostic logs.

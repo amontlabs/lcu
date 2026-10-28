@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { applyChanges, change, json, member, parseJson, readFile, regularPath } from './setup.mjs';
 import { writePrivate } from './cross_turn.mjs';
+import { hardenLifecycleDirectory } from './claude_lifecycle.mjs';
 
 export const HOST_ONLY = ['mcp__lcu__turn_ended', 'mcp__lcu__js_add_node_module_dir', 'mcp__lcu__set_turn_context'];
 // The approval tools the lcu-approve mod calls. They cannot be in `permissions.deny` (a denied MCP tool leaves the
@@ -81,6 +82,7 @@ function installHelper(home) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (process.platform !== 'win32') chmodSync(regularPath(directory), 0o700);
   }
+  if (process.platform === 'win32') hardenLifecycleDirectory(join(dirname(helper), 'hooks'));
   const content = readFileSync(new URL('./claude_hook.mjs', import.meta.url));
   const previous = readFile(helper);
   if (previous === null || !previous.equals(content) ||
