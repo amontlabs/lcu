@@ -401,8 +401,9 @@ The privacy baseline is the standard per-user profile/AppData ACL, allowing the 
 Administrators rather than other unprivileged accounts. This is the chosen Windows trust boundary, not a claim
 that Node audits a manually altered DACL on every launch. Setup and update additionally create and harden only
 the LCU-owned hooks directory with the existing current-SID-only inheritable ACL and verification script.
-They do not change AppData or other user-owned parent ACLs. A hardening error fails setup/refresh through its
-existing error path. The relay leaves this Windows directory in place when it unpublishes its registration,
+They do not change AppData or other user-owned parent ACLs. A hardening error now warns through setup’s
+existing warning output and installation/refresh continues with the AppData inheritance baseline (see the
+review follow-up below). The relay leaves this Windows directory in place when it unpublishes its registration,
 so the setup-time hardening survives subsequent starts. There is no ACL-success marker or per-start ACL probe.
 
 This supersedes the earlier decision to check a DACL on every relay start. That approach's measured cold-start
@@ -449,3 +450,61 @@ Hot-path follow-up validation on macOS arm64, Node 22.22.2, with disposable home
 The Windows-specific no-PowerShell preparation branch is exercised on POSIX by the subprocess probe; the
 actual Windows named pipe, native DACL setup and the unchanged identity-isolation tests remain Windows CI
 checks. No personal configuration or desktop session was used.
+
+
+## PR 66 review follow-up
+
+The unbound-turn shortcut incorrectly skipped upstream prompt closure and child cascading after upstream
+was ready. A parent that never called CUA could Stop while its background child continued using CUA with
+cross-turn off. Cleanup now takes the same path as main, including a restart in progress or a failed restart.
+The existing `sendTurnEnded` check skips the upstream call itself when no upstream exists. The exec helper
+still exits zero with empty output on success or absent routes. Four exec-helper regressions cover children bound before
+and after the unbound parent's Stop, with cross-turn off refusing their calls and cross-turn on preserving
+main's independent child behavior. Running the current regression file against a disposable source copy
+of `0faa88d` fails all four cases; both off-mode cases fail because `js` succeeds after Stop. The startup
+regression separately checks zero upstream cleanup before publication and normal prompt cleanup afterwards.
+
+Setup-time Windows ACL hardening is defence in depth over profile/AppData inheritance. Failure or timeout
+now emits a short warning through `terminal.warn` and continues writing the helper, lifecycle hooks and
+approval mod. Setup and post-install regressions inject both `EACCES` and `ETIMEDOUT` from the ACL runner;
+they check successful configuration, refreshed helper bytes and hook commands, and approval-mod installation.
+The four tests failed before the local catch was added and pass afterwards. The inheritance baseline and
+ACL script remain the Windows choices documented above; this adds no native DACL verification.
+
+A missing registration JSON is republished atomically on an unref'd 60-second interval. Existing files,
+including replacement generations, are left alone; recovery rechecks directory privacy and Windows parent
+links. Closing the listener clears the interval. Deterministic timer tests remove the JSON, advance one
+interval and deliver a hook through the recovered route, then check that shutdown stops repair. Another
+test preserves a replacement and refuses a POSIX directory made public. A deleted socket or directory
+still requires restarting the relay. Node's [timer documentation](https://nodejs.org/api/timers.html#timeoutunref)
+confirms that `unref()` does not keep the process running. The missing-registration test failed before
+repair was added.
+
+Uninstall instructions now name the current Windows AppData hooks directory and the current POSIX
+`/tmp/lcu-claude-<uid>-<home-hash>` directory.
+
+The optional POSIX registry relocation remains deferred. Directly replacing `/tmp` with this macOS
+account's per-user temp root produces a 114-byte socket pathname with the existing short hashed names.
+Node documents [103 usable bytes on macOS](https://nodejs.org/docs/latest-v22.x/api/net.html#ipc-support).
+Shorter names address length but not routing: [os.tmpdir() uses TMPDIR, TMP and TEMP](https://nodejs.org/api/os.html#ostmpdir),
+so relay and helper processes with different overrides can choose different preferred directories. Merely
+having the helper check its own preferred root and `/tmp` does not find a relay published under another
+preferred root. A safe change needs stable discovery or a shared registration location separate from the
+socket root, plus migration tests. This exceeds the requested small follow-up. The known cross-account
+pre-creation denial of service remains; existing owner/mode checks still refuse a foreign directory.
+
+
+Review validation on macOS arm64 used disposable homes/configuration, fake upstream fixtures, and
+240-second process-group limits. The full suites used the locally installed app's Node **24.21.0**:
+
+- Full Node suite: **483 pass, 40 skips, zero failures** (15.5 s).
+- Full adapter suite with the diagnostic-log preload: **254 pass, 8 skips, zero failures** (131.9 s).
+- Python 3.14 unittests: **45 pass** (17.7 s).
+- Focused Claude/setup/update/lifecycle tests on Node **22.22.2**: **103 pass, one native Windows skip** (2.6 s).
+- Final full adapter suite on Node **22.22.2**, after the cleanup simplification: **254 pass, 8 skips,
+  zero failures** (133.2 s).
+- Changed runtime modules pass Node 22 syntax checks; `git diff --check main..HEAD` passes.
+- `tests/run.sh linux/arm64`: blocked at Docker build because the local Docker daemon is unavailable.
+
+No personal configuration, agent credentials or desktop session was used. These fixture checks add no native Windows or original-host
+desktop verification; the prior platform evidence limits remain unchanged.
