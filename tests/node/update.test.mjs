@@ -459,3 +459,23 @@ test('post-install migrates owned user lifecycle hooks without enabling an absen
   await postInstall(t, root, home);
   assert.equal(readFileSync(path, 'utf8'), migrated);
 });
+
+test('post-install refreshes a project-only helper without changing project or user settings', async t => {
+  const { root, home, base } = setup(t);
+  const { install, helperPath } = await import('../../lcu/claude_visibility.mjs');
+  const project = join(base, 'project');
+  const settings = install(home, { project, root });
+  const projectBefore = readFileSync(settings);
+  const helper = helperPath(home);
+  const content = readFileSync(helper);
+  const userSettings = join(home, '.claude/settings.json');
+  for (const user of [null, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'mine' }] }] } })]) {
+    if (user !== null) write(userSettings, user);
+    writeFileSync(helper, '// stale project helper\n');
+    await postInstall(t, root, home);
+    assert.deepEqual(readFileSync(helper), content);
+    assert.deepEqual(readFileSync(settings), projectBefore);
+    if (user === null) assert.equal(existsSync(userSettings), false);
+    else assert.equal(readFileSync(userSettings, 'utf8'), user);
+  }
+});

@@ -105,14 +105,16 @@ export function install(home, { project = null, root = ROOT, node = process.exec
   return path;
 }
 
-/** Updates refresh existing owned user hooks only. Unrecorded project scopes require re-running setup. */
+/** Refresh an existing account helper and owned user hooks. Project settings still require re-running setup. */
 export function refresh(home, root, node = process.execPath) {
+  const hasHelper = readFile(helperPath(home)) !== null;
+  if (hasHelper) installHelper(home);
   const settings = parseJson(readFile(join(home, '.claude/settings.json')));
-  if (!isObject(settings?.hooks)) return false;
+  if (!isObject(settings?.hooks)) return hasHelper;
   const owned = Object.keys(LEGACY).some(event => Array.isArray(settings.hooks[event]) &&
     settings.hooks[event].some(group => isObject(group) && Array.isArray(group.hooks) &&
       group.hooks.some(hook => ownedHandler(event, group, hook, root, home))));
-  if (!owned) return false;
+  if (!owned) return hasHelper;
   install(home, { root, node });
   return true;
 }

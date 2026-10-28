@@ -23,7 +23,7 @@ it does not establish a cause or fix for the separately reported 30-second upstr
 
 The helper bounds stdin at 16 MiB and sends only lifecycle identities, with a 64 KiB IPC limit; long assistant
 messages and tool inputs are not forwarded. `lcu/claude_hook.mjs` is a self-contained script importing only Node
-builtins. Setup and owned user-hook refresh copy it intact to `~/.local/share/lcu/claude/claude-hook.mjs`, or
+builtins. Setup and update refresh copy it intact to `~/.local/share/lcu/claude/claude-hook.mjs`, or
 `<home>\AppData\Local\LCU\claude\claude-hook.mjs` on Windows. It runs directly on the recorded app Node.
 Rollback and release pruning cannot remove that copy. An older relay without lifecycle IPC produces a quiet
 no-op; rerunning older setup restores its MCP lifecycle hooks. Windows app-generation pruning can still remove
@@ -44,7 +44,8 @@ Probes perform no bind or cleanup. Helpers never remove registration files; shut
 
 Git history (`3933e94`, `c3bafd7`, `fe364a9`) confirms the exact published MCP bind/Stop/Interrupt templates and the
 later SubagentStop template. Migration matches those handlers and matchers exactly, preserving foreign handlers,
-extra fields and other settings. Updates refresh existing owned user hooks. Project scopes lack receipts, so
+extra fields and other settings. Updates refresh an existing account-data helper independently of user-hook
+ownership, including project-only installs, and migrate existing owned user hooks. Project scopes lack receipts, so
 one re-setup at each project scope migrates them; no new receipt subsystem was introduced for this fix.
 
 ## Verification
@@ -98,3 +99,29 @@ helper after rollback. Review follow-up adds failing-first regressions for both 
 - The live CLI reproduction against the regenerated hooks and account-data helper passes both absent and
   connected fixture cases (3 s), with zero Stop-hook errors and empty successful hook streams.
 - `git diff --check main..HEAD`: pass after removing the stack dump; this supersedes the earlier limited check.
+
+
+## Installation follow-up
+
+Failing-first regressions reproduced permissive installation under umask `000`, refresh retaining a `0666`
+helper with unchanged bytes, and a project-only helper remaining stale after post-install. Setup now repairs
+only the POSIX LCU-owned `lcu` and `claude` directories to `0700` and uses the existing private atomic writer
+(synced temporary file, explicit `0600`, rename) for helper installation and permission repair. Existing
+`.local/share` and `AppData/Local` parents are not chmodded. Windows retains LCU's normal AppData file-writing
+behavior; no new Windows ACL guarantee is claimed.
+
+Post-install refreshes an existing helper before checking user-hook ownership. Regression coverage confirms that
+project settings remain byte-identical, absent user settings remain absent, and foreign user hooks remain intact.
+Project hook migration still requires re-setup; updating their shared helper does not.
+
+
+Installation follow-up checks used disposable homes and 240-second suite limits:
+
+- Full Node suite: 471 pass, 39 platform skips, no failures (16 s).
+- Full adapter suite: 237 pass, 8 opt-in/platform skips, no failures (132 s).
+- Build tooling and E2E expectation unittests: 45 pass (18 s).
+- Focused Claude/update/private-writer tests on Node 22.22.2: 53 pass.
+- Live CLI fixture checks: absent and connected relay cases pass (3 s).
+- Syntax checks on the 13 changed/new Node modules and `git diff --check main..HEAD`: pass.
+
+These checks add no native Windows or original-host desktop verification.
