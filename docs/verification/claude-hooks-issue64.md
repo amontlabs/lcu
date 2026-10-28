@@ -138,8 +138,10 @@ the real ACL setup to succeed without loading it. ACL protection and verificatio
 publishing a registration; failure does not publish an insecure endpoint.
 
 The Windows Node 22 failure in the transport-refusal test was `spawnSync powershell.exe ETIMEDOUT` during ACL
-setup at 10 seconds, before any named-pipe request. The bounded subprocess timeout is now 30 seconds to allow
-cold Windows PowerShell startup under the concurrent suite. The transport assertions remain enabled.
+setup at 10 seconds, before any named-pipe request. The earlier follow-up raised the subprocess timeout to
+30 seconds for cold Windows PowerShell startup.
+That change left the synchronous event-loop stall in place; the Windows startup follow-up below supersedes it.
+The transport assertions remain enabled.
 
 Lifecycle setup errors now emit `lifecycle_listen` with `ok: false` through the relay's existing diagnostic
 logger and leave MCP connected. A blocked registry directory reproduced `MCP error -32000: Connection closed`
@@ -169,3 +171,61 @@ Local checks on macOS arm64, Node 24.11.1, with `CLAUDE_CONFIG_DIR` unset and di
 The first adapter invocation hit filesystem denials because existing Pi fixtures create temporary directories
 under `HOME`; the complete rerun used a disposable home. Docker's daemon is unavailable, so Linux container
 registration and upgrade gates remain CI checks. These results add no native Windows or desktop verification.
+
+
+## Windows relay startup follow-up
+
+CI run `40608137067`, job `Build tooling and adapters (windows-latest)`, confirms the startup regression:
+Claude relay tests repeatedly took 24–49 seconds, the host-loss test failed its five-second wait for tool
+execution, and the job exhausted its 20-minute budget. `listenLifecycle` called `execFileSync` after the MCP
+transport connected. Cold PowerShell startup blocked the same event loop that serves MCP and notices stdin
+EOF. Raising the timeout allowed a longer freeze; it did not solve the failure.
+
+The ACL runner now uses asynchronous `execFile`, retains its 30-second timeout, and receives the relay's
+shutdown `AbortSignal`. MCP serves while ACL setup runs. Shutdown, stdin EOF, and bridge startup failure
+abort the child. The listener checks cancellation after ACL success and after socket/pipe binding, before
+writing a registration. ACL errors retain the existing non-fatal `lifecycle_listen` diagnostic with
+`ok: false`; no lifecycle endpoint is published. The PSModulePath filtering and account-only inheritable
+ACL rules remain in place. Paths are checked again after the asynchronous ACL step.
+
+We retain ACL hardening and verification on each Windows relay start. A first-use marker would trust an ACL
+that can change later, and moving under AppData would merely assume the parent's current permissions.
+Node's filesystem API does not inspect Windows DACLs. Checking the actual ACL still requires a Windows
+process; retaining the existing script adds less state than a setup cache and a separate verification path.
+The directory remains account-private before any registration token is written. PowerShell startup can
+still delay optional lifecycle availability for up to the bounded timeout; it no longer delays MCP or shutdown.
+
+Primary-source evidence:
+
+- [Node child-process documentation](https://nodejs.org/api/child_process.html#child_processexecfilefile-args-options-callback)
+  documents asynchronous `execFile`, its timeout and AbortSignal options, and the event-loop blocking behavior
+  of `execFileSync`. AbortSignal support predates the minimum supported Node 22 version.
+- [Microsoft Set-Acl documentation](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/set-acl?view=powershell-5.1)
+  describes applying security descriptors and disabling inherited access rules. The existing script continues
+  to remove inherited/explicit rules, grant only the current SID inheritable full control, and verify the result.
+
+Regression coverage injects an execFile-compatible ACL runner on POSIX and Windows. Its real child stays
+alive indefinitely, so the test proves MCP descriptors, correlated tool execution, policy forwarding and ping
+complete while ACL setup is still pending. Closing MCP must kill that child and close the original server
+within three seconds without publishing. The original host-loss test retains its five-second execution-start
+bound and its existing shutdown bound; an additional case holds ACL setup open while an in-flight tool and
+its cleanup ignore cancellation. Listener tests cover publication only after success, failure without IPC,
+and a successful ACL callback racing with cancellation. IPC routing fixtures now wait explicitly for lifecycle
+publication rather than treating MCP initialization as proof of ACL readiness.
+
+Local validation on macOS arm64 used disposable homes, unset `CLAUDE_CONFIG_DIR`, and 240-second suite limits:
+
+- Full Node suite on Node 24.11.1: 473 pass, 40 platform skips, no failures (16 s).
+- Full adapter suite on Node 24.11.1, including its diagnostic-log preload: 240 pass, 8 opt-in/platform skips,
+  no failures (133 s).
+- `python3 -I -m unittest discover -b -s tests -p 'test_*.py'`: 45 pass (18 s).
+- Claude adapter and lifecycle listener suites on Node 22.22.2: 72 pass, one native Windows skip (32 s).
+- In the full adapter run, normal host-loss shutdown took 2.22 s and the slow-ACL variant took 2.21 s.
+  The MCP-serving/ACL-child cancellation regression took 0.27 s. A blocking mutation that inserted a
+  seven-second synchronous child call failed the regression at its three-second MCP initialization timeout;
+  restoring the asynchronous runner passed it.
+- The routing fixture's final cleanup passed its focused Node 22 rerun. Changed modules parse, and
+  `git diff --check main..HEAD` passes.
+
+These checks add no native Windows ACL, named-pipe, or original-host desktop verification; Windows CI must
+exercise the real PowerShell path.
