@@ -91,22 +91,18 @@ for config_path in (home / '.claude.json', project / '.mcp.json'):
     expected = expected_claude_command + (['--audio'] if config_path == home / '.claude.json' else [])
     assert registered['args'] == expected, (config_path, registered)
 
-context_group = next(group for group in user_claude['hooks']['PreToolUse']
-                     if group.get('matcher') == 'mcp__lcu__js|mcp__lcu__js_reset')
-context_hook = context_group['hooks'][0]
-assert (context_hook['type'], context_hook['server'], context_hook['tool']) == (
-    'mcp_tool', 'lcu', 'set_turn_context')
-assert context_hook['input'] == {
-    'session_id': '${session_id}', 'turn_id': '${prompt_id}',
-    'tool_use_id': '${tool_use_id}', 'agent_id': '${agent_id}',
+helper = home / '.local/share/lcu/claude/claude-hook.mjs'
+assert helper.read_bytes() == (prefix / 'current/lcu/claude_hook.mjs').read_bytes()
+assert helper.stat().st_mode & 0o777 == 0o600
+expected_hook = {
+    'type': 'command', 'command': (prefix / 'current/node-path').read_text().strip(),
+    'args': [str(helper)], 'timeout': 600,
 }
-for event, hook_event in (('Stop', 'Stop'), ('StopFailure', 'Interrupt')):
-    cleanup = user_claude['hooks'][event][0]['hooks'][0]
-    assert (cleanup['type'], cleanup['server'], cleanup['tool']) == ('mcp_tool', 'lcu', 'turn_ended')
-    assert cleanup['input'] == {
-        'hook_event_name': hook_event,
-        'session_id': '${session_id}', 'turn_id': '${prompt_id}',
-    }
+for settings in (user_claude, project_claude):
+    for event in ('PreToolUse', 'Stop', 'StopFailure', 'SubagentStop'):
+        group = settings['hooks'][event][0]
+        assert group.get('matcher') == ('mcp__lcu__js|mcp__lcu__js_reset' if event == 'PreToolUse' else None)
+        assert group['hooks'] == [expected_hook], (event, group)
 pi_settings = home / '.pi/agent/settings.json'
 assert pi_settings.is_file(), 'Pi local extension must be registered by its own package manager'
 pi_packages = json.loads(pi_settings.read_text())['packages']

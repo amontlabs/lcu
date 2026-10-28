@@ -30,6 +30,18 @@ class ClaudeHookComparisonTests(unittest.TestCase):
                 self.assertTrue(e2e.diff(old, {**new, 'timeout': 1}, path))
                 self.assertTrue(e2e.diff({**old, 'tool': 'foreign'}, new, path))
                 self.assertTrue(e2e.diff(old, new, path.replace('[0]/hooks', '[1]/hooks')))
+                # The fake app execs this exact real Node; post-install observes it as process.execPath.
+                node = '/opt/hostedtoolcache/node/24.21.0/arm64/bin/node'
+                updated = {**new, 'command': node}
+                self.assertEqual(e2e.diff(old, updated, path, claude_node=node), [])
+                self.assertTrue(e2e.diff(old, {**updated, 'command': '/other/node'}, path, claude_node=node))
+                self.assertTrue(e2e.diff(old, {**updated, 'timeout': 1}, path, claude_node=node))
+                self.assertTrue(e2e.diff(old, {**updated, 'args': ['/other/helper']}, path, claude_node=node))
+                self.assertTrue(e2e.diff({**old, 'tool': 'foreign'}, updated, path, claude_node=node))
+                old_files = {f'HOME/.claude/{settings}': {'json': {'hooks': {event: [{'hooks': [old]}]}}}}
+                new_files = {f'HOME/.claude/{settings}': {'json': {'hooks': {event: [{'hooks': [updated]}]}}}}
+                self.assertEqual(e2e.diff(old_files, new_files, claude_node=node), [])
+                self.assertTrue(e2e.diff(old_files, new_files))
 
 
     def test_persistent_helper_addition_requires_exact_release_bytes_and_mode(self):

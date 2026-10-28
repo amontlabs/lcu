@@ -229,6 +229,7 @@ def remove_stale_accounts():
 
 class Sandbox:
     def __init__(self, work, label, node, *, guard=False, user=None):
+        self.node = node
         self.root = work / label
         self.root.mkdir(mode=0o755)
         self.home, self.project, self.tmp = self.root / 'home', self.root / 'project', self.root / 'tmp'
@@ -450,7 +451,7 @@ EXPECTED_ADDITIONS = (
 )
 
 
-def claude_command_hook(old, event):
+def claude_command_hook(old, event, node):
     """Only the exact shipped lifecycle handler changes; foreign MCP hooks still compare normally."""
     if event == 'PreToolUse':
         legacy = {'type': 'mcp_tool', 'server': 'lcu', 'tool': 'set_turn_context', 'input': {
@@ -460,21 +461,21 @@ def claude_command_hook(old, event):
         legacy = {'type': 'mcp_tool', 'server': 'lcu', 'tool': 'turn_ended', 'input': {
             'hook_event_name': 'Interrupt' if event == 'StopFailure' else event,
             'session_id': '${agent_id}' if event == 'SubagentStop' else '${session_id}', 'turn_id': '${prompt_id}'}}
-    return {'type': 'command', 'command': '<SB>/app/chatgpt/resources/cua_node/bin/node',
+    return {'type': 'command', 'command': node,
             'args': ['<SB>/home/.local/share/lcu/claude/claude-hook.mjs'], 'timeout': 600} if old == legacy else old
 
 
 # Data the port changed on purpose: a difference whose path ends in the first item and whose NEW value equals
 # the OLD value with the second applied is not a difference. Anything else under the path still shows.
 EXPECTED_CHANGES = tuple(
-    (f'/.claude/{settings}/json/hooks/{event}[0]/hooks[0]', lambda old, event=event: claude_command_hook(old, event))
+    (f'/.claude/{settings}/json/hooks/{event}[0]/hooks[0]', lambda old, node, event=event: claude_command_hook(old, event, node))
     for settings in ('settings.json', 'settings.local.json')
     for event in ('PreToolUse', 'Stop', 'StopFailure', 'SubagentStop')
 ) + (
     # The Pi wrapper imports the adapter by plain path on POSIX so Pi-Bolt's compiler can compile it in
     # (Windows keeps the file:// URL; pull/65).
     ('/.local/share/lcu/pi/extension.mjs/code',
-     lambda old: old.replace('importlcufrom"file://', 'importlcufrom"', 1) if isinstance(old, str) else old),
+     lambda old, _node: old.replace('importlcufrom"file://', 'importlcufrom"', 1) if isinstance(old, str) else old),
 )
 
 
@@ -538,9 +539,9 @@ def expected_mod(files, release, normalize):
     return expected
 
 
-def diff(old, new, path='', out=None):
+def diff(old, new, path='', out=None, *, claude_node='<SB>/app/chatgpt/resources/cua_node/bin/node'):
     out = [] if out is None else out
-    if any(path.endswith(suffix) and change(old) == new for suffix, change in EXPECTED_CHANGES):
+    if any(path.endswith(suffix) and change(old, claude_node) == new for suffix, change in EXPECTED_CHANGES):
         return out
     if isinstance(old, dict) and isinstance(new, dict):
         for key in sorted(set(old) | set(new), key=str):
@@ -552,10 +553,10 @@ def diff(old, new, path='', out=None):
                     continue
                 out.append(f'{path}/{key}: only NEW = {short(new[key])}')
             else:
-                diff(old[key], new[key], f'{path}/{key}', out)
+                diff(old[key], new[key], f'{path}/{key}', out, claude_node=claude_node)
     elif isinstance(old, list) and isinstance(new, list) and len(old) == len(new):
         for index, (a, b) in enumerate(zip(old, new)):
-            diff(a, b, f'{path}[{index}]', out)
+            diff(a, b, f'{path}[{index}]', out, claude_node=claude_node)
     elif old != new:
         out.append(f'{path}: OLD = {short(old)} | NEW = {short(new)}')
     return out
@@ -872,7 +873,10 @@ def check_upgrade(sandbox, old, new, mode):
             renamed = version == new.version and old.archive != new.archive  # the self-test compares OLD with itself
             files = expected_renames(before['files']) if renamed else before['files']
             files = expected_mod(files, sandbox.source(new), normalize)  # refreshed by the update, kept by rollback
-            failures.extend(f'{stage}: agent files {line}' for line in diff(files, after['files']))
+            # Setup records the fake app wrapper. Post-install runs on its real Node executable,
+            # so process.execPath is sandbox.node; runtime-only rollback retains those refreshed hooks.
+            failures.extend(f'{stage}: agent files {line}' for line in
+                            diff(files, after['files'], claude_node=normalize(sandbox.node)))
 
     before = observe()
     if agent and (not before['registrations'] or before['missing-paths'] or not before['launch']):

@@ -125,3 +125,47 @@ Installation follow-up checks used disposable homes and 240-second suite limits:
 - Syntax checks on the 13 changed/new Node modules and `git diff --check main..HEAD`: pass.
 
 These checks add no native Windows or original-host desktop verification.
+
+## PR 66 CI follow-up
+
+The failed Windows adapter job reported `Get-Acl` module autoload failure, not an ACL rule mutation error.
+Microsoft's [PSModulePath reference](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_psmodulepath#starting-windows-powershell-from-powershell-7)
+documents this exact launch chain: PowerShell 7 starts an intermediate process (here Node), which passes PS7
+module paths to Windows PowerShell. Unlike a direct launch from PS7, this retains incompatible modules.
+The ACL subprocess now removes only its own inherited `PSModulePath`, case-insensitively, so Windows PowerShell
+constructs its default paths. A Windows-only regression supplies an incompatible security module and requires
+the real ACL setup to succeed without loading it. ACL protection and verification remain required before
+publishing a registration; failure does not publish an insecure endpoint.
+
+The Windows Node 22 failure in the transport-refusal test was `spawnSync powershell.exe ETIMEDOUT` during ACL
+setup at 10 seconds, before any named-pipe request. The bounded subprocess timeout is now 30 seconds to allow
+cold Windows PowerShell startup under the concurrent suite. The transport assertions remain enabled.
+
+Lifecycle setup errors now emit `lifecycle_listen` with `ok: false` through the relay's existing diagnostic
+logger and leave MCP connected. A blocked registry directory reproduced `MCP error -32000: Connection closed`
+before the change. The same regression now checks original tool descriptors, instructions, correlated tool
+execution, caller policy preservation, and a silent absent-route hook. Listener publication failure also
+destroys any sockets opened before failure.
+
+Both Linux registration jobs still read the removed `server`, `tool`, and `input` fields. The container
+registration check now verifies the exact exec-form command, installed Node, helper bytes and private mode
+for all four events in both user and project settings. Searches found no other stale lifecycle shape
+assertions in the container scripts; the E2E fixtures retain legacy handlers deliberately for migration checks.
+
+Both upgrade E2E jobs differed only on the four migrated lifecycle handlers, after update and after rollback.
+The existing comparator expected the fake app's shell wrapper as the command. Post-install observes the exact
+real Node executable that wrapper execs as `process.execPath`. Upgrade comparisons now pass that fixture Node
+to the existing exact handler expectations; setup comparisons retain the app wrapper expectation. Runtime-only
+rollback intentionally retains the refreshed helper and command hooks. Regression checks still reject a
+different Node, helper path, timeout, handler position, or foreign MCP hook.
+
+Local checks on macOS arm64, Node 24.11.1, with `CLAUDE_CONFIG_DIR` unset and disposable suite homes:
+
+- Full Node suite: 471 pass, 40 platform skips, no failures (14 s). The new native Windows ACL check is one skip.
+- Full adapter suite via `npm test --prefix adapters`: 238 pass, 8 opt-in/platform skips, no failures (132 s).
+- `python3 -I -m unittest discover -b -s tests -p 'test_*.py'`: 45 pass (15 s).
+- Changed Node and Python files parse; `git diff --check main..HEAD` and the uncommitted diff pass.
+
+The first adapter invocation hit filesystem denials because existing Pi fixtures create temporary directories
+under `HOME`; the complete rerun used a disposable home. Docker's daemon is unavailable, so Linux container
+registration and upgrade gates remain CI checks. These results add no native Windows or desktop verification.
