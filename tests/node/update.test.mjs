@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import * as update from '../../lcu/update.mjs';
+import * as visibility from '../../lcu/claude_visibility.mjs';
+import { hardenLifecycleDirectory } from '../../lcu/claude_lifecycle.mjs';
 import { override, temporary, write, mockWrite } from './fixtures.mjs';
 
 const INFO = { version: '0.9.2', tag: 'v0.9.2', severity: 'normal', release_url: 'https://github.com/amontlabs/lcu/releases/tag/v0.9.2' };
@@ -479,3 +481,27 @@ test('post-install refreshes a project-only helper without changing project or u
     else assert.equal(readFileSync(userSettings, 'utf8'), user);
   }
 });
+
+for (const code of ['EACCES', 'ETIMEDOUT']) {
+  test(`post-install refreshes the helper and owned hooks when ACL hardening fails with ${code}`, async t => {
+    const { root, home } = setup(t);
+    visibility.install(home, { root });
+    const helper = visibility.helperPath(home);
+    writeFileSync(helper, '// stale helper\n');
+    const settingsPath = join(home, '.claude/settings.json');
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    settings.hooks.Stop[0].hooks[0].command = join(home, 'old-node');
+    writeFileSync(settingsPath, JSON.stringify(settings));
+    let attempts = 0;
+    override(t, visibility.seams, 'harden', directory => hardenLifecycleDirectory(directory, { runAcl() {
+      attempts++;
+      throw Object.assign(new Error('injected ACL failure'), { code });
+    } }));
+    const [, err] = await postInstall(t, root, home);
+    assert.ok(attempts > 0);
+    assert.match(err, /Claude Code: could not harden lifecycle directory; continuing with inherited AppData permissions/);
+    assert.doesNotMatch(err, /could not refresh lifecycle hooks/);
+    assert.deepEqual(readFileSync(helper), readFileSync(new URL('../../lcu/claude_hook.mjs', import.meta.url)));
+    assert.deepEqual(JSON.parse(readFileSync(settingsPath, 'utf8')).hooks.Stop[0], visibility.lifecycleHooks(home).Stop);
+  });
+}

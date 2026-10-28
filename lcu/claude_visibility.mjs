@@ -7,6 +7,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { applyChanges, change, json, member, parseJson, readFile, regularPath } from './setup.mjs';
 import { writePrivate } from './cross_turn.mjs';
 import { hardenLifecycleDirectory } from './claude_lifecycle.mjs';
+import { warn } from './terminal.mjs';
 
 export const HOST_ONLY = ['mcp__lcu__turn_ended', 'mcp__lcu__js_add_node_module_dir', 'mcp__lcu__set_turn_context'];
 // The approval tools the lcu-approve mod calls. They cannot be in `permissions.deny` (a denied MCP tool leaves the
@@ -24,6 +25,11 @@ const LEGACY = {
   StopFailure: turnEnded('Interrupt', '${session_id}'),
   SubagentStop: turnEnded('SubagentStop', '${agent_id}'),
 };
+
+// Setup/update alone harden the Windows directory; tests can inject a failing ACL runner.
+export const seams = { harden(directory) {
+  if (process.platform === 'win32') hardenLifecycleDirectory(directory);
+} };
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const stableRoot = (root) => basename(dirname(root)) === 'releases' ? join(dirname(dirname(root)), 'current') : root;
@@ -82,7 +88,11 @@ function installHelper(home) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (process.platform !== 'win32') chmodSync(regularPath(directory), 0o700);
   }
-  if (process.platform === 'win32') hardenLifecycleDirectory(join(dirname(helper), 'hooks'));
+  try {
+    seams.harden(join(dirname(helper), 'hooks'));
+  } catch {
+    warn('Claude Code: could not harden lifecycle directory; continuing with inherited AppData permissions.');
+  }
   const content = readFileSync(new URL('./claude_hook.mjs', import.meta.url));
   const previous = readFile(helper);
   if (previous === null || !previous.equals(content) ||

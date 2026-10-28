@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url';
 import { AppsError } from '../../lcu/apps.mjs';
 import { question } from '../../lcu/cross_turn.mjs';
 import * as setup from '../../lcu/setup.mjs';
+import * as visibility from '../../lcu/claude_visibility.mjs';
+import { hardenLifecycleDirectory } from '../../lcu/claude_lifecycle.mjs';
 import { REPO, output, override, posixTests, result, temporary, write } from './fixtures.mjs';
 
 const test = posixTests('Linux/macOS setup (POSIX accounts with uid/gid, sh launchers)');
@@ -406,6 +408,30 @@ test('Claude Code registration forwards the command through the relay and instal
   assert.ok(existsSync(join(r.home, '.claude/skills/lcu-approve/.claude-plugin/plugin.json')));
   assert.ok(existsSync(join(project, '.claude/skills/lcu-approve/hooks/register.tsx')));
 });
+
+for (const code of ['EACCES', 'ETIMEDOUT']) {
+  test(`Claude setup completes helper, hooks and approval mod installation when ACL hardening fails with ${code}`, async t => {
+    const r = release(t);
+    write(join(r.release, 'adapters/claude.mjs'), 'fixture relay');
+    cpSync(join(REPO, 'adapters/claude-mod'), join(r.release, 'adapters/claude-mod'), { recursive: true });
+    let attempts = 0;
+    override(t, visibility.seams, 'harden', directory => hardenLifecycleDirectory(directory, { runAcl() {
+      attempts++;
+      throw Object.assign(new Error('injected ACL failure'), { code });
+    } }));
+    override(t, setup.seams, 'run', () => result(0, '{}'));
+    const seen = await output(t);
+    const failures = await setup.configure(['claude-code'], r.home, ['/usr/bin/lcu'], r.tools, r.release,
+      { scope: 'user', environ: { HOME: r.home } });
+    assert.deepEqual(failures, []);
+    assert.equal(attempts, 1);
+    assert.match(seen.err, /Claude Code: could not harden lifecycle directory; continuing with inherited AppData permissions/);
+    assert.deepEqual(readFileSync(visibility.helperPath(r.home)), readFileSync(join(REPO, 'lcu/claude_hook.mjs')));
+    const settings = JSON.parse(readFileSync(join(r.home, '.claude/settings.json'), 'utf8'));
+    assert.deepEqual(settings.hooks.Stop[0], visibility.lifecycleHooks(r.home, r.node).Stop);
+    assert.ok(existsSync(join(r.home, '.claude/skills/lcu-approve/hooks/register.tsx')));
+  });
+}
 
 test('Codex registration wraps the command in the relay and carries the host policy', async (t) => {
   const r = release(t);
