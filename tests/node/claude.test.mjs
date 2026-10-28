@@ -19,7 +19,7 @@ test('the shipped mod is a function-hook plugin for the lcu server', () => {
   assert.deepEqual(JSON.parse(readFileSync(join(MOD, 'hooks/hooks.json'), 'utf8')), { modules: ['./register.tsx'] });
   const source = readFileSync(join(MOD, 'hooks/register.tsx'), 'utf8');
   assert.ok(source.includes("const SERVER = 'lcu'"));
-  for (const event of ["'classic.Elicitation'", "'tool.call'", "'tool.check'", "'ui.render'", "'computer-use-apps'"]) assert.ok(source.includes(event), event);
+  for (const event of ["'classic.Elicitation'", "'session.start'", "'prompt.submit'", "'tool.call'", "'tool.check'", "'ui.render'", "'computer-use-apps'"]) assert.ok(source.includes(event), event);
 });
 
 test('user-scope install is idempotent, omits the mod tests and records the lcu command', (t) => {

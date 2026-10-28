@@ -163,25 +163,24 @@ export const register: Register = on => {
 
   // A release published while the session is open: the cache refreshes in the background, so the first
   // prompt and then at most one check per NOTICE_RECHECK_MS reads it; each version is announced once per
-  // session, and once a day across the account.
+  // session, and once a day across the account. The check runs before the prompt enters, so no hook of the mod
+  // is still in flight once the turn has started (the Claude app delivers a pane's presses only then).
   on('prompt.submit', async ($, e, next) => {
-    const result = await next(e)
     try {
       const session = await sessionId($)
       const state = sessionState(session)
       const at = await now($)
-      if (state.lastCheck !== undefined && at - state.lastCheck < NOTICE_RECHECK_MS) return result
-      state.lastCheck = at
-      const notice = await updateNotice($, session)
-      if (!notice) return result
-      const version = notice.latest ?? notice.message
-      if (version === state.announced) return result
-      state.announced = version
-      await toast($, notice)
-      return result
-    } catch {
-      return result
-    }
+      if (state.lastCheck === undefined || at - state.lastCheck >= NOTICE_RECHECK_MS) {
+        state.lastCheck = at
+        const notice = await updateNotice($, session)
+        const version = notice && (notice.latest ?? notice.message)
+        if (notice && version !== state.announced) {
+          state.announced = version
+          await toast($, notice)
+        }
+      }
+    } catch {}
+    return next(e)
   })
 
   on('command.run', { command: APPS_COMMAND }, async $ => {
