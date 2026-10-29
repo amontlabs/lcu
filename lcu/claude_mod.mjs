@@ -14,6 +14,8 @@ const SOURCE = join('adapters/claude-mod', NAME);
 const MANIFEST = '.claude-plugin/plugin.json';
 // Written beside the mod at install time: where the `lcu` command of this installation is.
 const CONFIG = 'lcu.json';
+// Where the mod looks for `lcu` without that file, under `$HOME` (DEFAULT_LCU in hooks/data.ts).
+const DEFAULT_LCU = '.local/share/lcu/current/bin/lcu';
 
 /** Every file and directory under `root`, deepest first. */
 const walk = (root) => readdirSync(root, { recursive: true }).map((name) => join(root, name)).sort().reverse();
@@ -62,8 +64,11 @@ export function install(home, releaseRoot, { project = null } = {}) {
   const target = writtenDestination(home, project);
   if (existsSync(target) && !owned(target)) throw new Error(`${target} exists and is not the LCU mod; move it aside, then rerun setup.`);
   const files = sourceFiles(releaseRoot);
-  // The approved-apps panel runs `lcu apps`; this is where it finds the command.
-  files[CONFIG] = Buffer.from(json({ lcu: lcuCommand(releaseRoot) }));
+  // The approved-apps panel runs `lcu apps`; this is where it finds the command. None is needed when the mod's
+  // `$HOME` fallback finds it, so a default install writes the same bytes on every machine (a skills folder kept in a
+  // repository stays clean).
+  const command = lcuCommand(releaseRoot);
+  if (!process.env.HOME || command !== join(process.env.HOME, DEFAULT_LCU)) files[CONFIG] = Buffer.from(json({ lcu: command }));
   applyChanges(Object.entries(files).map(([name, data]) => change(join(target, name), readFile(join(target, name)), data)));
   // Drop files an earlier release shipped and this one does not.
   if (existsSync(target) && statSync(target).isDirectory()) {

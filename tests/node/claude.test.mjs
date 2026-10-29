@@ -35,6 +35,16 @@ test('user-scope install is idempotent, omits the mod tests and records the lcu 
   const release = join(home, 'prefix/releases/1.0-abc');
   cpSync(MOD, join(release, 'adapters/claude-mod/lcu-approve'), { recursive: true, filter: (path) => basename(path) !== 'tests' });
   assert.deepEqual(JSON.parse(readFileSync(join(mod.install(home, release), 'lcu.json'), 'utf8')), { lcu: join(home, 'prefix/current/bin/lcu') });
+  // The default prefix under $HOME needs no lcu.json (the mod falls back to it); a reinstall there drops an earlier one.
+  const standard = join(home, '.local/share/lcu/releases/1.0-abc');
+  cpSync(MOD, join(standard, 'adapters/claude-mod/lcu-approve'), { recursive: true, filter: (path) => basename(path) !== 'tests' });
+  const saved = process.env.HOME;
+  t.after(() => { if (saved === undefined) delete process.env.HOME; else process.env.HOME = saved; });
+  process.env.HOME = home;
+  assert.equal(existsSync(join(mod.install(home, standard), 'lcu.json')), false);
+  // Without $HOME the mod has no fallback, so the path is recorded.
+  delete process.env.HOME;
+  assert.deepEqual(JSON.parse(readFileSync(join(mod.install(home, standard), 'lcu.json'), 'utf8')), { lcu: join(home, '.local/share/lcu/current/bin/lcu') });
 });
 
 test('project scope installs under the project; a reinstall replaces changed and drops stale files', (t) => {
