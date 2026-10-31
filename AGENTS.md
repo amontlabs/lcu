@@ -11,3 +11,5 @@ Keep the installer compatible with the documented Luda-style options. Prefer ups
 For the task-owned macOS verification guest, follow [`docs/verification/macos-test-guest-access.md`](docs/verification/macos-test-guest-access.md). Consult `.verification/private/README.md` before asking the user for guest credentials; keep the credential private.
 
 The port of LCU from Python to the app's Node follows [`docs/REMOVE-PYTHON.md`](docs/REMOVE-PYTHON.md): its goal, what must and may change, and how it is tested.
+
+Never add caching to a GitHub workflow: no `actions/cache`, no `cache:` or package-manager cache on setup actions, and no root `package.json` with a `packageManager` field, which turns on `setup-node`'s automatic cache. A job that runs an agent on `main` must be assumed able to write cache entries, and any later job that restores one would run the agent's content with its own secrets and permissions. Keep `no-cache` and `package-manager-cache: false` where they are set.
