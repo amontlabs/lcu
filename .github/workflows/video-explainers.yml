@@ -17,10 +17,11 @@
 #
 # Every action is pinned to a full commit SHA, and the presenter plugin is
 # checked out at the same commit as the publishing action. Update them
-# together. anthropics/claude-code-action does not run on `push` or `release`
-# events, so the writing job uses its base-action, the same Claude Code runner
-# without the event handling. Claude starts in a merged commit on main or a
-# release tag, and the prompt holds only a commit SHA or a tag.
+# together. The writing job runs a pinned Claude Code with `claude -p` rather
+# than anthropics/claude-code-action: that action does not run on `push` or
+# `release` events, and the API credits included with a Claude plan do not
+# cover it. Claude starts in a merged commit on main or a release tag, and the
+# prompt holds only a commit SHA or a tag.
 name: Video explainers
 
 on:
@@ -93,17 +94,16 @@ jobs:
           package-manager-cache: false
       - run: node .presenter/action/src/install-bisque-voice.ts
 
-      - uses: anthropics/claude-code-action/base-action@6d5ae526d25ce88daa2200be073e1a373167f064 # v1.0.265
+      - name: Install Claude Code
+        run: npm install -g --no-fund --no-audit @anthropic-ai/claude-code@2.1.314
+
+      # The result goes to a file, not the public log, which shows only the
+      # outcome and any error.
+      - name: Write the explainer
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ github.token }} # read-only, for `gh release view`
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          plugin_marketplaces: ./.presenter
-          plugins: presenter@bisque-cloud
-          claude_args: >-
-            --allowedTools Bash,Read,Write,Edit,Glob,Grep,WebFetch,Skill
-            --max-turns 150
-          prompt: |
+          PROMPT: |
             Use the present skill to explain ${{ needs.subject.outputs.task }}.
             Explain it to someone who uses ${{ github.repository }} and did
             not write the change: what changes for them, and why.
@@ -119,6 +119,18 @@ jobs:
             fix what it and the other checks find, and run them again until
             they are clean. Leave `audio/` in the folder. Do not run `login`
             or `publish`; the next job publishes the folder.
+        run: |
+          claude plugin marketplace add ./.presenter
+          claude plugin install presenter@bisque-cloud
+          result="$RUNNER_TEMP/claude-result.json"
+          status=0
+          claude -p "$PROMPT" \
+            --allowedTools Bash,Read,Write,Edit,Glob,Grep,WebFetch,Skill \
+            --max-turns 150 --output-format json < /dev/null > "$result" || status=$?
+          jq 'if type == "array" then last else . end
+            | {subtype, is_error, num_turns, total_cost_usd}
+              + (if .is_error then {result} else {} end)' "$result" || status=1
+          exit "$status"
 
       - id: check
         run: |
