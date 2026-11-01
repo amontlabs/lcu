@@ -8,6 +8,8 @@
 // Request (JSON on stdin):
 //   {op: 'host', source}      locate the native-pipe host factory and emit its module
 //   {op: 'requires', files}   list the require() specifiers of each {member: source}
+//   {op: 'webpack', entry, chunks, roots}
+//                             derive the webpack runtime that serves a host found in a webpack module
 // Response (JSON on stdout): {ok: true, ...} or {ok: false, error}.
 
 const {isBuiltin} = require('node:module');
@@ -16,6 +18,7 @@ const acorn = require('./vendor/acorn/acorn.js');
 const FACTORY_OPTIONS = ['codexCliPath', 'nativePipeDirectory', 'windowsHelperPath',
   'windowsHelperTransportModulePath'];
 const FACTORY_MARKERS = ['closeActiveTurn', 'nativePipeDirectory'];
+const WEBPACK_RUNTIME = 'lcu-webpack-runtime.cjs';
 
 class Unsupported extends Error {}
 
@@ -112,6 +115,12 @@ class Scan {
     this.problems = new Set();
     this.memberWritten = new Set();
     this.depth = 0;
+    // Set for webpack module code: the module's require parameter, and what it reaches. `eager`
+    // runs when the module loads; `lazy` only if the function around it is called.
+    this.webpackRequire = null;
+    this.eager = new Set();
+    this.lazy = new Set();
+    this.eagerRequires = new Set();
   }
 
   bound(name) {
@@ -252,10 +261,22 @@ class Scan {
       this.free.add('require');
       const spec = node.arguments.length === 1 ? staticString(node.arguments[0]) : null;
       if (spec !== null) this.requires.add(spec); else this.problems.add('require() with a non-literal argument');
+      if (spec !== null && this.depth === 0) this.eagerRequires.add(spec);
       for (const argument of node.arguments) this.visit(argument);
       return;
     }
+    if (this.webpackRequire !== null && !this.bound(this.webpackRequire)) this.noteWebpackCall(node);
     this.children(node);
+  }
+
+  noteWebpackCall(node) {
+    const {callee, arguments: args} = node;
+    const direct = callee.type === 'Identifier' && callee.name === this.webpackRequire;
+    const bound = callee.type === 'MemberExpression' && !callee.computed && callee.property.name === 'bind' &&
+      callee.object.type === 'Identifier' && callee.object.name === this.webpackRequire;
+    const id = args[direct ? 0 : 1];
+    if ((!direct && !bound) || id?.type !== 'Literal' || typeof id.value !== 'number') return;
+    (direct && this.depth === 0 ? this.eager : this.lazy).add(id.value);
   }
 
   onFunction(node) {
@@ -395,12 +416,14 @@ function isRequireCall(node) {
     node.arguments.length === 1 && staticString(node.arguments[0]) !== null;
 }
 
-function entriesOf(program) {
+function entriesOf(program, webpackRequire) {
   const entries = [];
+  const newScan = () => Object.assign(new Scan(), {webpackRequire});
   const add = (entry, scan) => {
     entry.free = scan.free; entry.written = scan.written;
     entry.requires = scan.requires; entry.imports = scan.imports; entry.problems = scan.problems;
     entry.memberWritten = scan.memberWritten;
+    entry.eager = scan.eager; entry.lazy = scan.lazy;
     if (entry.names.includes('require') || entry.names.includes('eval')) {
       scan.problems.add('a binding named require or eval, which hides dependencies');
     }
@@ -408,14 +431,14 @@ function entriesOf(program) {
     entries.push(entry);
   };
   for (const statement of program.body) {
-    const scan = new Scan();
+    const scan = newScan();
     if (statement.type === 'FunctionDeclaration' || statement.type === 'ClassDeclaration') {
       scan.visit(statement);
       add({kind: statement.type === 'ClassDeclaration' ? 'class' : 'function', names: [statement.id.name],
         node: statement, text: null}, scan);
     } else if (statement.type === 'VariableDeclaration') {
       for (const d of statement.declarations) {
-        const declaratorScan = new Scan();
+        const declaratorScan = newScan();
         declaratorScan.declPattern(d.id);
         declaratorScan.visit(d.init);
         add({kind: statement.kind, names: patternNames(d.id, []), node: d, declaration: statement}, declaratorScan);
@@ -429,9 +452,77 @@ function entriesOf(program) {
   return entries;
 }
 
-function hostModule(source) {
+// The webpack module table of a chunk (`exports.ids=[...],exports.modules={...}`) or of the
+// entry (a `var` of the runtime's function): an object whose every key is a numeric module id.
+function isModuleTable(node) {
+  return node?.type === 'ObjectExpression' && node.properties.length > 0 && node.properties.every(property =>
+    property.type === 'Property' && property.key.type === 'Literal' && typeof property.key.value === 'number' &&
+    /^(?:Arrow)?FunctionExpression$/.test(property.value.type));
+}
+
+// A chunk or entry is one statement, after any "use strict" directive.
+function soleStatement(program) {
+  const statements = program.body.filter(statement => !statement.directive);
+  return statements.length === 1 ? statements[0] : null;
+}
+
+function chunkExports(program) {
+  const statement = soleStatement(program);
+  if (statement?.type !== 'ExpressionStatement') return {};
+  const {expression} = statement;
+  const found = {};
+  for (const part of expression.type === 'SequenceExpression' ? expression.expressions : [expression]) {
+    if (part.type !== 'AssignmentExpression' || part.left.type !== 'MemberExpression' ||
+        part.left.object.name !== 'exports') continue;
+    found[part.left.property.name] = part.right;
+  }
+  return found;
+}
+
+// The entry's runtime function: `(()=>{var ...;function r(id){...}...;var o=r(N);module.exports=o})()`.
+function entryRuntime(program) {
+  const statement = soleStatement(program);
+  const call = statement?.type === 'ExpressionStatement' ? statement.expression : null;
+  const body = call?.type === 'CallExpression' && call.arguments.length === 0 ? call.callee.body?.body : null;
+  if (!Array.isArray(body) || body.length < 3) return null;
+  const [start, finish] = body.slice(-2);
+  const [startup] = start.type === 'VariableDeclaration' ? start.declarations : [];
+  const value = finish.type === 'ExpressionStatement' && finish.expression.type === 'AssignmentExpression' ? finish.expression : null;
+  if (startup?.init?.type !== 'CallExpression' || startup.init.callee.type !== 'Identifier' || !value ||
+      value.left.type !== 'MemberExpression' || value.left.object.name !== 'module' || value.left.property.name !== 'exports' ||
+      value.right.type !== 'Identifier' || value.right.name !== startup.id.name) return null;
+  return {body, start, finish, require: startup.init.callee.name};
+}
+
+function moduleTables(program) {
+  const tables = [chunkExports(program).modules];
+  for (const statement of entryRuntime(program)?.body ?? []) {
+    if (statement.type === 'VariableDeclaration') tables.push(...statement.declarations.map(item => item.init));
+  }
+  return tables.filter(isModuleTable);
+}
+
+// A webpack module's body is a program with one extra import, its require parameter: the one
+// module holding the factory goes through the same extraction, its require served by the
+// runtime the installer derives from the app's entry (`op: 'webpack'`). Its other parameters
+// stay undeclared, so needing one is an unresolved identifier and stops the install.
+function webpackHost(program, source) {
+  const holders = moduleTables(program).flatMap(table => table.properties.map(property => property.value))
+    .filter(fn => fn.body.type === 'BlockStatement' && fn.body.body.some(isFactory));
+  const factories = holders.flatMap(fn => fn.body.body.filter(isFactory));
+  if (factories.length !== 1) return {ok: true, matches: factories.length};
+  const [fn] = holders;
+  const parameter = fn.params[2];
+  if (parameter?.type !== 'Identifier') throw new Unsupported('the webpack module of the native-pipe host has no require parameter');
+  const strict = [program.body[0], fn.body.body[0]].some(item => item?.directive === 'use strict') ? '"use strict";' : '';
+  const body = source.slice(fn.body.start + 1, fn.body.end - 1);
+  return hostModule(`${strict}const ${parameter.name}=require("./${WEBPACK_RUNTIME}");\n${body}`, parameter.name);
+}
+
+function hostModule(source, webpackRequire = null) {
   const program = parse(source);
   const matches = program.body.filter(isFactory);
+  if (!matches.length && webpackRequire === null) return webpackHost(program, source);
   if (matches.length !== 1) return {ok: true, matches: matches.length};
   const factory = matches[0];
   const factorySource = source.slice(factory.start, factory.end);
@@ -440,7 +531,7 @@ function hostModule(source) {
       return {ok: false, error: `the native-pipe host factory no longer exposes ${marker}`};
     }
   }
-  const entries = entriesOf(program);
+  const entries = entriesOf(program, webpackRequire);
   const providers = new Map();
   for (const entry of entries) {
     if (entry.kind === 'assign' || entry.kind === 'other') continue;
@@ -544,8 +635,83 @@ function hostModule(source) {
     pieces.push(text);
   }
   pieces.push(`module.exports = ${factory.id.name};`, '');
+  specs.delete(`./${WEBPACK_RUNTIME}`);
   return {ok: true, matches: 1, factory: factory.id.name, uncarried, module: pieces.join('\n'),
-    requires: [...specs].sort().map(classify), imports: [...imports].sort().map(classify)};
+    requires: [...specs].sort().map(classify), imports: [...imports].sort().map(classify),
+    ...(webpackRequire === null ? {} : {webpack: {eager: moduleIds(ordered, 'eager'), lazy: moduleIds(ordered, 'lazy')}})};
+}
+
+const moduleIds = (entries, kind) => [...new Set(entries.flatMap(entry => [...entry[kind]]))].sort((a, b) => a - b);
+
+function scanModule(fn) {
+  const scan = Object.assign(new Scan(), {webpackRequire: fn.params[2]?.name ?? null});
+  scan.scoped(fn.params.slice(0, 2).flatMap(parameter => patternNames(parameter, [])), () => {
+    if (fn.body.type === 'BlockStatement') scan.program(fn.body); else scan.visit(fn.body);
+  });
+  return scan;
+}
+
+// The app's own entry with its last statements, which start the app, replaced: it registers
+// every chunk (their modules only run when required) and exports the webpack require instead.
+// The walk from the host's `eager` and `lazy` modules refuses what it could not run on the
+// original Node, and returns the packages that loading it requires.
+function webpackRuntime({entry, chunks, eager, lazy}) {
+  const program = parse(entry);
+  const runtime = entryRuntime(program);
+  if (!runtime) throw new Unsupported('the webpack entry does not have the expected runtime shape');
+  const assigned = new Set();
+  visitAssignments(runtime.body, runtime.require, name => assigned.add(name));
+  if (!assigned.has('e') || !assigned.has('f.require')) throw new Unsupported('the webpack entry has no synchronous chunk loader');
+  const modules = new Map();
+  const register = table => { for (const {key, value} of table.properties) modules.set(key.value, value); };
+  moduleTables(program).forEach(register);
+  const ids = [];
+  for (const [name, source] of Object.entries(chunks)) {
+    const chunk = parse(source);
+    const {ids: listed, modules: table} = chunkExports(chunk);
+    if (listed?.type !== 'ArrayExpression' || !isModuleTable(table)) throw new Unsupported(`${name} is not a webpack chunk`);
+    ids.push(...listed.elements.map(element => element.value));
+    register(table);
+  }
+  const scans = new Map();
+  const scanOf = id => {
+    if (!scans.has(id)) scans.set(id, modules.has(id) ? scanModule(modules.get(id)) : null);
+    return scans.get(id);
+  };
+  const reached = (roots, follow) => {
+    const seen = new Set(roots);
+    for (const id of seen) for (const next of follow(id)) seen.add(next);
+    return seen;
+  };
+  const loaded = reached(eager, id => {
+    if (!modules.has(id)) throw new Unsupported(`the native-pipe host needs webpack module ${id}, which no chunk provides`);
+    return scanOf(id).eager;
+  });
+  // A lazy call is only a candidate: a call site can be unused, or guard a package the Electron app alone has.
+  for (const id of reached([...eager, ...lazy], id => (scanOf(id) ? [...scanOf(id).eager, ...scanOf(id).lazy] : []))) {
+    const scan = scanOf(id);
+    if (!scan) continue;
+    if ([...scan.requires].some(spec => spec === 'electron' || spec.startsWith('electron/'))) {
+      throw new Unsupported(`the native-pipe host depends on Electron through webpack module ${id}`);
+    }
+  }
+  const packages = new Set([...loaded].flatMap(id => [...scanOf(id).eagerRequires]).filter(spec => !isBuiltin(spec)));
+  const registered = ids.sort((a, b) => a - b).map(id => `${runtime.require}.e(${id});`).join('');
+  return {ok: true, packages: [...packages].sort(),
+    runtime: `${entry.slice(0, runtime.start.start)}${registered}module.exports=${runtime.require};${entry.slice(runtime.finish.end)}`};
+}
+
+function visitAssignments(statements, name, found) {
+  for (const statement of statements) {
+    const {expression} = statement;
+    for (const part of expression?.type === 'SequenceExpression' ? expression.expressions : [expression]) {
+      if (part?.type !== 'AssignmentExpression' || part.left.type !== 'MemberExpression') continue;
+      const path = [];
+      let target = part.left;
+      while (target.type === 'MemberExpression' && !target.computed) { path.unshift(target.property.name); target = target.object; }
+      if (target.type === 'Identifier' && target.name === name) found(path.join('.'));
+    }
+  }
 }
 
 function main(request) {
@@ -553,6 +719,7 @@ function main(request) {
   if (request.op === 'requires' && request.files && typeof request.files === 'object') {
     return listRequires(request.files);
   }
+  if (request.op === 'webpack' && typeof request.entry === 'string') return webpackRuntime(request);
   throw new Unsupported('unknown analyzer request');
 }
 

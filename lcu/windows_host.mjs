@@ -2,8 +2,9 @@
 //
 // Only the tiny launch entry and the structural analyzer are LCU code. The native host and its dependencies
 // come unchanged from the installed application's app.asar. The host factory is located by structure (a
-// parsed top-level function whose options are the native-pipe settings), never by a minified name, and the
-// declarations it needs are copied verbatim into one generated module.
+// parsed function whose options are the native-pipe settings, at the top level of a bundle or of a webpack
+// module), never by a minified or file name, and the declarations it needs are copied verbatim into one
+// generated module.
 // Builtins come from process.getBuiltinModule, like the rest of the launch path.
 const { spawn, spawnSync } = process.getBuiltinModule('node:child_process');
 const { lstatSync, mkdirSync, readFileSync, writeFileSync } = process.getBuiltinModule('node:fs');
@@ -15,9 +16,11 @@ import { isFile } from './fsutil.mjs';
 import { component } from './windows.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MAIN_PATH = /^\.vite\/build\/main(?:-[^/]+)?\.js$/;
+const BUNDLE_PATH = /^\.vite\/build\/[^/]+\.js$/;
+const FACTORY_OPTIONS = ['codexCliPath', 'nativePipeDirectory', 'windowsHelperPath', 'windowsHelperTransportModulePath'];
 const ANALYZER = join(HERE, 'windows_host_analyze.cjs');
 const GENERATED = 'lcu-original-pipe-host.cjs';
+const WEBPACK_RUNTIME = 'lcu-webpack-runtime.cjs';
 const RESOLVED_SUFFIXES = ['', '.js', '.json', '.node', '/package.json', '/index.js', '/index.json', '/index.node'];
 const MAX_CHUNKS = 400;
 const NODE_MEMBER = 'app/resources/cua_node/bin/node.exe';
@@ -105,23 +108,51 @@ export function planOriginalHost(app, { node } = {}) {
   return planOriginalAsar(archive, { node: node ?? component(app, NODE_MEMBER) });
 }
 
+/** The bundles that name every factory option; parsing the others would only slow the install. */
+function factoryCandidates(archive, members) {
+  const bundles = [...members].filter((member) => BUNDLE_PATH.test(member)).sort();
+  const sources = readAsarMembers(archive, bundles);
+  return bundles.filter((name) => FACTORY_OPTIONS.every((option) => sources[name].includes(option)))
+    .map((name) => [name, decode(sources[name], name)]);
+}
+
+/** A webpack build's chunks and package dependencies, and the runtime derived from the app's entry. */
+function planWebpack(archive, members, { eager, lazy }, node) {
+  const { main: entry } = JSON.parse(readAsarMembers(archive, ['package.json'])['package.json']);
+  if (!members.has(entry)) throw unavailable(`the webpack entry ${JSON.stringify(entry)} is missing`);
+  const prefix = `${entry.slice(0, -'.js'.length)}-`;
+  const chunks = [...members].filter((member) => member.startsWith(prefix) && BUNDLE_PATH.test(member)).sort();
+  const sources = readAsarMembers(archive, [entry, ...chunks]);
+  const { runtime, packages } = analyze(node, { op: 'webpack', entry: decode(sources[entry], entry),
+    chunks: Object.fromEntries(chunks.map((name) => [name, decode(sources[name], name)])), eager, lazy });
+  const contents = Object.fromEntries(chunks.map((name) => [name, sources[name]]));
+  contents[posix.join(posix.dirname(entry), WEBPACK_RUNTIME)] = Buffer.from(runtime);
+  const files = packages.flatMap((name) => {
+    const manifest = `node_modules/${name}/package.json`;
+    if (!members.has(manifest)) throw unavailable(`original package dependency ${JSON.stringify(name)} is missing`);
+    const { main = 'index.js' } = JSON.parse(readAsarMembers(archive, [manifest])[manifest]);
+    return [manifest, memberFor(manifest, `./${main}`, members)];
+  });
+  return { contents, files };
+}
+
 /** The same read-only plan for a bare app.asar: `{main, factory, module, contents: {name: Buffer}, uncarried}`. */
 export function planOriginalAsar(archive, { node }) {
   const members = new Set(listAsarMembers(archive));
   const results = [];
-  for (const name of [...members].filter((member) => MAIN_PATH.test(member)).sort()) {
-    const source = readAsarMembers(archive, [name])[name];
-    const response = analyze(node, { op: 'host', source: decode(source, name) });
+  for (const [name, source] of factoryCandidates(archive, members)) {
+    const response = analyze(node, { op: 'host', source });
     if ((response.matches ?? 0) !== 0) results.push([name, response]);
   }
   if (!results.length) {
-    throw unavailable('no main bundle has a top-level native-pipe host factory (a function taking codexCliPath, ' +
-      'nativePipeDirectory, windowsHelperPath and windowsHelperTransportModulePath options)');
+    throw unavailable('no bundle in .vite/build has a native-pipe host factory, at its top level or in a webpack module ' +
+      `(a function taking ${FACTORY_OPTIONS.slice(0, -1).join(', ')} and ${FACTORY_OPTIONS.at(-1)} options)`);
   }
   if (results.length !== 1 || results[0][1].matches !== 1) throw unavailable('more than one top-level native-pipe host factory matches');
   const [main, response] = results[0];
+  const webpack = response.webpack ? planWebpack(archive, members, response.webpack, node) : { contents: {}, files: [] };
   // Walk the relative-require graph from the generated module's own requirements.
-  let queue = [...new Set(localDependencies(main, response.requires, response.imports, members))];
+  let queue = [...new Set([...localDependencies(main, response.requires, response.imports, members), ...webpack.files])];
   const contents = {};
   while (queue.length) {
     const batch = queue.filter((name) => !Object.hasOwn(contents, name));
@@ -130,7 +161,7 @@ export function planOriginalAsar(archive, { node }) {
     const sources = readAsarMembers(archive, batch);
     const scripts = {};
     for (const name of batch) {
-      if (MAIN_PATH.test(name)) throw unavailable(`original dependency graph reaches the main bundle through ${name}`);
+      if (name === main) throw unavailable(`original dependency graph reaches the main bundle through ${name}`);
       if (name.endsWith('.node')) throw unavailable(`original dependency ${name} is a native module`);
       contents[name] = sources[name];
       if (name.endsWith('.json')) continue;
@@ -144,7 +175,8 @@ export function planOriginalAsar(archive, { node }) {
     }
     queue = [...new Set(queue)];
   }
-  return { main, factory: response.factory, module: response.module, contents, uncarried: response.uncarried ?? 0 };
+  return { main, factory: response.factory, module: response.module, contents: { ...contents, ...webpack.contents },
+    uncarried: response.uncarried ?? 0 };
 }
 
 /** Extract the structurally selected host factory and its exact dependencies; returns the entry path. */
