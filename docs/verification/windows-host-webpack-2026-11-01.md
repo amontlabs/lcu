@@ -30,6 +30,8 @@ In the Windows package, `.vite/build/` holds 28 files and none is `main*.js`. On
 
 A separate throwaway probe drove each extracted host through its real socket with a stand-in helper transport: `ping`, an unsupported method, a schema-rejected request, a request that raised an approval and got the answer back, `end_turn`, a `closeActiveTurn` with a stale identity (closed nothing), one with the matching identity (closed the transport), `close` and `dispose`. Both webpack builds matched each other exactly. Against the `26.1013` control, the only differences were that a turn is no longer active after its `end_turn`, and the order of analytics events. Both come from the app's own changed code, which LCU copies verbatim. Loading took about 135 ms against 40 ms for the control.
 
+The installer's own load check (`materializeOriginalHost`) also passed on both webpack packages on the app's Node. Its failure path is covered by `tests/node/windows_host.test.mjs`.
+
 ## Limits
 
 The Linux and macOS runs prove extraction and the JavaScript host path, not Windows named pipes, the Windows helper, or a live action. The named-pipe entry is covered only by the synthetic tests in `tests/node/windows_host.test.mjs`. The issue reporter offered to test a patch on a real Windows 11 desktop; a result from that machine would be the reporter's evidence, and is not recorded here.

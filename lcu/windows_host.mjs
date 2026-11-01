@@ -7,7 +7,7 @@
 // generated module.
 // Builtins come from process.getBuiltinModule, like the rest of the launch path.
 const { spawn, spawnSync } = process.getBuiltinModule('node:child_process');
-const { lstatSync, mkdirSync, readFileSync, writeFileSync } = process.getBuiltinModule('node:fs');
+const { lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } = process.getBuiltinModule('node:fs');
 const { dirname, join, posix } = process.getBuiltinModule('node:path');
 const { fileURLToPath } = process.getBuiltinModule('node:url');
 
@@ -25,15 +25,28 @@ const RESOLVED_SUFFIXES = ['', '.js', '.json', '.node', '/package.json', '/index
 const MAX_CHUNKS = 400;
 const NODE_MEMBER = 'app/resources/cua_node/bin/node.exe';
 
+// Loads the written host as the launch entry will, without Electron, which the original Node does not have.
+const LOAD_CHECK = `const Module = require('node:module');
+const resolve = Module._resolveFilename;
+Module._resolveFilename = function (request, ...rest) {
+  if (request === 'electron' || request.startsWith('electron/')) throw new Error('blocked ' + request);
+  return resolve.call(this, request, ...rest);
+};
+if (typeof require(process.argv[1]) !== 'function') throw new Error('the generated module exports no factory');`;
+
 const unavailable = (detail) => new Error(`Required Windows host layout is unavailable: ${detail}`);
+
+function nodeEnvironment() {
+  const env = { PATH: process.env.PATH ?? '' };
+  if (process.env.SYSTEMROOT) env.SYSTEMROOT = process.env.SYSTEMROOT; // Node aborts at startup on Windows without it
+  return env;
+}
 
 /** Run the structural analyzer on the original Node with a JSON request. */
 export function analyze(node, request) {
   if (!isFile(node)) throw unavailable('the original Node needed to read the host layout is missing');
-  const env = { PATH: process.env.PATH ?? '' };
-  if (process.env.SYSTEMROOT) env.SYSTEMROOT = process.env.SYSTEMROOT; // Node aborts at startup on Windows without it
   const result = spawnSync(node, ['--max-old-space-size=2048', ANALYZER], {
-    input: JSON.stringify(request), env, timeout: 180_000, maxBuffer: 1024 * 1024 * 1024 });
+    input: JSON.stringify(request), env: nodeEnvironment(), timeout: 180_000, maxBuffer: 1024 * 1024 * 1024 });
   if (result.error && result.status === null) throw unavailable(`the structural analyzer could not run (${result.error.code ?? result.error.message})`);
   let response;
   try {
@@ -109,7 +122,7 @@ export function planOriginalHost(app, { node } = {}) {
 }
 
 /**
- * The files of a package with no dependencies and no native code, so that Node resolves it as it would in
+ * The files of a package that declares no other package and has no native code, so that Node resolves it as it would in
  * the app, or nothing for a package that cannot run from a copy.
  */
 function packageFiles(archive, members, name) {
@@ -117,8 +130,8 @@ function packageFiles(archive, members, name) {
   const files = [...members].filter((member) => member.startsWith(root));
   if (!members.has(`${root}package.json`) || files.some((file) => file.endsWith('.node'))) return {};
   const contents = readAsarMembers(archive, files);
-  const { dependencies = {} } = JSON.parse(contents[`${root}package.json`]);
-  return Object.keys(dependencies).length ? {} : contents;
+  const { dependencies, peerDependencies, optionalDependencies } = JSON.parse(contents[`${root}package.json`]);
+  return Object.keys({ ...dependencies, ...peerDependencies, ...optionalDependencies }).length ? {} : contents;
 }
 
 /** The bundles that name every factory option; parsing the others would only slow the install. */
@@ -193,9 +206,22 @@ export function planOriginalAsar(archive, { node }) {
     uncarried: response.uncarried ?? 0 };
 }
 
-/** Extract the structurally selected host factory and its exact dependencies; returns the entry path. */
-export const materializeOriginalHost = (app, destination, { node } = {}) =>
-  writeOriginalHost(planOriginalHost(app, { node }), destination);
+/**
+ * Extract the structurally selected host factory and its exact dependencies; returns the entry path. The
+ * structure can only suggest that the host will load, so it is loaded once before anything relies on it.
+ */
+export function materializeOriginalHost(app, destination, { node = component(app, NODE_MEMBER) } = {}) {
+  const plan = planOriginalHost(app, { node });
+  const entry = writeOriginalHost(plan, destination);
+  const generated = join(destination, posix.dirname(plan.main), GENERATED);
+  const result = spawnSync(node, ['-e', LOAD_CHECK, generated], { encoding: 'utf8', env: nodeEnvironment(), timeout: 60_000 });
+  if (result.status !== 0) {
+    rmSync(destination, { recursive: true, force: true });
+    const detail = `${result.stderr ?? ''}`.split('\n').find((line) => /^\w*Error\b/.test(line)) ?? result.error?.code ?? 'no error reported';
+    throw unavailable(`the extracted native-pipe host failed to load (${detail.slice(0, 200)})`);
+  }
+  return entry;
+}
 
 /** Write a planned host (generated module, chunks, thin entry) into a new directory; returns the entry path. */
 export function writeOriginalHost(plan, destination) {

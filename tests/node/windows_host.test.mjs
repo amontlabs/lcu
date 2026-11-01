@@ -414,8 +414,23 @@ test('a package that cannot run from a copy stops the install only when it must 
   const members = (extra) => Object.fromEntries(Object.entries(webpackMembers(undefined, extra)).filter(([, value]) => value !== null));
   const refused = /package dependency "dep-package" is missing or cannot run from a copy/;
   f.layoutError(members({ 'node_modules/dep-package/package.json': null }), refused);
-  f.layoutError(members({ 'node_modules/dep-package/package.json': '{"dependencies":{"other":"1"}}' }), refused);
   f.layoutError(members({ 'node_modules/dep-package/native.node': 'x' }), refused);
+});
+
+test('a host that does not load stops the install and leaves nothing behind', (t) => {
+  const f = fixture(t);
+  f.layoutError(webpackMembers(undefined, { 'node_modules/dep-package/lib/inner.js': 'module.exports=require("undeclared-peer");' }),
+    /extracted native-pipe host failed to load \(Error: Cannot find module 'undeclared-peer'/);
+  f.layoutError(webpackMembers(undefined, { 'node_modules/dep-package/lib/inner.js': 'module.exports=require("electron");' }),
+    /extracted native-pipe host failed to load \(Error: blocked electron/);
+});
+
+test('a package that declares another package is not copied', (t) => {
+  const f = fixture(t);
+  const refused = /package dependency "dep-package" is missing or cannot run from a copy/;
+  for (const field of ['dependencies', 'peerDependencies', 'optionalDependencies']) {
+    f.layoutError(webpackMembers(undefined, { 'node_modules/dep-package/package.json': JSON.stringify({ [field]: { other: '1' } }) }), refused);
+  }
 });
 
 test('a lazily used package the Electron app alone has does not stop the install', (t) => {
