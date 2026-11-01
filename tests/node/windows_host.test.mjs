@@ -372,10 +372,50 @@ test('a webpack build the host could not run from stops the install', (t) => {
   f.layoutError(members(undefined, { [WEBPACK_ENTRY]: runtime(ENTRY_TABLE, 'r(99)') }), /expected runtime shape/);
   f.layoutError(members(undefined, { [WEBPACK_ENTRY]: runtime(ENTRY_TABLE).replace('r.f.require=', 'r.f.other=') }), /no synchronous chunk loader/);
   f.layoutError(members(undefined, { [`${LOCATION}early-bootstrap-3-h.js`]: 'module.exports={};' }), /early-bootstrap-3-h\.js is not a webpack chunk/);
-  f.layoutError(members(undefined, { 'node_modules/dep-package/package.json': null }), /package dependency "dep-package" is missing/);
+  f.layoutError(members(undefined, { 'node_modules/dep-package/package.json': null }), /package dependency "dep-package" is missing or cannot run from a copy/);
   f.layoutError(members(undefined, { 'package.json': '{"main":".vite/build/gone.js"}' }), /webpack entry ".vite\/build\/gone.js" is missing/);
   f.layoutError(members(undefined, { [`${LOCATION}early-bootstrap-3-h.js`]: webpackHost().replaceAll('[1]', '[3]').replace('500(', '501(') }),
     /more than one top-level native-pipe host factory/);
+});
+
+test('a function that runs while a module loads counts as loading', (t) => {
+  for (const load of ['(()=>require("dep-package"))()', '(function(){return require("dep-package")}).call(this)']) {
+    const f = fixture(t);
+    const chunk = `exports.ids=[2],exports.modules={40(e,t,r){e.exports=${load}}};`;
+    const extra = { [`${LOCATION}early-bootstrap-2-h.js`]: chunk };
+    assert.equal(f.runFactory(f.extract(webpackMembers(undefined, extra))).probe, 'y.txt:package:3');
+    f.layoutError(webpackMembers(undefined, { ...extra, 'node_modules/dep-package/native.node': 'x' }), /package dependency "dep-package" is missing or cannot run from a copy/);
+  }
+  const f = fixture(t);
+  f.layoutError(webpackMembers(undefined, { [`${LOCATION}early-bootstrap-2-h.js`]: 'exports.ids=[2],exports.modules={40(e,t,r){e.exports=(()=>r(41))()}};' }),
+    /needs webpack module 41, which no chunk provides/);
+});
+
+test('a package a named function loads is still copied', (t) => {
+  const f = fixture(t);
+  const chunk = 'exports.ids=[2],exports.modules={40(e){function load(){return require("dep-package")}e.exports=load()}};';
+  const entry = f.extract(webpackMembers(undefined, { [`${LOCATION}early-bootstrap-2-h.js`]: chunk }));
+  assert.equal(f.runFactory(entry).probe, 'y.txt:package:3');
+});
+
+test('Node resolves a copied package itself', (t) => {
+  const manifests = [{ main: 'legacy.js', exports: './lib/main.js' }, { main: 'legacy.js', exports: { '.': './lib/main.js', './other': './legacy.js' } },
+    { exports: { import: './esm.mjs', node: { import: './esm.mjs', require: './lib/main.js' }, default: './legacy.js' } }];
+  for (const manifest of manifests) {
+    const f = fixture(t);
+    const entry = f.extract(webpackMembers(undefined, { 'node_modules/dep-package/package.json': JSON.stringify(manifest),
+      'node_modules/dep-package/legacy.js': 'throw Error("Node would not load this");' }));
+    assert.equal(f.runFactory(entry).probe, 'y.txt:package:3', JSON.stringify(manifest));
+  }
+});
+
+test('a package that cannot run from a copy stops the install only when it must load', (t) => {
+  const f = fixture(t);
+  const members = (extra) => Object.fromEntries(Object.entries(webpackMembers(undefined, extra)).filter(([, value]) => value !== null));
+  const refused = /package dependency "dep-package" is missing or cannot run from a copy/;
+  f.layoutError(members({ 'node_modules/dep-package/package.json': null }), refused);
+  f.layoutError(members({ 'node_modules/dep-package/package.json': '{"dependencies":{"other":"1"}}' }), refused);
+  f.layoutError(members({ 'node_modules/dep-package/native.node': 'x' }), refused);
 });
 
 test('a lazily used package the Electron app alone has does not stop the install', (t) => {

@@ -105,6 +105,14 @@ function staticString(node) {
 
 // Scope-aware reference collector. `free` holds every identifier the visited
 // code reads or writes without declaring it itself; `written` the written ones.
+// The function a call runs right away: `(()=>{...})()` or `(function(){...}).call(this)`. Its
+// body runs at the depth of the call, not later.
+function invokedFunction(callee) {
+  const method = callee.type === 'MemberExpression' && !callee.computed && ['call', 'apply'].includes(callee.property.name);
+  const target = method ? callee.object : callee;
+  return /^(?:Arrow)?FunctionExpression$/.test(target.type) ? target : null;
+}
+
 class Scan {
   constructor() {
     this.scopes = [];
@@ -115,6 +123,7 @@ class Scan {
     this.problems = new Set();
     this.memberWritten = new Set();
     this.depth = 0;
+    this.immediate = new Set();
     // Set for webpack module code: the module's require parameter, and what it reaches. `eager`
     // runs when the module loads; `lazy` only if the function around it is called.
     this.webpackRequire = null;
@@ -266,6 +275,8 @@ class Scan {
       return;
     }
     if (this.webpackRequire !== null && !this.bound(this.webpackRequire)) this.noteWebpackCall(node);
+    const invoked = invokedFunction(node.callee);
+    if (invoked) this.immediate.add(invoked);
     this.children(node);
   }
 
@@ -285,7 +296,8 @@ class Scan {
     const names = [];
     for (const p of node.params) patternNames(p, names);
     if (!arrow) names.push('arguments');
-    this.depth++;
+    const deferred = !this.immediate.has(node);
+    if (deferred) this.depth++;
     try {
       this.scoped(expressionName, () => this.scoped(names, () => {
         for (const p of node.params) this.declPattern(p);
@@ -293,7 +305,7 @@ class Scan {
         this.scoped(hoistedNames(node.body.body), () => { for (const s of node.body.body) this.visit(s); });
       }));
     } finally {
-      this.depth--;
+      if (deferred) this.depth--;
     }
   }
   onFunctionDeclaration(node) { this.onFunction(node); }
@@ -688,16 +700,19 @@ function webpackRuntime({entry, chunks, eager, lazy}) {
     return scanOf(id).eager;
   });
   // A lazy call is only a candidate: a call site can be unused, or guard a package the Electron app alone has.
-  for (const id of reached([...eager, ...lazy], id => (scanOf(id) ? [...scanOf(id).eager, ...scanOf(id).lazy] : []))) {
+  const candidates = reached([...eager, ...lazy], id => (scanOf(id) ? [...scanOf(id).eager, ...scanOf(id).lazy] : []));
+  for (const id of candidates) {
     const scan = scanOf(id);
     if (!scan) continue;
     if ([...scan.requires].some(spec => spec === 'electron' || spec.startsWith('electron/'))) {
       throw new Unsupported(`the native-pipe host depends on Electron through webpack module ${id}`);
     }
   }
-  const packages = new Set([...loaded].flatMap(id => [...scanOf(id).eagerRequires]).filter(spec => !isBuiltin(spec)));
+  const packageNames = (ids, specs) => [...ids].flatMap(id => [...(specs(scanOf(id)) ?? [])]).filter(spec => !isBuiltin(spec))
+    .map(spec => spec.split('/').slice(0, spec.startsWith('@') ? 2 : 1).join('/'));
   const registered = ids.sort((a, b) => a - b).map(id => `${runtime.require}.e(${id});`).join('');
-  return {ok: true, packages: [...packages].sort(),
+  return {ok: true, packages: {required: [...new Set(packageNames(loaded, scan => scan.eagerRequires))].sort(),
+    optional: [...new Set(packageNames(candidates, scan => scan?.requires))].sort()},
     runtime: `${entry.slice(0, runtime.start.start)}${registered}module.exports=${runtime.require};${entry.slice(runtime.finish.end)}`};
 }
 

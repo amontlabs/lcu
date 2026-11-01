@@ -108,6 +108,19 @@ export function planOriginalHost(app, { node } = {}) {
   return planOriginalAsar(archive, { node: node ?? component(app, NODE_MEMBER) });
 }
 
+/**
+ * The files of a package with no dependencies and no native code, so that Node resolves it as it would in
+ * the app, or nothing for a package that cannot run from a copy.
+ */
+function packageFiles(archive, members, name) {
+  const root = `node_modules/${name}/`;
+  const files = [...members].filter((member) => member.startsWith(root));
+  if (!members.has(`${root}package.json`) || files.some((file) => file.endsWith('.node'))) return {};
+  const contents = readAsarMembers(archive, files);
+  const { dependencies = {} } = JSON.parse(contents[`${root}package.json`]);
+  return Object.keys(dependencies).length ? {} : contents;
+}
+
 /** The bundles that name every factory option; parsing the others would only slow the install. */
 function factoryCandidates(archive, members) {
   const bundles = [...members].filter((member) => BUNDLE_PATH.test(member)).sort();
@@ -127,13 +140,14 @@ function planWebpack(archive, members, { eager, lazy }, node) {
     chunks: Object.fromEntries(chunks.map((name) => [name, decode(sources[name], name)])), eager, lazy });
   const contents = Object.fromEntries(chunks.map((name) => [name, sources[name]]));
   contents[posix.join(posix.dirname(entry), WEBPACK_RUNTIME)] = Buffer.from(runtime);
-  const files = packages.flatMap((name) => {
-    const manifest = `node_modules/${name}/package.json`;
-    if (!members.has(manifest)) throw unavailable(`original package dependency ${JSON.stringify(name)} is missing`);
-    const { main = 'index.js' } = JSON.parse(readAsarMembers(archive, [manifest])[manifest]);
-    return [manifest, memberFor(manifest, `./${main}`, members)];
-  });
-  return { contents, files };
+  for (const name of packages.optional) {
+    const files = packageFiles(archive, members, name);
+    if (packages.required.includes(name) && !Object.keys(files).length) {
+      throw unavailable(`original package dependency ${JSON.stringify(name)} is missing or cannot run from a copy`);
+    }
+    Object.assign(contents, files);
+  }
+  return contents;
 }
 
 /** The same read-only plan for a bare app.asar: `{main, factory, module, contents: {name: Buffer}, uncarried}`. */
@@ -150,9 +164,9 @@ export function planOriginalAsar(archive, { node }) {
   }
   if (results.length !== 1 || results[0][1].matches !== 1) throw unavailable('more than one top-level native-pipe host factory matches');
   const [main, response] = results[0];
-  const webpack = response.webpack ? planWebpack(archive, members, response.webpack, node) : { contents: {}, files: [] };
+  const webpack = response.webpack ? planWebpack(archive, members, response.webpack, node) : {};
   // Walk the relative-require graph from the generated module's own requirements.
-  let queue = [...new Set([...localDependencies(main, response.requires, response.imports, members), ...webpack.files])];
+  let queue = [...new Set(localDependencies(main, response.requires, response.imports, members))];
   const contents = {};
   while (queue.length) {
     const batch = queue.filter((name) => !Object.hasOwn(contents, name));
@@ -175,7 +189,7 @@ export function planOriginalAsar(archive, { node }) {
     }
     queue = [...new Set(queue)];
   }
-  return { main, factory: response.factory, module: response.module, contents: { ...contents, ...webpack.contents },
+  return { main, factory: response.factory, module: response.module, contents: { ...contents, ...webpack },
     uncarried: response.uncarried ?? 0 };
 }
 

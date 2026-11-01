@@ -24,11 +24,11 @@ In the Windows package, `.vite/build/` holds 28 files and none is `main*.js`. On
 
 | Package | Factory | Generated characters | Calls not carried | Files copied | Result |
 | --- | --- | --- | --- | --- | --- |
-| Windows `26.1027.3384.0` | `sl` | 33,558 | 14 | 21 | Passed |
-| Linux `26.1027.51404` | `si` | 26,718 | 11 | 20 | Passed |
+| Windows `26.1027.3384.0` | `sl` | 33,558 | 14 | 33 | Passed |
+| Linux `26.1027.51404` | `si` | 26,718 | 11 | 32 | Passed |
 | macOS `26.1013.40934` | `lre` | 10,616 | 7 | 9 | Passed |
 
-A separate throwaway probe drove each extracted host through its real socket with a stand-in helper transport: `ping`, an unsupported method, a schema-rejected request, a request that raised an approval and got the answer back, `end_turn`, a `closeActiveTurn` with a stale identity (closed nothing), one with the matching identity (closed the transport), `close` and `dispose`. Both webpack builds matched each other exactly. Against the `26.1013` control, the only differences were that a turn is no longer active after its `end_turn`, and the order of analytics events. Both come from the app's own changed code, which LCU copies verbatim. Loading took about 160 ms against 48 ms for the control.
+A separate throwaway probe drove each extracted host through its real socket with a stand-in helper transport: `ping`, an unsupported method, a schema-rejected request, a request that raised an approval and got the answer back, `end_turn`, a `closeActiveTurn` with a stale identity (closed nothing), one with the matching identity (closed the transport), `close` and `dispose`. Both webpack builds matched each other exactly. Against the `26.1013` control, the only differences were that a turn is no longer active after its `end_turn`, and the order of analytics events. Both come from the app's own changed code, which LCU copies verbatim. Loading took about 135 ms against 40 ms for the control.
 
 ## Limits
 
