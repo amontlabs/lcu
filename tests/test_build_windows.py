@@ -4,7 +4,6 @@ import errno
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -69,17 +68,18 @@ class WindowsBuildTests(unittest.TestCase):
             tool = root / 'tool'
             tool.write_text('fixture')
             tool.chmod(0o755)
-            real_rmtree = shutil.rmtree
-            held = []
+            npm = root / 'node_modules/npm/bin/npm-cli.js'
+            npm.parent.mkdir(parents=True)
+            npm.write_text('fixture')
+            real_rmdir = os.rmdir
+            held = set()
 
-            def rmtree(path, *args, onexc=None, **options):
-                if Path(path).name.startswith(('lcu-build-', '.agent-tools-')):
-                    held.append(path)
-                    try:
-                        raise OSError(errno.ENOTEMPTY, 'directory not empty', path)
-                    except OSError as error:
-                        return onexc(os.rmdir, path, error)
-                return real_rmtree(path, *args, onexc=onexc, **options)
+            def rmdir(path, *args, **options):
+                name = Path(path).name
+                if name.startswith(('lcu-build-', '.agent-tools-')):
+                    held.add(name.rsplit('-', 1)[0])
+                    raise OSError(errno.ENOTEMPTY, 'directory not empty', path)
+                return real_rmdir(path, *args, **options)
 
             def fake_run(command, **options):
                 if 'ci' in command:
@@ -90,19 +90,16 @@ class WindowsBuildTests(unittest.TestCase):
                             json.dumps({'version': version}))
                 return SimpleNamespace(returncode=0)
 
-            try:
-                with mock.patch('shutil.rmtree', rmtree), \
-                        mock.patch('shutil.which', return_value=str(tool)), \
-                        mock.patch('subprocess.run', side_effect=fake_run), \
-                        mock.patch('provision_agent_tools.download', side_effect=AssertionError('unexpected download')):
-                    archive = build_bundle.build(root / 'dist', target='windows')
-                self.assertEqual({Path(path).name[:10] for path in held}, {'lcu-build-', '.agent-too'})
-                self.assertTrue(archive.with_suffix('.zip.sha256').is_file())
-                with ZipFile(archive) as bundle:
-                    self.assertFalse(any('.agent-tools-' in name for name in bundle.namelist()))
-            finally:
-                for path in held:
-                    real_rmtree(path, ignore_errors=True)
+            with mock.patch('os.rmdir', rmdir), \
+                    mock.patch('tempfile.tempdir', str(root)), \
+                    mock.patch('shutil.which', return_value=str(tool)), \
+                    mock.patch('subprocess.run', side_effect=fake_run), \
+                    mock.patch('provision_agent_tools.download', side_effect=AssertionError('unexpected download')):
+                archive = build_bundle.build(root / 'dist', target='windows')
+            self.assertEqual(held, {'lcu-build', '.agent-tools'})
+            self.assertTrue(archive.with_suffix('.zip.sha256').is_file())
+            with ZipFile(archive) as bundle:
+                self.assertFalse(any('.agent-tools-' in name for name in bundle.namelist()))
 
 
 if __name__ == '__main__':
