@@ -124,7 +124,8 @@ def build(output, package=None, *, target='linux', app=None):
     destination = output / (name + ('.zip' if target == 'windows' else '.tar.gz'))
     if destination.exists() or destination.with_suffix(destination.suffix + '.sha256').exists():
         raise ValueError(f'Release already exists: {destination}; use a new output directory.')
-    with tempfile.TemporaryDirectory(prefix='lcu-build-') as temporary:
+    # The archive is complete by the time this is removed, so a held file must not fail the build.
+    with tempfile.TemporaryDirectory(prefix='lcu-build-', ignore_cleanup_errors=True) as temporary:
         scratch = Path(temporary)
         release = scratch / name
         release.mkdir()

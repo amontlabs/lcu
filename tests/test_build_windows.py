@@ -1,9 +1,13 @@
 """The Windows archive is thin and platform specific."""
 
+import errno
 import json
+import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from zipfile import ZipFile
@@ -57,6 +61,48 @@ class WindowsBuildTests(unittest.TestCase):
                 for path in ('bin/lcu', 'bin/lcu-session', 'bin/lcu-codex-sandbox', 'lcu/session.mjs', 'lcu/x11.mjs', 'lcu/macos_host.mjs',
                              'scripts/install.sh', 'scripts/install.py', 'scripts/install.mjs', 'scripts/bundle.py'):
                     self.assertNotIn(prefix + path, names)
+
+    def test_a_held_temporary_file_does_not_fail_the_build_or_reach_the_archive(self):
+        # Antivirus can hold a file for a moment after npm exits; Windows then refuses the directory (WinError 145).
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = root / 'tool'
+            tool.write_text('fixture')
+            tool.chmod(0o755)
+            real_rmtree = shutil.rmtree
+            held = []
+
+            def rmtree(path, *args, onexc=None, **options):
+                if Path(path).name.startswith(('lcu-build-', '.agent-tools-')):
+                    held.append(path)
+                    try:
+                        raise OSError(errno.ENOTEMPTY, 'directory not empty', path)
+                    except OSError as error:
+                        return onexc(os.rmdir, path, error)
+                return real_rmtree(path, *args, onexc=onexc, **options)
+
+            def fake_run(command, **options):
+                if 'ci' in command:
+                    directory = options['cwd']
+                    for package, version in json.loads((directory / 'package.json').read_text())['dependencies'].items():
+                        (directory / 'node_modules' / package).mkdir(parents=True)
+                        (directory / 'node_modules' / package / 'package.json').write_text(
+                            json.dumps({'version': version}))
+                return SimpleNamespace(returncode=0)
+
+            try:
+                with mock.patch('shutil.rmtree', rmtree), \
+                        mock.patch('shutil.which', return_value=str(tool)), \
+                        mock.patch('subprocess.run', side_effect=fake_run), \
+                        mock.patch('provision_agent_tools.download', side_effect=AssertionError('unexpected download')):
+                    archive = build_bundle.build(root / 'dist', target='windows')
+                self.assertEqual({Path(path).name[:10] for path in held}, {'lcu-build-', '.agent-too'})
+                self.assertTrue(archive.with_suffix('.zip.sha256').is_file())
+                with ZipFile(archive) as bundle:
+                    self.assertFalse(any('.agent-tools-' in name for name in bundle.namelist()))
+            finally:
+                for path in held:
+                    real_rmtree(path, ignore_errors=True)
 
 
 if __name__ == '__main__':
