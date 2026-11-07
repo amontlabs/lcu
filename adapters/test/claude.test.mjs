@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { subagentTurnId } from '../claude.mjs';
+import { claudeToolDescriptor, subagentTurnId } from '../claude.mjs';
 import { crossTurnEnabled, crossTurnSettingPath } from '../cross-turn.mjs';
 
 const relay = fileURLToPath(new URL('../claude.mjs', import.meta.url));
@@ -50,7 +50,7 @@ async function waitFor(predicate, timeoutMs = 5_000) {
   assert.fail(`Condition did not become true within ${timeoutMs} ms`);
 }
 
-async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false, noPowerShell = false, slowAcl = false, acl, lifecycleWaitMs, lifecycleStartupBudgetMs, startupDelayMs, beforeConnect } = {}) {
+async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEndedTurns, failLifecycle = false, noPowerShell = false, slowAcl = false, acl, lifecycleWaitMs, lifecycleStartupBudgetMs, startupDelayMs, jsOneOf = false, beforeConnect } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'lcu-claude-relay-test-'));
   if (failLifecycle) {
     const { registryDirectory } = await import('../../lcu/claude_lifecycle.mjs');
@@ -75,6 +75,7 @@ async function connectRelay({ throughCurrentSymlink = false, crossTurn, maxEnded
     LCU_LOG_DIR: join(directory, 'diagnostics'),
     ...(acl ? { LCU_TEST_ACL: acl } : {}),
     ...(startupDelayMs === undefined ? {} : { LCU_FIXTURE_STARTUP_DELAY_MS: String(startupDelayMs) }),
+    ...(jsOneOf ? { LCU_FIXTURE_JS_ONE_OF: '1' } : {}),
     ...(lifecycleWaitMs === undefined ? {} : { LCU_TEST_LIFECYCLE_WAIT_MS: String(lifecycleWaitMs) }),
     ...(lifecycleStartupBudgetMs === undefined ? {} : { LCU_TEST_LIFECYCLE_STARTUP_BUDGET_MS: String(lifecycleStartupBudgetMs) }),
   };
@@ -252,6 +253,60 @@ test('Claude relay preserves original tool contract and forwards the exact corre
   } finally {
     await bridge.close();
   }
+});
+
+test('Claude relay lists a js schema with a top-level oneOf as one object and forwards both forms unchanged', async () => {
+  const bridge = await connectRelay({ jsOneOf: true });
+  try {
+    const tools = (await bridge.client.listTools()).tools;
+    assert.deepEqual(tools.find(tool => tool.name === 'js'), {
+      name: 'js',
+      description: 'Original JavaScript tool description.\n\n' +
+        'Arguments: one of `code` with optional `title`; or `completion_summary`.',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          code: { type: 'string' }, title: { type: 'string', maxLength: 80 },
+          completion_summary: { type: 'string', maxLength: 80 },
+        },
+      },
+    });
+    assert.deepEqual(tools.find(tool => tool.name === 'js_reset').inputSchema,
+      { type: 'object', properties: {}, additionalProperties: false });
+    const code = await callWithContext(bridge.client, 'js', { code: 'one-of-smoke', title: 'Checking the fixture' },
+      { toolUseId: 'one-of-code' });
+    assert.deepEqual(code.content, [{ type: 'text', text: 'one-of-smoke' }]);
+    const summary = await callWithContext(bridge.client, 'js', { completion_summary: 'Checked the fixture' },
+      { toolUseId: 'one-of-summary' });
+    assert.deepEqual(summary.content, [{ type: 'text', text: 'summary: Checked the fixture' }]);
+    assert.deepEqual(bridge.logs().filter(entry => entry.type === 'tool-call' && entry.name === 'js').map(entry => entry.args), [
+      { code: 'one-of-smoke', title: 'Checking the fixture' },
+      { completion_summary: 'Checked the fixture' },
+    ]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('claudeToolDescriptor merges top-level oneOf, anyOf and allOf and returns other descriptors as they are', () => {
+  const reset = { name: 'js_reset', description: 'Reset.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } };
+  assert.equal(claudeToolDescriptor(reset), reset);
+  assert.deepEqual(claudeToolDescriptor({ name: 'js', description: 'Run.', inputSchema: { anyOf: [
+    { type: 'object', properties: { code: { type: 'string' }, timeout_ms: { type: 'integer' } }, required: ['code', 'timeout_ms'] },
+    { type: 'object', properties: { timeout_ms: { type: 'integer', minimum: 1 }, file: { type: 'string' } }, required: ['timeout_ms'] },
+  ] } }), { name: 'js', description: 'Run.\n\nArguments: one of `code`, `timeout_ms`; or `timeout_ms` with optional `file`.',
+    inputSchema: {
+      type: 'object',
+      properties: { code: { type: 'string' }, timeout_ms: { type: 'integer' }, file: { type: 'string' } },
+      required: ['timeout_ms'],
+    } });
+  assert.deepEqual(claudeToolDescriptor({ name: 'other', inputSchema: {
+    type: 'object', properties: { a: { type: 'string' } }, required: ['a'],
+    allOf: [{ properties: { b: { type: 'number' } }, required: ['b'] }, { required: ['a'] }],
+  } }), { name: 'other', inputSchema: {
+    type: 'object', properties: { a: { type: 'string' }, b: { type: 'number' } }, required: ['a', 'b'],
+  } });
 });
 
 test('the default relay binds real exec hooks and preserves missing-identity errors with PowerShell forbidden', async () => {

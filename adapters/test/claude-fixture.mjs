@@ -15,10 +15,17 @@ const server = new Server({ name: 'original-cua-claude-contract-fixture', versio
 });
 
 server.onerror = error => log({ type: 'server-error', message: String(error) });
+// The shape of the original `js` schema from cua-repl 0.1.3: two argument forms under a top-level oneOf.
+const CODE_FORM = { code: { type: 'string' }, title: { type: 'string', maxLength: 80 } };
+const SUMMARY_FORM = { completion_summary: { type: 'string', maxLength: 80 } };
+const jsInputSchema = process.env.LCU_FIXTURE_JS_ONE_OF ? {
+  type: 'object', additionalProperties: false, properties: { ...CODE_FORM, ...SUMMARY_FORM }, oneOf: [
+    { type: 'object', properties: CODE_FORM, required: ['code'], additionalProperties: false },
+    { type: 'object', properties: SUMMARY_FORM, required: ['completion_summary'], additionalProperties: false },
+  ],
+} : { type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false };
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
-  { name: 'js', description: 'Original JavaScript tool description.', inputSchema: {
-    type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false,
-  } },
+  { name: 'js', description: 'Original JavaScript tool description.', inputSchema: jsInputSchema },
   { name: 'js_reset', description: 'Original JavaScript reset description.', inputSchema: {
     type: 'object', properties: {}, additionalProperties: false,
   } },
@@ -153,6 +160,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   }
   if (name === 'js_reset') {
     return { content: [{ type: 'text', text: 'Original reset result.' }] };
+  }
+  if (name === 'js' && typeof args.completion_summary === 'string') {
+    return { content: [{ type: 'text', text: `summary: ${args.completion_summary}` }] };
   }
   return { content: [{ type: 'text', text: name === 'js' ? args.code : name }] };
 });
