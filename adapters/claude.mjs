@@ -108,16 +108,15 @@ function asError(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-const TOP_LEVEL_COMBINATORS = ['oneOf', 'anyOf', 'allOf'];
+const TOP_LEVEL_COMBINATORS = ['oneOf', 'anyOf'];
 
 /**
- * The descriptor Claude gets for an original public tool. Claude cannot take a tool whose input schema has
- * `oneOf`, `anyOf` or `allOf` at its top level, and Claude Code leaves such an MCP tool out of the session.
- * The original `js` lists its two argument forms (`code`, or `completion_summary` alone) under a top-level
- * `oneOf`, so without this the model gets `js_reset` and no `js`. Such a schema becomes one object: the
- * properties of every form, only what all `oneOf`/`anyOf` forms require (all of what `allOf` parts require),
- * and the forms named at the end of the description. Calls still reach the original server unchanged, and it
- * checks them against its own schema. Any other descriptor is returned as it is.
+ * The descriptor Claude gets for an original public tool. Claude Code leaves out an MCP tool whose input
+ * schema has a top-level `oneOf` or `anyOf`, and the original `js` lists its two argument forms (`code`, or
+ * `completion_summary` alone) under a top-level `oneOf`, so the model would get `js_reset` and no `js`. Such a
+ * schema becomes one object with the properties of every form, requiring only what every form requires.
+ * Calls still reach the original server unchanged, and it checks them against its own schema. Any other
+ * descriptor is returned as it is.
  */
 export function claudeToolDescriptor(tool) {
   const schema = tool.inputSchema;
@@ -125,36 +124,20 @@ export function claudeToolDescriptor(tool) {
   if (combinators.length === 0) return tool;
   const inputSchema = { ...schema, type: 'object', properties: { ...schema.properties } };
   const required = new Set(Array.isArray(schema.required) ? schema.required : []);
-  const forms = [];
   for (const key of combinators) {
     delete inputSchema[key];
-    const parts = schema[key].filter(part => part && typeof part === 'object');
-    for (const part of parts) {
-      for (const [name, property] of Object.entries(part.properties ?? {})) inputSchema.properties[name] ??= property;
+    const forms = schema[key].filter(form => form && typeof form === 'object');
+    for (const form of forms) {
+      for (const [name, property] of Object.entries(form.properties ?? {})) inputSchema.properties[name] ??= property;
     }
-    const partRequired = parts.map(part => (Array.isArray(part.required) ? part.required : []));
-    if (key === 'allOf') {
-      for (const name of partRequired.flat()) required.add(name);
-    } else {
-      for (const name of partRequired[0] ?? []) {
-        if (partRequired.every(names => names.includes(name))) required.add(name);
-      }
-      if (parts.length > 1) forms.push(...parts.map(argumentForm));
+    const formRequired = forms.map(form => (Array.isArray(form.required) ? form.required : []));
+    for (const name of formRequired[0] ?? []) {
+      if (formRequired.every(names => names.includes(name))) required.add(name);
     }
   }
   if (required.size > 0) inputSchema.required = [...required];
   else delete inputSchema.required;
-  if (forms.length === 0) return { ...tool, inputSchema };
-  const note = `Arguments: one of ${forms.join('; or ')}.`;
-  return { ...tool, description: tool.description ? `${tool.description}\n\n${note}` : note, inputSchema };
-}
-
-function argumentForm(part) {
-  const required = Array.isArray(part.required) ? part.required : [];
-  const optional = Object.keys(part.properties ?? {}).filter(name => !required.includes(name));
-  const names = list => list.map(name => `\`${name}\``).join(', ');
-  if (required.length === 0) return optional.length > 0 ? `optional ${names(optional)}` : 'no arguments';
-  return optional.length > 0 ? `${names(required)} with optional ${names(optional)}` : names(required);
+  return { ...tool, inputSchema };
 }
 
 function requireTurnContext(value) {
@@ -197,7 +180,7 @@ function nativeForm(params, approval) {
  * Run a Claude-facing MCP server that relays the selected original LCU server.
  * The relay leaves public tool descriptors, instructions, and result blocks
  * with the original server and changes only the host-specific identity seams,
- * plus the top-level shape of an input schema Claude cannot take (`claudeToolDescriptor`).
+ * plus the top-level shape of an input schema Claude Code leaves out (`claudeToolDescriptor`).
  * `appBuild` (tests) replaces selectedAppBuild of the command for the app-update restart.
  */
 export async function runClaudeBridge({

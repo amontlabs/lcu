@@ -261,8 +261,7 @@ test('Claude relay lists a js schema with a top-level oneOf as one object and fo
     const tools = (await bridge.client.listTools()).tools;
     assert.deepEqual(tools.find(tool => tool.name === 'js'), {
       name: 'js',
-      description: 'Original JavaScript tool description.\n\n' +
-        'Arguments: one of `code` with optional `title`; or `completion_summary`.',
+      description: 'Original JavaScript tool description.',
       inputSchema: {
         type: 'object',
         additionalProperties: false,
@@ -289,24 +288,18 @@ test('Claude relay lists a js schema with a top-level oneOf as one object and fo
   }
 });
 
-test('claudeToolDescriptor merges top-level oneOf, anyOf and allOf and returns other descriptors as they are', () => {
+test('claudeToolDescriptor merges a top-level oneOf or anyOf and returns other descriptors as they are', () => {
   const reset = { name: 'js_reset', description: 'Reset.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } };
   assert.equal(claudeToolDescriptor(reset), reset);
   assert.deepEqual(claudeToolDescriptor({ name: 'js', description: 'Run.', inputSchema: { anyOf: [
     { type: 'object', properties: { code: { type: 'string' }, timeout_ms: { type: 'integer' } }, required: ['code', 'timeout_ms'] },
     { type: 'object', properties: { timeout_ms: { type: 'integer', minimum: 1 }, file: { type: 'string' } }, required: ['timeout_ms'] },
-  ] } }), { name: 'js', description: 'Run.\n\nArguments: one of `code`, `timeout_ms`; or `timeout_ms` with optional `file`.',
+  ] } }), { name: 'js', description: 'Run.',
     inputSchema: {
       type: 'object',
       properties: { code: { type: 'string' }, timeout_ms: { type: 'integer' }, file: { type: 'string' } },
       required: ['timeout_ms'],
     } });
-  assert.deepEqual(claudeToolDescriptor({ name: 'other', inputSchema: {
-    type: 'object', properties: { a: { type: 'string' } }, required: ['a'],
-    allOf: [{ properties: { b: { type: 'number' } }, required: ['b'] }, { required: ['a'] }],
-  } }), { name: 'other', inputSchema: {
-    type: 'object', properties: { a: { type: 'string' }, b: { type: 'number' } }, required: ['a', 'b'],
-  } });
 });
 
 test('the default relay binds real exec hooks and preserves missing-identity errors with PowerShell forbidden', async () => {
