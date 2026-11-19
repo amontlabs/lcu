@@ -15,6 +15,11 @@ export const MODEL_TOOLS = new Set(['js', 'js_reset']);
 
 const TOP_LEVEL_COMBINATORS = ['oneOf', 'anyOf'];
 
+/** The top-level combinators of an original tool's schema that `mergedToolDescriptor` merges. */
+export function mergedCombinators(schema) {
+  return TOP_LEVEL_COMBINATORS.filter(key => Array.isArray(schema?.[key]));
+}
+
 /**
  * The descriptor to list for an original public tool whose input schema has a top-level `oneOf` or `anyOf`.
  * The original `js` lists its two argument forms (`code`, or `completion_summary` alone) as closed branches
@@ -26,7 +31,7 @@ const TOP_LEVEL_COMBINATORS = ['oneOf', 'anyOf'];
  */
 export function mergedToolDescriptor(tool) {
   const schema = tool.inputSchema;
-  const combinators = TOP_LEVEL_COMBINATORS.filter(key => Array.isArray(schema?.[key]));
+  const combinators = mergedCombinators(schema);
   if (combinators.length === 0) return tool;
   const inputSchema = { ...schema, type: 'object', properties: { ...schema.properties } };
   const required = new Set(Array.isArray(schema.required) ? schema.required : []);
@@ -44,11 +49,6 @@ export function mergedToolDescriptor(tool) {
   if (required.size > 0) inputSchema.required = [...required];
   else delete inputSchema.required;
   return { ...tool, inputSchema };
-}
-
-/** The top-level combinators of an original tool's schema that `mergedToolDescriptor` merges. */
-export function mergedCombinators(schema) {
-  return TOP_LEVEL_COMBINATORS.filter(key => Array.isArray(schema?.[key]));
 }
 
 /** Default cleanup/tool timeout; `js` extends past a longer requested run. */

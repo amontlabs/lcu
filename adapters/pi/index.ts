@@ -647,10 +647,7 @@ export default function (pi: ExtensionAPI, options: {
     // Pi refreshes tools registered during before_agent_start before its model call.
     for (const descriptor of descriptors) {
       const name = descriptor.name;
-      // Oh My Pi adds a required intent field at the schema root, which the closed branches of the original
-      // `js` schema's top-level `oneOf` reject, so the provider would refuse the whole request. The registered
-      // schema is one object with every form's properties; calls reach the original server unchanged and it
-      // validates them itself.
+      // A top-level `oneOf` becomes one object; see `mergedToolDescriptor` for why.
       const { inputSchema } = mergedToolDescriptor(descriptor);
       pi.registerTool({
         name,
@@ -660,7 +657,7 @@ export default function (pi: ExtensionAPI, options: {
         // OpenAI's Responses API treats a function tool as strict unless it says otherwise, and strict mode
         // requires every property. The model would then fill optional fields it did not mean to set (a `js`
         // timeout, or `code` beside `completion_summary`, which the original server refuses). Explicit
-        // `strict: false` keeps those fields optional; OMP and Pi providers carry it to the wire.
+        // `strict: false` keeps those fields optional; OMP carries it to the wire, and plain Pi ignores it.
         strict: false,
         ...(options.ompEssentialTools ? { loadMode: 'essential' } : {}),
         async execute(id, args, signal, _onUpdate, ctx) {

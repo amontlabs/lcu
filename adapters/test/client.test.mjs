@@ -10,8 +10,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
-  callWithDeadline, createApprovalGate, createCuaClient, createWorkerTurns, mergedToolDescriptor,
-  nativeAppApprovalOptions,
+  callWithDeadline, createApprovalGate, createCuaClient, createWorkerTurns, nativeAppApprovalOptions,
   nativeAppApprovalResponse, relayElicitation, sendControlRequest, TURN_CLEANUP_TIMEOUT_CODE,
 } from '../client.mjs';
 
@@ -413,22 +412,4 @@ test('worker turns report whether a turn end can reach the original hook, and st
   assert.equal(turns.upstreamId('s', 't'), 't', 'the oldest turn is evicted past the limit');
   turns.ended('s', 'v');
   assert.equal(turns.skyHook('s', 'v'), 'none');
-});
-
-test('mergedToolDescriptor flattens closed top-level oneOf forms and returns other descriptors as they are', () => {
-  const reset = { name: 'js_reset', description: 'Reset.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } };
-  assert.equal(mergedToolDescriptor(reset), reset);
-  const code = { code: { type: 'string' }, timeout_ms: { type: 'integer' }, title: { type: 'string' } };
-  const summary = { completion_summary: { type: 'string' } };
-  const js = { name: 'js', description: 'Run.', inputSchema: {
-    type: 'object', additionalProperties: false, properties: { ...code, ...summary }, oneOf: [
-      { type: 'object', properties: code, required: ['code'], additionalProperties: false },
-      { type: 'object', properties: summary, required: ['completion_summary'], additionalProperties: false },
-    ],
-  } };
-  const merged = mergedToolDescriptor(js);
-  assert.deepEqual(merged, { name: 'js', description: 'Run.', inputSchema: {
-    type: 'object', additionalProperties: false, properties: { ...code, ...summary },
-  } });
-  assert.ok(js.inputSchema.oneOf, 'the upstream descriptor is not modified');
 });

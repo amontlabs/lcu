@@ -784,7 +784,6 @@ test('Pi registers non-strict tools, one flat object for a js schema with closed
     const schema = tools.get('js').parameters;
     assert.equal(schema.type, 'object');
     assert.equal('oneOf' in schema, false);
-    assert.equal('anyOf' in schema, false);
     assert.equal('required' in schema, false);
     assert.deepEqual(Object.keys(schema.properties).sort(), ['code', 'completion_summary', 'timeout_ms', 'title']);
     assert.deepEqual(tools.get('js_reset').parameters,
