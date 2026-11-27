@@ -448,6 +448,8 @@ EXPECTED_ADDITIONS = (
     # digests, so only its shape is checked.
     ('/env/LCU_PARENT_ENV', lambda v: isinstance(v, dict) and isinstance(v.get('json'), dict)
      and set(v['json']) == {'runtime', 'derived'}),
+    # The export's bootstrap says its mcp.json runs `lcu mcp` (docs/INSTALLATION.md#other-mcp-clients, issue #92).
+    ('/exported/lcu-bootstrap.json/json/mcpServer', lambda v: isinstance(v, str) and v.startswith('mcp.json runs `lcu mcp`')),
 )
 
 
@@ -476,6 +478,10 @@ EXPECTED_CHANGES = tuple(
     # (Windows keeps the file:// URL; pull/65).
     ('/.local/share/lcu/pi/extension.mjs/code',
      lambda old, _node: old.replace('importlcufrom"file://', 'importlcufrom"', 1) if isinstance(old, str) else old),
+    # The export's mcp.json runs `lcu mcp`, the relay for plain MCP clients, instead of bare `lcu` (issue #92):
+    # the same launch script with `mcp` before the runtime flags.
+    ('/exported/mcp.json/json/mcpServers/lcu/args',
+     lambda old, _node: old[:3] + ['mcp'] + old[3:] if isinstance(old, list) and len(old) >= 3 and old[2] == 'lcu-export' else old),
 )
 
 
