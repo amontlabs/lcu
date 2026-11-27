@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { UNSHOWN_CANCEL_MS } from '../grok.mjs';
+import { UNSHOWN_ANSWER_MS } from '../hook-relay.mjs';
 import { isolatedEnv } from './isolated-env.mjs';
 
 const relay = fileURLToPath(new URL('../grok.mjs', import.meta.url));
@@ -178,7 +178,7 @@ test('Grok propagates real native approval choices, including explicit refusal a
   const c = await h.open('s', './mcp-fixture.mjs', async ({ params }) => {
     assert.deepEqual(params.requestedSchema.properties.choice.enum, ['once', 'session', 'always', 'decline']);
     // A person takes longer than the unshown-form threshold to answer.
-    await new Promise(resolve => setTimeout(resolve, UNSHOWN_CANCEL_MS + 50));
+    await new Promise(resolve => setTimeout(resolve, UNSHOWN_ANSWER_MS + 50));
     return answer;
   });
   h.hook('UserPromptSubmit', 's', 'p');

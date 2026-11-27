@@ -566,8 +566,9 @@ test('an export carries no skill or producer path and resolves the destination p
   for (const name of ['lcu', 'lcu-session']) write(join(prefix, 'current/bin', name), '#!/bin/sh\nprintf "%s\\n" "$@"\n', 0o755);
   const run = (mode, cmd) => process.getBuiltinModule('node:child_process').spawnSync(cmd.command, [...cmd.args, 'doctor'],
     { env: { ...process.env, LCU_PREFIX: prefix, LCU_SESSION_MODE: mode }, encoding: 'utf8' }).stdout;
-  assert.equal(run('direct', command), 'doctor\n');
-  assert.equal(run('discover', command), `--user\n${process.getBuiltinModule('node:os').userInfo().username}\n--\n${join(prefix, 'current/bin/lcu')}\ndoctor\n`);
+  // mcp.json starts the relay for plain MCP clients, `lcu mcp`.
+  assert.equal(run('direct', command), 'mcp\ndoctor\n');
+  assert.equal(run('discover', command), `--user\n${process.getBuiltinModule('node:os').userInfo().username}\n--\n${join(prefix, 'current/bin/lcu')}\nmcp\ndoctor\n`);
   const codex = JSON.parse(readFileSync(join(destination, 'codex.mcp.json'), 'utf8')).mcpServers.lcu;
   assert.match(codex.args[1], /current\/agent-tools\/node\/bin\/node/);
   assert.match(codex.args[1], /current\/adapters\/codex\.mjs/);

@@ -1,4 +1,5 @@
-Usage: lcu [--chrome] [--audio] [--mcp-discovery-compat]
+Usage: lcu mcp [--chrome] [--audio]
+       lcu [--chrome] [--audio] [--mcp-discovery-compat]
        lcu setup OPTIONS
        lcu browser install
        lcu browser status [--browser FAMILY]
@@ -12,4 +13,4 @@ Usage: lcu [--chrome] [--audio] [--mcp-discovery-compat]
        lcu status [--json]
        lcu --version
 
-With no arguments, starts the original computer-use stdio MCP server. `lcu --chrome` also enables its browser surface; `lcu setup --chrome` registers that command. `lcu --audio` enables the original optional computer-audio API; `lcu setup --audio` registers that command.
+`lcu mcp` is the stdio MCP server to register with any MCP client that `lcu setup --agent` does not cover: it shows app approvals as MCP form elicitation, or tells the agent how to get them without it. With no arguments, `lcu` starts the original computer-use stdio MCP server that LCU's harness adapters launch. `lcu --chrome` also enables its browser surface; `lcu setup --chrome` registers that command. `lcu --audio` enables the original optional computer-audio API; `lcu setup --audio` registers that command.

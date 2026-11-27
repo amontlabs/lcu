@@ -514,6 +514,7 @@ export async function main(root, argv) {
   }
   const count = (flag) => argv.filter((arg) => arg === flag).length;
   const direct = argv.filter((arg) => arg !== '--chrome' && arg !== '--audio');
+  if (direct[0] === 'mcp') return serveMcp(root, argv, direct.slice(1), count);
   const doctorArgs = direct[0] === 'doctor' ? direct.slice(1) : null;
   const discoveryCompat = direct.length === 1 && direct[0] === '--mcp-discovery-compat';
   if (count('--chrome') > 1 || count('--audio') > 1 || (direct.length && !discoveryCompat && !doctorArgs)) {
@@ -523,14 +524,7 @@ export async function main(root, argv) {
   if (doctorArgs && (doctorArgs.includes('--help') || doctorArgs.includes('-h'))) {
     return (await command('doctor')).main(root, doctorArgs);
   }
-  // A bare stdio server launched from a real terminal only appears to hang.
-  const tty = process.getBuiltinModule('node:tty');
-  if (!direct.length && tty.isatty(0) && tty.isatty(1)) {
-    const lcu = join(root, 'bin/lcu');
-    process.stderr.write(`lcu is a stdio MCP server, launched by an agent harness over pipes, not run directly.\n${USAGE}\n` +
-      `Run \`${lcu} setup\` to register it with a harness, or \`${lcu} doctor\` to check readiness.\n`);
-    return 2;
-  }
+  if (!direct.length && interactiveTerminal(root)) return 2;
   const descriptor = readJson(join(root, 'installation.json'));
   const platform = descriptor.platform ?? 'linux';
   // A launch reuses a recorded deep signature check (macOS) or inventory match (Windows); `lcu doctor` always
@@ -549,6 +543,35 @@ export async function main(root, argv) {
   if (platform === 'linux') leaveUnusableWorkingDirectory();
   process.execve(join(resolved.runtime, 'bin/node'), launch, markDerived(base, env));
   return 0;
+}
+
+/** True, after a hint on stderr, when a stdio server was launched from a real terminal, where it only appears to hang. */
+function interactiveTerminal(root) {
+  const tty = process.getBuiltinModule('node:tty');
+  if (!tty.isatty(0) || !tty.isatty(1)) return false;
+  const lcu = join(root, 'bin/lcu');
+  process.stderr.write(`lcu is a stdio MCP server, launched by an agent harness over pipes, not run directly.\n${USAGE}\n` +
+    `Run \`${lcu} setup\` to register it with a harness, register \`${lcu} mcp\` with any other MCP client, ` +
+    `or run \`${lcu} doctor\` to check readiness.\n`);
+  return true;
+}
+
+/**
+ * `lcu mcp [--chrome] [--audio]`: serve the relay for MCP clients without an LCU adapter (adapters/mcp.mjs) in
+ * this process, in front of bare `lcu` with the same flags. It returns only by throwing; the relay exits itself.
+ */
+async function serveMcp(root, argv, rest, count) {
+  if (rest.length === 1 && ['--help', '-h'].includes(rest[0])) {
+    process.stdout.write(HELP);
+    return 0;
+  }
+  if (rest.length || count('--chrome') > 1 || count('--audio') > 1) throw new Error(USAGE);
+  if (interactiveTerminal(root)) return 2;
+  const flags = argv.filter((arg) => arg === '--chrome' || arg === '--audio');
+  // Windows cannot spawn the `lcu` shell launcher; its Node runs this file directly, as lcu.cmd does.
+  const server = process.platform === 'win32' ? [process.execPath, join(HERE, 'runtime.mjs')] : [join(root, 'bin/lcu')];
+  const { serve } = await import(pathToFileURL(join(root, 'adapters/mcp.mjs')).href);
+  return serve([...server, ...flags]);
 }
 
 async function launchMacos(client, launch, base, env) {
