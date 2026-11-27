@@ -73,7 +73,7 @@ function attemptPosix(path) {
 }
 
 // Windows answers EPERM, EACCES or EBUSY while a file is pending deletion or open in another process: busy, retry.
-const TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
+export const TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
 const GUARD_STALE_MS = 30_000;
 /** Tokens of the Windows locks this process holds now; a file naming this pid with another token is stale. */
 const held = new Set();
