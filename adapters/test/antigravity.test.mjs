@@ -9,6 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
+  antigravityToolDescriptor,
   approvalHint,
   CONVERSATION_ID_META,
   controlDirectory,
@@ -16,6 +17,7 @@ import {
   launcherOf,
   runAntigravityHook,
   stopEventOf,
+  TOOL_DEFINITION_BUDGET,
 } from '../antigravity.mjs';
 
 // Antigravity setup refuses Windows for now: the relay and its hooks meet on a Unix socket.
@@ -80,6 +82,93 @@ test('Antigravity relay lists only the original js and js_reset with original in
     const result = await client.callTool({ name: 'turn_ended', arguments: {} });
     assert.equal(result.isError, true);
   });
+});
+
+const definitionSize = ({ description, inputSchema }) => JSON.stringify({ description, inputSchema }).length;
+/** `schema` without its top-level property descriptions. */
+const undescribed = schema => ({
+  ...schema,
+  properties: Object.fromEntries(Object.entries(schema.properties).map(([name, { description, ...rest }]) => [name, rest])),
+});
+
+test('antigravityToolDescriptor keeps a definition within the budget and moves the original text to instructions', () => {
+  const small = { name: 'js_reset', description: 'Short.', inputSchema: { type: 'object', properties: {} } };
+  assert.deepEqual(antigravityToolDescriptor(small), { tool: small, instructions: '' });
+  assert.equal(antigravityToolDescriptor(small).tool, small);
+
+  // Only the description is long: the first paragraph stays, the schema is untouched.
+  const inputSchema = {
+    type: 'object', additionalProperties: false, required: ['code'], properties: {
+      code: { type: 'string', description: 'Source to run.' },
+      timeout_ms: { type: 'integer', minimum: 1, description: 'Longest run.' },
+      title: { type: 'string', maxLength: 80, description: 'Shown to the person.' },
+    },
+  };
+  const description = `Summary paragraph.\n\n${'More synthetic detail. '.repeat(200)}`.trim();
+  const long = { name: 'js', description, inputSchema, annotations: { title: 'JS' } };
+  assert.ok(definitionSize(long) > 900);
+  const shortened = antigravityToolDescriptor(long);
+  assert.ok(definitionSize(shortened.tool) <= TOOL_DEFINITION_BUDGET);
+  assert.match(shortened.tool.description, /^Summary paragraph\. \[LCU: shortened for Antigravity\. .*`js`.*instructions\.\]$/);
+  assert.equal(shortened.tool.inputSchema, inputSchema);
+  assert.deepEqual(shortened.tool.annotations, { title: 'JS' });
+  assert.equal(shortened.instructions, `Full description of the \`js\` tool:\n\n${description}`);
+
+  // Long property descriptions go too; types, limits and `required` stay. A long first paragraph is cut at a word.
+  const wordy = {
+    name: 'js', description: 'Synthetic words in one paragraph. '.repeat(40).trim(),
+    inputSchema: undescribed(inputSchema),
+  };
+  for (const name of Object.keys(inputSchema.properties)) {
+    wordy.inputSchema.properties[name].description = `About ${name}. ${'Detail. '.repeat(30)}`.trim();
+  }
+  const stripped = antigravityToolDescriptor(wordy);
+  assert.ok(definitionSize(stripped.tool) <= TOOL_DEFINITION_BUDGET);
+  assert.ok(definitionSize(stripped.tool) > TOOL_DEFINITION_BUDGET - 20);
+  assert.deepEqual(stripped.tool.inputSchema, undescribed(inputSchema));
+  assert.match(stripped.tool.description, /^Synthetic words .*\w\.? \.\.\. \[LCU: shortened/);
+  assert.ok(stripped.instructions.startsWith(`Full description of the \`js\` tool:\n\n${wordy.description}\n\n`));
+  assert.ok(stripped.instructions.endsWith('Arguments of the `js` tool:\n\n' +
+    Object.entries(wordy.inputSchema.properties).map(([name, property]) => `- \`${name}\`: ${property.description}`).join('\n')));
+  // A budget smaller than the schema alone cannot be met; the excerpt goes and the original text is still kept.
+  const least = antigravityToolDescriptor(wordy, 10);
+  assert.ok(least.tool.description.startsWith('[LCU: shortened'));
+  assert.equal(least.instructions, stripped.instructions);
+});
+
+test('a js definition as long as the original one is listed within the budget and its text reaches the session', unix, async () => {
+  const extraEnv = { LCU_FIXTURE_JS_LONG: '40', LCU_FIXTURE_JS_ONE_OF: '1' };
+  // What the relay listed before: the original definition, far past the size Antigravity lists (issue #93).
+  const direct = new Client({ name: 'direct', version: '1.0.0' });
+  await direct.connect(new StdioClientTransport({
+    command: process.execPath, args: [fixture], env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...extraEnv },
+  }));
+  const original = (await direct.listTools()).tools.find(tool => tool.name === 'js');
+  await direct.close();
+  assert.ok(definitionSize(original) > 4000, String(definitionSize(original)));
+
+  const expected = text => text.includes('Original CUA initialization guide.\n\nFull description of the `js` tool:\n\n' +
+    `${original.description}\n\nArguments of the \`js\` tool:\n\n- \`code\`: ${original.inputSchema.properties.code.description}\n`);
+  await withRelay(async ({ client, hook, js }) => {
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map(tool => tool.name), ['js', 'js_reset']);
+    for (const tool of tools) assert.ok(definitionSize(tool) <= TOOL_DEFINITION_BUDGET, `${tool.name} ${definitionSize(tool)}`);
+    assert.match(tools[0].description, /^Fixture JS summary paragraph\. \[LCU: shortened for Antigravity\./);
+    assert.deepEqual(tools[0].inputSchema, {
+      type: 'object', additionalProperties: false, properties: {
+        code: { type: 'string' }, timeout_ms: { type: 'integer' }, title: { type: 'string', maxLength: 80 },
+        completion_summary: { type: 'string', maxLength: 80 },
+      },
+    });
+    assert.equal(tools[1].description, 'Original reset description.');
+    const [step] = JSON.parse((await hook('SessionStart', 'conv-1')).stdout).injectSteps;
+    assert.ok(expected(step.systemMessage.systemMessage), step.systemMessage.systemMessage);
+    // A conversation no hook reached gets the same text with its first call result.
+    const [leading, result] = await js('early', 'conv-late');
+    assert.ok(leading.startsWith(`${INSTRUCTIONS_HEADER}\n\n`) && expected(leading), leading);
+    assert.equal(result, 'early');
+    assert.deepEqual(await js('again', 'conv-late'), ['again']);
+  }, { extraEnv });
 });
 
 test('SessionStart and PreInvocation inject original instructions once per conversation as injectSteps', unix, async () => {

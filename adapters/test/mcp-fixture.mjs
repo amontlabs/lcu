@@ -57,8 +57,19 @@ const jsInputSchema = process.env.LCU_FIXTURE_JS_ONE_OF ? {
     { type: 'object', properties: SUMMARY_FORM, required: ['completion_summary'], additionalProperties: false },
   ],
 } : { type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false };
+// A long description and described arguments, the size of the original `js` definition in newer ChatGPT builds
+// (synthetic text).
+const LONG = process.env.LCU_FIXTURE_JS_LONG;
+const jsDescription = LONG
+  ? `Fixture JS summary paragraph.\n\n${Array.from({ length: 60 }, (_, i) => `Fixture detail line ${i} about the JS tool, with "quotes".`).join('\n')}`
+  : 'Original JS description.';
+if (LONG) {
+  for (const [name, property] of Object.entries(jsInputSchema.properties)) {
+    jsInputSchema.properties[name] = { ...property, description: `Fixture argument ${name}. ${'Detail. '.repeat(Number(LONG))}`.trim() };
+  }
+}
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
-  { name: 'js', description: 'Original JS description.', inputSchema: jsInputSchema },
+  { name: 'js', description: jsDescription, inputSchema: jsInputSchema },
   { name: 'js_reset', description: 'Original reset description.', inputSchema: {
     type: 'object', properties: {}, additionalProperties: false,
   } },

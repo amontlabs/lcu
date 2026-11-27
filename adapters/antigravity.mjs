@@ -1,8 +1,9 @@
 // Antigravity relay: a stdio MCP server for Google Antigravity (CLI, App, IDE) in front of the original runtime,
 // through the shared client. Antigravity writes MCP initialization instructions to disk instead of injecting them
 // into the model context, rejects eager tools whose input schema has a top-level `oneOf` (which conflicts with
-// Antigravity's injected `toolSummary` field), and Antigravity CLI 1.5.11 cancels `elicitation/create` requests
-// immediately even though it advertises elicitation support. Antigravity's own command hooks (`antigravity.mjs
+// Antigravity's injected `toolSummary` field), silently leaves out a tool whose definition is long (seen with
+// Antigravity CLI 1.5.17; see TOOL_DEFINITION_BUDGET), and Antigravity CLI 1.5.11 cancels `elicitation/create`
+// requests immediately even though it advertises elicitation support. Antigravity's own command hooks (`antigravity.mjs
 // --hook`, installed by `lcu setup --agent antigravity`) reach this relay over a private Unix socket named for the
 // Antigravity process that runs both: they deliver the original instructions once per conversation through
 // `injectSteps` and end turns on `Stop` (while preserving concurrent conversations and subagents using Antigravity's
@@ -39,6 +40,56 @@ export const CONVERSATION_ID_META = 'antigravity.google/conversation_id';
 /** Ancestors of the hook checked for a relay: `sh -c`, then Antigravity (plus wrappers). */
 const HOOK_ANCESTORS = 4;
 const APPROVAL_REASON = 'Antigravity could not show the approval prompt';
+/**
+ * Longest listed tool definition, as `JSON.stringify({description, inputSchema}).length`. Antigravity CLI 1.5.17
+ * silently leaves out an MCP tool whose definition is longer than roughly 850 to 900 characters (issue #93: 850
+ * was listed, 900 was not), so the model never sees it and calls fail with "tool js is not enabled for server lcu".
+ */
+export const TOOL_DEFINITION_BUDGET = 700;
+
+const definitionSize = ({ description, inputSchema }) => JSON.stringify({ description, inputSchema }).length;
+
+/**
+ * The descriptor Antigravity lists for an original public tool, and the original text that no longer fits in it:
+ * `{tool, instructions}`. A top-level `oneOf`/`anyOf` becomes one object (`mergedToolDescriptor`). A definition
+ * over `budget` then keeps the start of its original description, cut at a word, plus a note naming the session
+ * instructions; if that is not enough, its top-level property descriptions go too. Types, limits and `required`
+ * stay as they are. `instructions` holds the unchanged original description and property descriptions that were
+ * taken out, for the relay to deliver with the original instructions ('' when the descriptor is complete).
+ */
+export function antigravityToolDescriptor(original, budget = TOOL_DEFINITION_BUDGET) {
+  const tool = mergedToolDescriptor(original);
+  if (definitionSize(tool) <= budget) return { tool, instructions: '' };
+  const full = typeof tool.description === 'string' ? tool.description : '';
+  const note = `[LCU: shortened for Antigravity. The rest of the \`${tool.name}\` tool's description is in this ` +
+    "session's Computer Use instructions.]";
+  const describe = (excerpt) => (excerpt ? `${excerpt} ${note}` : note);
+  const first = full.trim().split(/\n\s*\n/)[0].trim();
+  let inputSchema = tool.inputSchema;
+  const moved = [];
+  if (definitionSize({ description: describe(first), inputSchema }) > budget) {
+    const properties = {};
+    for (const [name, property] of Object.entries(inputSchema?.properties ?? {})) {
+      if (property && typeof property === 'object' && typeof property.description === 'string') {
+        const { description, ...rest } = property;
+        moved.push(`- \`${name}\`: ${description}`);
+        properties[name] = rest;
+      } else {
+        properties[name] = property;
+      }
+    }
+    if (moved.length) inputSchema = { ...inputSchema, properties };
+  }
+  let excerpt = first;
+  while (excerpt && definitionSize({ description: describe(excerpt), inputSchema }) > budget) {
+    excerpt = excerpt.slice(0, Math.max(0, excerpt.lastIndexOf(' '))).trimEnd();
+  }
+  if (excerpt !== first) excerpt = excerpt && `${excerpt} ...`;
+  const sections = [];
+  if (excerpt !== full) sections.push(`Full description of the \`${tool.name}\` tool:\n\n${full}`);
+  if (moved.length) sections.push(`Arguments of the \`${tool.name}\` tool:\n\n${moved.join('\n')}`);
+  return { tool: { ...tool, description: describe(excerpt), inputSchema }, instructions: sections.join('\n\n') };
+}
 
 /**
  * The private directory of relay sockets: `LCU_ANTIGRAVITY_CONTROL_DIR` (tests), else LCU's state or temporary
@@ -106,9 +157,15 @@ export function runAntigravityRelay({ env = process.env, directory = controlDire
         return { action: 'cancel' };
       }
 
+      /** The original instructions, then the original tool text that Antigravity's listing could not hold. */
+      function sessionInstructions() {
+        return [client.instructions, ...client.publicTools().map(tool => antigravityToolDescriptor(tool).instructions)]
+          .filter(Boolean).join('\n\n');
+      }
+
       function instructionsFor(state) {
         if (state.told) return {};
-        const instructions = client.instructions;
+        const instructions = sessionInstructions();
         if (!instructions) return {};
         state.told = true;
         return { systemMessage: instructions };
@@ -157,7 +214,8 @@ export function runAntigravityRelay({ env = process.env, directory = controlDire
       return {
         onHook,
         onElicitation,
-        describeTool: mergedToolDescriptor,
+        describeTool: tool => antigravityToolDescriptor(tool).tool,
+        instructions: sessionInstructions,
         // The conversation or subagent Antigravity names on the call, else the one hooks last reported.
         sessionOf: ({ _meta }) => (typeof _meta?.[CONVERSATION_ID_META] === 'string' && _meta[CONVERSATION_ID_META]
           ? _meta[CONVERSATION_ID_META] : current),

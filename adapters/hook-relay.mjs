@@ -73,7 +73,9 @@ export function approvalHint(app, lcu, reason) {
  * - `onElicitation(params, extra)`: answers an elicitation of the original runtime;
  * - `sessionOf(callParams)`: the session a tool call belongs to, or undefined for the relay's fallback;
  * - `turnIdOf()`: an active ID supplied by a host with numbered prompt hooks (optional);
- * - `describeTool(tool)`: the descriptor listed for an original public tool (optional).
+ * - `describeTool(tool)`: the descriptor listed for an original public tool (optional);
+ * - `instructions()`: the text a session's first call result carries when no hook delivered it, in place of the
+ *   original instructions alone (optional).
  * `relay` holds `client`, `server` (once connected), `sessions`, `fallback` (the session id used before any hook
  * names one), and `stateOf`, `finish`, `noteApproval`.
  */
@@ -239,9 +241,10 @@ export async function runHookRelay({
         // to a file, and the model may read only its beginning.
         const state = stateOf(sessionId);
         const leading = [];
-        if (!state.told && client.instructions) {
+        const instructions = state.told ? '' : harness.instructions?.() ?? client.instructions;
+        if (instructions) {
           state.told = true;
-          leading.push({ type: 'text', text: `${INSTRUCTIONS_HEADER}\n\n${client.instructions}` });
+          leading.push({ type: 'text', text: `${INSTRUCTIONS_HEADER}\n\n${instructions}` });
         }
         if (!added.length && !leading.length) return result;
         return { ...result, content: [...leading, ...(result.content ?? []), ...added] };
