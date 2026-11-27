@@ -1,0 +1,120 @@
+name: Release
+
+# Builds the thin release archives on GitHub-hosted runners, then publishes a tagged release from those exact
+# archives. Two manual runs, so the checksums in docs/releases/<version>.md are known before the tag:
+#   1. Run without `publish_run_id` on the release branch: builds and uploads the three archives.
+#   2. Fill the checksums into docs/releases/<version>.md, merge, tag `v<version>`, then run again on that tag
+#      with `publish_run_id` set to run 1's ID: it checks the archives against the notes and publishes them.
+# The macOS build needs a signed ChatGPT.app for its CUA Node (scripts/build_bundle.py); the runner downloads the
+# official app into a throwaway disk image mount. No app file enters an archive (scripts/check_archive.py).
+# No caches anywhere (AGENTS.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_run_id:
+        description: ID of a finished build run whose archives to publish (leave empty to build)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    if: inputs.publish_run_id == ''
+    name: Build linux (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: python scripts/build_bundle.py --platform linux --output "$RUNNER_TEMP/dist"
+      - run: python scripts/check_archive.py "$RUNNER_TEMP"/dist/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcu-linux-${{ runner.arch }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  darwin:
+    if: inputs.publish_run_id == ''
+    name: Build darwin-arm64
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Mount the official ChatGPT app (build input only)
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ChatGPT.dmg" https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/chatgpt" "$RUNNER_TEMP/ChatGPT.dmg"
+          defaults read "$RUNNER_TEMP/chatgpt/ChatGPT.app/Contents/Info" CFBundleShortVersionString
+      - run: python3 scripts/build_bundle.py --platform darwin --app "$RUNNER_TEMP/chatgpt/ChatGPT.app" --output "$RUNNER_TEMP/dist"
+      - run: python3 scripts/check_archive.py "$RUNNER_TEMP"/dist/*.tar.gz
+      - name: Unmount the app
+        if: always()
+        run: hdiutil detach "$RUNNER_TEMP/chatgpt" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcu-darwin-arm64
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  publish:
+    if: inputs.publish_run_id != ''
+    name: Publish the release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.publish_run_id }}
+          github-token: ${{ github.token }}
+          pattern: lcu-*
+          merge-multiple: true
+          path: dist
+      - name: Check the tag, archives and notes agree
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          version=$(node --input-type=module -e "console.log((await import('./scripts/bundle.mjs')).VERSION)")
+          test "$REF" = "refs/tags/v$version" || { echo "Run this on tag v$version, not $REF" >&2; exit 1; }
+          notes="docs/releases/$version.md"
+          cd dist
+          for platform in darwin-arm64 linux-arm64 linux-x64; do
+            archive="lcu-$version-$platform.tar.gz"
+            shasum -a 256 -c "$archive.sha256"
+            sum=$(cut -d' ' -f1 "$archive.sha256")
+            grep -F "| \`$archive\` | \`$sum\` |" "../$notes" > /dev/null || { echo "$notes does not list $archive $sum" >&2; exit 1; }
+          done
+          ls -l
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v$VERSION" dist/lcu-"$VERSION"-*.tar.gz dist/lcu-"$VERSION"-*.tar.gz.sha256 --verify-tag --title "LCU $VERSION" --notes-file "docs/releases/$VERSION.md"
