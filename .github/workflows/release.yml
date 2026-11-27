@@ -91,6 +91,22 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check the build run matches the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.publish_run_id }}
+          WORKFLOW: ${{ github.workflow }}
+        run: |
+          run() { gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json "$1" -q ".$1"; }
+          test "$(run workflowName)" = "$WORKFLOW" || { echo "Run $RUN_ID is not a $WORKFLOW run" >&2; exit 1; }
+          test "$(run conclusion)" = success || { echo "Run $RUN_ID did not succeed" >&2; exit 1; }
+          built=$(run headSha)
+          # Only the release notes (the checksums) may change between the build and the tag.
+          git diff --quiet "$built" HEAD -- . ':!docs/releases' || {
+            echo "The tag differs from the built commit $built outside docs/releases:" >&2
+            git diff --stat "$built" HEAD -- . ':!docs/releases' >&2; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           run-id: ${{ inputs.publish_run_id }}
