@@ -653,7 +653,7 @@ test('Linux setup leaves out Grok: all skips it, and naming it fails validation'
   const home = temporary(t);
   override(t, setup.seams, 'account', () => ({ name: 'alice', uid: process.getuid(), gid: process.getgid(), home }));
   override(t, process, 'platform', 'linux');
-  const check = (...argv) => setup.validate(setup.parse(['--prefix', join(home, 'lcu'), ...argv]));
+  const check = (...argv) => setup.validate(setup.parse(['--prefix', join(home, 'lcu'), '--user', 'alice', ...argv]));
   assert.ok(!check('--agent', 'all').names.includes('grok'));
   assert.ok(!setup.supportedClients().includes('grok'));
   assert.throws(() => check('--agent', 'grok'), /Grok CLI cannot be set up on Linux yet/);
