@@ -80,11 +80,13 @@ export function antigravityToolDescriptor(original, budget = TOOL_DEFINITION_BUD
     }
     if (moved.length) inputSchema = { ...inputSchema, properties };
   }
-  let excerpt = first;
-  while (excerpt && definitionSize({ description: describe(excerpt), inputSchema }) > budget) {
-    excerpt = excerpt.slice(0, Math.max(0, excerpt.lastIndexOf(' '))).trimEnd();
+  // A cut excerpt ends with ` ...`, counted in the size check.
+  const cut = (text) => (text && text !== first ? `${text} ...` : text);
+  let kept = first;
+  while (kept && definitionSize({ description: describe(cut(kept)), inputSchema }) > budget) {
+    kept = kept.slice(0, Math.max(0, kept.lastIndexOf(' '))).trimEnd();
   }
-  if (excerpt !== first) excerpt = excerpt && `${excerpt} ...`;
+  const excerpt = cut(kept);
   const sections = [];
   if (excerpt !== full) sections.push(`Full description of the \`${tool.name}\` tool:\n\n${full}`);
   if (moved.length) sections.push(`Arguments of the \`${tool.name}\` tool:\n\n${moved.join('\n')}`);

@@ -130,6 +130,11 @@ test('antigravityToolDescriptor keeps a definition within the budget and moves t
   assert.ok(stripped.instructions.startsWith(`Full description of the \`js\` tool:\n\n${wordy.description}\n\n`));
   assert.ok(stripped.instructions.endsWith('Arguments of the `js` tool:\n\n' +
     Object.entries(wordy.inputSchema.properties).map(([name, property]) => `- \`${name}\`: ${property.description}`).join('\n')));
+  // The ` ...` of a cut excerpt counts toward the budget, at every budget a one-character-word paragraph can land on.
+  const tiny = { name: 'js', description: 'a '.repeat(400).trim(), inputSchema: { type: 'object', properties: {} } };
+  for (let budget = 200; budget < 220; budget++) {
+    assert.ok(definitionSize(antigravityToolDescriptor(tiny, budget).tool) <= budget, `budget ${budget}`);
+  }
   // A budget smaller than the schema alone cannot be met; the excerpt goes and the original text is still kept.
   const least = antigravityToolDescriptor(wordy, 10);
   assert.ok(least.tool.description.startsWith('[LCU: shortened'));
