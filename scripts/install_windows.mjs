@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { isMain, run } from '../lcu/entry.mjs';
-import { acquire, installLockPath } from '../lcu/lock.mjs';
+import { TRANSIENT, acquire, installLockPath } from '../lcu/lock.mjs';
 import { ALIASES, CLIENTS } from '../lcu/setup.mjs';
 import { canonicalJson, component, inventorySha256, isRedirected, resolveInstalledWindowsApp, validateWindowsAppTree } from '../lcu/windows.mjs';
 import { materializeOriginalHost, planOriginalHost } from '../lcu/windows_host.mjs';
@@ -20,7 +20,6 @@ import { VERSION, architecture, verify } from './bundle.mjs';
 
 const NODE_MEMBER = 'app/resources/cua_node/bin/node.exe';
 const AGENTS = [...Object.keys(CLIENTS), ...Object.keys(ALIASES)];
-const TRANSIENT_RENAME = new Set(['EPERM', 'EBUSY', 'EACCES']);
 
 /**
  * Rename `from` to `to`, retrying transient Windows EPERM/EBUSY/EACCES errors that occur when antivirus or
@@ -32,7 +31,7 @@ export async function renameWithRetry(from, to, { rename = renameSync, attempts 
       rename(from, to);
       return;
     } catch (error) {
-      if (attempt >= attempts || !TRANSIENT_RENAME.has(error?.code)) throw error;
+      if (attempt >= attempts || !TRANSIENT.has(error?.code)) throw error;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
