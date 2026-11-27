@@ -574,9 +574,16 @@ function hostModule(source, webpackRequire = null) {
   };
   for (const name of queue[0].names) includedNames.add(name);
   const others = entries.filter(entry => entry.kind === 'other');
-  // An imported module namespace: every declaration of the name calls require().
+  // A direct webpack module namespace import: `const d = r(40)` (not `r(40).createState()` or destructuring).
+  const webpackImport = provider => webpackRequire !== null && provider.node.id?.type === 'Identifier' &&
+    provider.node.init?.type === 'CallExpression' &&
+    provider.node.init.callee.type === 'Identifier' && provider.node.init.callee.name === webpackRequire &&
+    provider.node.init.arguments.length === 1 &&
+    provider.node.init.arguments[0].type === 'Literal' && typeof provider.node.init.arguments[0].value === 'number';
+  // An imported module namespace: every declaration of the name calls require(), or is a direct webpack import.
   const moduleBinding = name => (providers.get(name) || []).every(
-    provider => provider.requires.size > 0 && ['let', 'const', 'var'].includes(provider.kind));
+    provider => ['let', 'const', 'var'].includes(provider.kind) &&
+      (provider.requires.size > 0 || webpackImport(provider)));
   for (;;) {
     while (queue.length) {
       const entry = queue.pop();

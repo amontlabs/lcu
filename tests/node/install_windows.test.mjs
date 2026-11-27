@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 import { acquire, installLockPath } from '../../lcu/lock.mjs';
 import { WINDOWS_REQUIRED_FILES, applicationInventory, canonicalJson, inventorySha256 } from '../../lcu/windows.mjs';
-import { checkedPrefix, deps, generationInUse, install, launcherCommand, main, preflightHost } from '../../scripts/install_windows.mjs';
+import { checkedPrefix, deps, generationInUse, install, launcherCommand, main, preflightHost, renameWithRetry } from '../../scripts/install_windows.mjs';
 import { override, temporary, write, mockWrite } from './fixtures.mjs';
 
 const NODE_MEMBER = 'app/resources/cua_node/bin/node.exe';
@@ -226,4 +226,27 @@ test('a rewritten lcu.cmd is harmless wherever cmd.exe resumes the old one (0.9.
     assert.equal(rest[1], 'exit /b %ERRORLEVEL%');
   }
   assert.ok(launcherCommand(node).split('\r\n')[1].length >= 512);
+});
+
+test('renameWithRetry retries transient Windows rename errors and stops on permanent ones', async () => {
+  let calls = 0;
+  await renameWithRetry('from', 'to', {
+    delayMs: 1,
+    attempts: 5,
+    rename: () => {
+      calls += 1;
+      if (calls < 3) throw Object.assign(new Error('locked'), { code: calls === 1 ? 'EPERM' : 'EBUSY' });
+    },
+  });
+  assert.equal(calls, 3);
+  let fatalCalls = 0;
+  await assert.rejects(renameWithRetry('from', 'to', {
+    delayMs: 1,
+    attempts: 5,
+    rename: () => {
+      fatalCalls += 1;
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    },
+  }), /missing/);
+  assert.equal(fatalCalls, 1);
 });

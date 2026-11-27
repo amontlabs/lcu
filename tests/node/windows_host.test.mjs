@@ -353,6 +353,30 @@ test('a webpack build runs the host from its own module without starting the app
   assert.equal(derivedRuntime, members[WEBPACK_ENTRY].replace('var o=r(99);module.exports=o', 'r.e(1);r.e(2);module.exports=r;'));
 });
 
+test('a webpack module import is treated as a module namespace for top-level statements', (t) => {
+  const f = fixture(t);
+  // A discarded top-level expression that only touches a webpack-imported namespace (`d`) must not be carried
+  // or pull in unrelated bindings (such as browser-guarded helpers or Electron references).
+  const host = webpackHost('var p=r(10),d=r(40);const unrelated=typeof self;d.a && unrelated;');
+  const plan = f.plan(webpackMembers(host));
+  assert.equal(plan.uncarried, 2);
+  assert.ok(!plan.module.includes('unrelated') && !plan.module.includes('typeof self'));
+  assert.equal(f.runFactory(f.extract(webpackMembers(host))).probe, 'y.txt:package:3');
+});
+
+test('non-namespace webpack declarators keep their top-level initialisation calls', (t) => {
+  const chunk = '"use strict";exports.ids=[2],exports.modules={40:(e,t,r)=>{e.exports={a:r(41).a,createState:()=>new Map(),state:new Map()}},41(e){e.exports=require("dep-package")}};';
+  const body = 'return {pipePath:e,closeActiveTurn:async()=>false,dispose:async()=>{},probe:p.basename("x/y.txt")+d.a+state.get("ready")};';
+  for (const decl of ['const state=r(40).createState();', 'const {state}=r(40);']) {
+    const f = fixture(t);
+    const host = webpackHost(`var p=r(10),d=r(40);${decl}state.set("ready",true);`, body);
+    const members = webpackMembers(host, { [`${LOCATION}early-bootstrap-2-h.js`]: chunk });
+    const plan = f.plan(members);
+    assert.ok(plan.module.includes('state.set("ready",true);'), decl);
+    assert.equal(f.runFactory(f.extract(members)).probe, 'y.txt:package:true', decl);
+  }
+});
+
 test('the factory is found by its content under any bundle name', (t) => {
   const f = fixture(t);
   const members = { [`${LOCATION}preload.js`]: 'not parsed {{{', [`${LOCATION}anything-h.js`]: `function Zed(${OPTIONS}) { return {closeActiveTurn(){},nativePipeDirectory}; }` };

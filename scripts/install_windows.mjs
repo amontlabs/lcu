@@ -20,6 +20,23 @@ import { VERSION, architecture, verify } from './bundle.mjs';
 
 const NODE_MEMBER = 'app/resources/cua_node/bin/node.exe';
 const AGENTS = [...Object.keys(CLIENTS), ...Object.keys(ALIASES)];
+const TRANSIENT_RENAME = new Set(['EPERM', 'EBUSY', 'EACCES']);
+
+/**
+ * Rename `from` to `to`, retrying transient Windows EPERM/EBUSY/EACCES errors that occur when antivirus or
+ * search indexing briefly holds a handle inside a directory of newly copied executables.
+ */
+export async function renameWithRetry(from, to, { rename = renameSync, attempts = 25, delayMs = 400 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      rename(from, to);
+      return;
+    } catch (error) {
+      if (attempt >= attempts || !TRANSIENT_RENAME.has(error?.code)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
 
 /** What tests replace. */
 export const deps = {
@@ -235,10 +252,10 @@ async function publish(prefix, arch, selected, inventory, digest) {
       copyTree(selected.app, join(stage, 'app'));
       validatedCopy(join(stage, 'app'), selected);
       writeFileSync(join(stage, 'inventory.json'), `${canonicalJson(inventory)}\n`);
-      renameSync(stage, generation);
+      await renameWithRetry(stage, generation);
       createdGeneration = true;
     } catch (error) {
-      rmSync(stage, { recursive: true, force: true });
+      rmSync(stage, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       throw error;
     }
   }
