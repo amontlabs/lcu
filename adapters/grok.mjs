@@ -2,16 +2,12 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-  APPROVAL_TIMEOUT_MS, isMainModule, nativeAppApprovalOptions, nativeAppApprovalResponse, nativeApprovalForm,
-} from './client.mjs';
-import { askRelays, controlDirectory, runHookRelay } from './hook-relay.mjs';
+import { isMainModule } from './client.mjs';
+import { askRelays, controlDirectory, elicitThroughClient, runHookRelay } from './hook-relay.mjs';
 
 const directory = () => controlDirectory('grok', 'LCU_GROK_CONTROL_DIR');
 const events = new Set(['UserPromptSubmit', 'Stop', 'StopFailure', 'StopCancelled', 'SessionEnd', 'Notification']);
 const APPROVAL_REASON = 'Grok could not show the approval prompt';
-/** A cancelled approval answered sooner than this was never shown to a person. */
-export const UNSHOWN_CANCEL_MS = 250;
 
 // The first prompt hook can run before the MCP process listens, so each prompt leaves a private marker. Host PID
 // isolates resumed sessions. Grok's hook guide: a queued prompt starts only after the previous turn ends; a
@@ -120,27 +116,8 @@ async function runRelay(command) {
           }
           return {};
         },
-        async onElicitation(params, { signal }) {
-          const approval = nativeAppApprovalOptions(params);
-          // Cancel, not decline: nothing was decided, so a retry after `lcu apps allow` is not refused.
-          const unshown = () => {
-            if (approval) relay.noteApproval(approval.resource);
-            return { action: 'cancel' };
-          };
-          if (!relay.server?.getClientCapabilities()?.elicitation) return unshown();
-          const started = Date.now();
-          try {
-            const answer = await relay.server.elicitInput(approval ? nativeApprovalForm(params, approval) : params,
-              { signal, timeout: APPROVAL_TIMEOUT_MS });
-            if (approval && answer.action === 'accept') return nativeAppApprovalResponse(params, answer.content?.choice);
-            // A host that cannot show the form cancels it within milliseconds; a person dismissing the terminal
-            // form takes longer and gets no hint.
-            if (answer.action === 'cancel' && !signal?.aborted && Date.now() - started < UNSHOWN_CANCEL_MS) return unshown();
-            return answer;
-          } catch {
-            return signal?.aborted ? { action: 'cancel' } : unshown();
-          }
-        },
+        // Grok's form shows the original request's choices; an unshown one gets the `lcu apps allow` hint.
+        onElicitation: (params, extra) => elicitThroughClient(relay, params, extra),
       };
     },
   });

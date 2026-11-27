@@ -1,9 +1,10 @@
 // Hook relay: the parts shared by relays for harnesses whose MCP client cannot carry LCU's turn identity or
 // instructions, and whose own command hooks fill the gap (Junie, Antigravity, Grok). The relay is a stdio MCP server in
-// front of the original runtime, through the shared client; it listens on a private Unix socket named for the
-// harness process that started it. That process also runs the hooks, so a hook finds the relay by walking up its
+// front of the original runtime, through the shared client; for a harness with hooks it listens on a private Unix
+// socket named for the harness process that started it. That process also runs the hooks, so a hook finds the relay by walking up its
 // own ancestors, and tells it where turns start and end. Each harness supplies what differs: how hooks map to
-// turns, which session a call belongs to, how approvals are shown, and the JSON its hooks print.
+// turns, which session a call belongs to, how approvals are shown, and the JSON its hooks print. `lcu mcp`
+// (mcp.mjs) runs the same relay without hooks, and so without the socket, for any other MCP client.
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
@@ -15,7 +16,10 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { persistAudioContent } from './audio-files.mjs';
-import { createCuaClient, MODEL_TOOLS } from './client.mjs';
+import {
+  APPROVAL_TIMEOUT_MS, createCuaClient, MODEL_TOOLS, nativeAppApprovalOptions, nativeAppApprovalResponse,
+  nativeApprovalForm,
+} from './client.mjs';
 
 /** Once the harness is gone, open turns get this long to end upstream before the original server is closed anyway. */
 export const SHUTDOWN_DRAIN_TIMEOUT_MS = 2_000;
@@ -27,6 +31,8 @@ const MAX_DIRECTORY_BYTES = 78;
 // `lcu apps allow` waits this long for Touch ID or the password (AUTH_TIMEOUT in lcu/apps.mjs); a harness's shell
 // tool usually ends a command sooner, before most people can approve.
 const AUTH_WAIT_SECONDS = 300;
+/** Any answer but accept sooner than this came from a host that never showed the form to a person. */
+export const UNSHOWN_ANSWER_MS = 250;
 
 export function asError(error) {
   return error instanceof Error ? error.message : String(error);
@@ -67,19 +73,51 @@ export function approvalHint(app, lcu, reason) {
 }
 
 /**
+ * Answer an elicitation of the original runtime through the relay's MCP client. A native-app approval is shown as
+ * a form of the choices the original request offers (once, its persistence scopes, decline) and mapped back; any
+ * other request goes through unchanged. When the client cannot show it (no form elicitation, an elicitation error,
+ * or any answer but accept within UNSHOWN_ANSWER_MS, which no person produces), the app is noted for the tool
+ * result's hint and the request is cancelled, not declined, so a retry after `lcu apps allow` is not refused.
+ */
+export async function elicitThroughClient(relay, params, { signal } = {}) {
+  const approval = nativeAppApprovalOptions(params);
+  const unshown = () => {
+    if (approval) relay.noteApproval(approval.resource);
+    return { action: 'cancel' };
+  };
+  const server = relay.server;
+  if (!server?.getClientCapabilities()?.elicitation?.form) return unshown();
+  const started = Date.now();
+  try {
+    const answer = await server.elicitInput(approval ? nativeApprovalForm(params, approval) : params,
+      { signal, timeout: APPROVAL_TIMEOUT_MS });
+    if (signal?.aborted) return { action: 'cancel' };
+    if (answer.action !== 'accept' && Date.now() - started < UNSHOWN_ANSWER_MS) return unshown();
+    if (approval && answer.action === 'accept') return nativeAppApprovalResponse(params, answer.content?.choice);
+    return answer;
+  } catch {
+    return signal?.aborted ? { action: 'cancel' } : unshown();
+  }
+}
+
+/**
  * Run a hook relay on stdio. `hostPid` is the harness process that started it, which also runs the hooks;
- * `createClient` (tests) replaces createCuaClient. `harness(relay)` returns the harness's own parts:
- * - `onHook(request)`: answers one parsed hook request; its result goes back to the hook;
+ * `createClient` (tests) replaces createCuaClient; `hint(app, lcu)` (optional) replaces the approval hint.
+ * `harness(relay)` returns the harness's own parts:
+ * - `onHook(request)`: answers one parsed hook request; its result goes back to the hook. Without it the relay
+ *   opens no socket and needs no `directory`;
  * - `onElicitation(params, extra)`: answers an elicitation of the original runtime;
  * - `sessionOf(callParams)`: the session a tool call belongs to, or undefined for the relay's fallback;
  * - `turnIdOf()`: an active ID supplied by a host with numbered prompt hooks (optional);
  * - `describeTool(tool)`: the descriptor listed for an original public tool (optional).
+ * Resolves to `{server, socketPath, sessions, close, done}`; `done` settles once the relay has closed.
  * `relay` holds `client`, `server` (once connected), `sessions`, `fallback` (the session id used before any hook
  * names one), and `stateOf`, `finish`, `noteApproval`.
  */
 export async function runHookRelay({
   name, host, approvalReason, command, cwd, env = process.env, hostPid = process.ppid, directory,
   shutdownDrainMs = SHUTDOWN_DRAIN_TIMEOUT_MS, createClient = createCuaClient, harness: setup,
+  hint = (app, lcu) => approvalHint(app, lcu, approvalReason),
 }) {
   // Session id -> { active: {turnId, calls}, pending: {turnId, event}, cleaning, told }.
   const sessions = new Map();
@@ -164,14 +202,18 @@ export async function runHookRelay({
   };
   harness = setup(relay);
   const describeTool = harness.describeTool ?? (tool => tool);
+  const hooked = typeof harness.onHook === 'function';
 
   // Hook requests: one JSON line in, one `{ok, result|error}` line out.
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  if (statSync(directory).uid !== process.getuid()) throw new Error(`LCU socket directory belongs to another account: ${directory}`);
-  chmodSync(directory, 0o700);
-  const socketPath = join(directory, `${hostPid}-${process.pid}.sock`);
-  rmSync(socketPath, { force: true });
-  const control = createServer(socket => {
+  let socketPath;
+  if (hooked) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (statSync(directory).uid !== process.getuid()) throw new Error(`LCU socket directory belongs to another account: ${directory}`);
+    chmodSync(directory, 0o700);
+    socketPath = join(directory, `${hostPid}-${process.pid}.sock`);
+    rmSync(socketPath, { force: true });
+  }
+  const control = hooked && createServer(socket => {
     let input = '';
     const decoder = new StringDecoder('utf8');
     const reply = (value) => { if (!socket.destroyed) socket.end(`${JSON.stringify(value)}\n`); };
@@ -197,24 +239,31 @@ export async function runHookRelay({
   });
 
   let shutdown;
+  let closed;
+  const done = new Promise(resolve => { closed = resolve; });
   const close = () => shutdown ??= (async () => {
-    control.close();
-    rmSync(socketPath, { force: true });
+    if (control) {
+      control.close();
+      rmSync(socketPath, { force: true });
+    }
     let timer;
     const drained = Promise.allSettled([...sessions.keys()].map(id => finish(id, 'Interrupt')));
     await Promise.race([drained, new Promise(resolve => { timer = setTimeout(resolve, shutdownDrainMs); })]);
     clearTimeout(timer);
     await client.close().catch(error => console.error(`${host} MCP relay upstream close failed:`, asError(error)));
     await server?.close().catch(() => {});
+    closed();
   })();
 
   try {
     await client.connect();
-    await new Promise((resolve, reject) => {
-      control.once('error', reject);
-      control.listen(socketPath, resolve);
-    });
-    chmodSync(socketPath, 0o600);
+    if (control) {
+      await new Promise((resolve, reject) => {
+        control.once('error', reject);
+        control.listen(socketPath, resolve);
+      });
+      chmodSync(socketPath, 0o600);
+    }
     server = new Server({ name: `lcu-${name}-relay`, version: '0.1.0' }, {
       capabilities: { tools: {} },
       instructions: client.instructions,
@@ -233,7 +282,7 @@ export async function runHookRelay({
         const result = await persistAudioContent(await client.call(tool, args, {
           sessionId, turnId: turn.turnId, toolCallId: randomUUID(), signal: extra.signal,
         }));
-        const added = [...approvals].map(app => ({ type: 'text', text: approvalHint(app, lcu, approvalReason) }));
+        const added = [...approvals].map(app => ({ type: 'text', text: hint(app, lcu) }));
         // A session whose first prompt no hook could reach (the relay started later) gets the original
         // instructions with its first call result instead, once. They go first: a harness may save a long result
         // to a file, and the model may read only its beginning.
@@ -258,7 +307,7 @@ export async function runHookRelay({
   }
   // The SDK's stdio transport does not surface stdin EOF, which is how the harness closes the server.
   process.stdin.once('end', () => { void close(); });
-  return { server, socketPath, sessions, close };
+  return { server, socketPath, sessions, close, done };
 }
 
 /** The parent pid of `pid`, or undefined. */

@@ -722,7 +722,8 @@ export async function exportBundle(destination, command, releaseRoot, { chrome =
   const codexLaunch = `${platformDefaults}node="$prefix/current/agent-tools/node/bin/node"; ` +
     'adapter="$prefix/current/adapters/codex.mjs"; server="$prefix/current/bin/lcu"; ' + sessions('"$node" "$adapter" "$server"');
   const runtimeFlags = [...(chrome ? ['--chrome'] : []), ...(audio ? ['--audio'] : [])];
-  const portable = ['/bin/sh', '-c', launch, 'lcu-export', ...runtimeFlags];
+  // `lcu mcp`: the relay for clients without an LCU adapter owns approvals, instructions and turn lifecycle.
+  const portable = ['/bin/sh', '-c', launch, 'lcu-export', 'mcp', ...runtimeFlags];
   const portableCodex = ['/bin/sh', '-c', codexLaunch, 'lcu-export', ...runtimeFlags];
   const bootstrap = {
     requiresInstalledApplication: true,
@@ -735,6 +736,9 @@ export async function exportBundle(destination, command, releaseRoot, { chrome =
     runtimePrefix: 'Set LCU_PREFIX for a nondefault destination prefix: /opt/lcu on Linux, $HOME/.local/share/lcu on macOS.',
     sessionMode: 'Linux defaults to XFCE discovery; set LCU_SESSION_MODE=direct inside its desktop session. macOS defaults to direct.',
     instructions: 'The original MCP server instructions, tool descriptions and tool results, as in official Codex; no skill.',
+    mcpServer: 'mcp.json runs `lcu mcp`, for any MCP client: it lists js and js_reset, shows native-app approvals as ' +
+      'MCP form elicitation (or, without it, tells the model to run `lcu apps allow <App>` on macOS), and interrupts its ' +
+      'one LCU turn when the client disconnects. codex.mcp.json is for Codex, whose hooks report turn ends.',
   };
   const resources = await installedAppResources(releaseRoot);
   const changes = [
