@@ -7,8 +7,8 @@
 //   `lcu apps allow <App>` (Touch ID or password), retry, and offer `lcu apps revoke <App>` afterwards.
 // - With no hooks, nothing reports turn ends: each connection is one LCU turn, interrupted when the client
 //   disconnects or the relay is stopped.
-import { isMainModule, mergedToolDescriptor } from './client.mjs';
-import { approvalHint, asError, elicitThroughClient, runHookRelay } from './hook-relay.mjs';
+import { mergedToolDescriptor } from './client.mjs';
+import { approvalHint, elicitThroughClient, runHookRelay } from './hook-relay.mjs';
 
 const APPROVAL_REASON = 'this MCP client could not show the approval prompt';
 
@@ -24,7 +24,7 @@ export function mcpApprovalHint(app, lcu = 'lcu', platform = process.platform) {
 /** Run the relay on stdio in front of `command` (the bare `lcu` server). `createClient` (tests) replaces createCuaClient. */
 export function runMcpRelay({ platform = process.platform, ...options }) {
   return runHookRelay({
-    ...options, name: 'mcp', host: 'MCP client', approvalReason: APPROVAL_REASON,
+    ...options, name: 'mcp', host: 'MCP client',
     hint: (app, lcu) => mcpApprovalHint(app, lcu, platform),
     harness: relay => ({
       sessionOf: () => undefined,
@@ -43,14 +43,3 @@ export async function serve(command, { cwd = process.cwd(), env = process.env } 
   process.exit(0);
 }
 
-if (isMainModule(import.meta.url)) {
-  const command = process.argv.slice(2);
-  if (!command.length) {
-    console.error('Usage: mcp.mjs ORIGINAL_MCP_COMMAND [ARG ...]');
-    process.exit(2);
-  }
-  serve(command).catch(error => {
-    console.error('LCU MCP relay failed:', asError(error));
-    process.exit(1);
-  });
-}

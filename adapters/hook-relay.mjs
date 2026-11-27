@@ -1,7 +1,7 @@
 // Hook relay: the parts shared by relays for harnesses whose MCP client cannot carry LCU's turn identity or
 // instructions, and whose own command hooks fill the gap (Junie, Antigravity, Grok). The relay is a stdio MCP server in
-// front of the original runtime, through the shared client; it listens on a private Unix socket named for the
-// harness process that started it. That process also runs the hooks, so a hook finds the relay by walking up its
+// front of the original runtime, through the shared client; for a harness with hooks it listens on a private Unix
+// socket named for the harness process that started it. That process also runs the hooks, so a hook finds the relay by walking up its
 // own ancestors, and tells it where turns start and end. Each harness supplies what differs: how hooks map to
 // turns, which session a call belongs to, how approvals are shown, and the JSON its hooks print. `lcu mcp`
 // (mcp.mjs) runs the same relay without hooks, and so without the socket, for any other MCP client.

@@ -32,7 +32,7 @@ claude plugin install lcu@lcu
 - **Desktop apps:** read windows, click, type, and take screenshots.
 - **Chrome, when enabled:** read and control tabs through the official extension, with site approval.
 - **In your harness:** adapters are available for Pi, Codex CLI, and Claude Code, with experimental Oh My Pi, Hermes, DeepSeek Harness, Junie, Antigravity and [Grok CLI on macOS](docs/ADAPTERS.md#grok-cli) integrations. With Junie (and Antigravity CLI, which currently cancels MCP elicitation), app approvals are permanent until revoked: when the host cannot show LCU's per-app prompt, the model is told to run `lcu apps allow <App>` itself and each approval lasts until `lcu apps revoke <App>`. See [setup and verification limits](docs/ADAPTERS.md).
-- **Any other MCP client:** register `lcu mcp` as a stdio server (for example in Amp). It shows app approvals through MCP form elicitation, or tells the agent to run `lcu apps allow <App>` when the client cannot. See [Other MCP clients](docs/INSTALLATION.md#other-mcp-clients).
+- **Any other MCP client:** register `lcu mcp` as a stdio server (for example in Amp). It shows app approvals through MCP form elicitation, or, on macOS, tells the agent to run `lcu apps allow <App>` when the client cannot. See [Other MCP clients](docs/INSTALLATION.md#other-mcp-clients).
 
 ## Approve apps from Claude, natively
 
