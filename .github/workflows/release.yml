@@ -3,8 +3,9 @@ name: Release
 # Builds the thin release archives on GitHub-hosted runners, then publishes a tagged release from those exact
 # archives. Two manual runs, so the checksums in docs/releases/<version>.md are known before the tag:
 #   1. Run without `publish_run_id` on the release branch: builds and uploads the three archives.
-#   2. Fill the checksums into docs/releases/<version>.md, merge, tag `v<version>`, then run again on that tag
-#      with `publish_run_id` set to run 1's ID: it checks the archives against the notes and publishes them.
+#   2. Fill the checksums into docs/releases/<version>.md and merge, then run again on `main` (or on an existing
+#      tag `v<version>`) with `publish_run_id` set to run 1's ID: it checks the archives against the notes, creates
+#      the tag `v<version>` on that commit when it does not exist yet, and publishes the release.
 # The macOS build needs a signed ChatGPT.app for its CUA Node (scripts/build_bundle.py); the runner downloads the
 # official app into a throwaway disk image mount. No app file enters an archive (scripts/check_archive.py).
 # No caches anywhere (AGENTS.md).
@@ -119,7 +120,14 @@ jobs:
           REF: ${{ github.ref }}
         run: |
           version=$(node --input-type=module -e "console.log((await import('./scripts/bundle.mjs')).VERSION)")
-          test "$REF" = "refs/tags/v$version" || { echo "Run this on tag v$version, not $REF" >&2; exit 1; }
+          case "$REF" in
+            "refs/tags/v$version") ;;
+            refs/heads/main)
+              if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+                echo "Tag v$version already exists; run this on the tag instead" >&2; exit 1
+              fi ;;
+            *) echo "Run this on main or on tag v$version, not $REF" >&2; exit 1 ;;
+          esac
           notes="docs/releases/$version.md"
           cd dist
           for platform in darwin-arm64 linux-arm64 linux-x64; do
@@ -133,4 +141,9 @@ jobs:
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "v$VERSION" dist/lcu-"$VERSION"-*.tar.gz dist/lcu-"$VERSION"-*.tar.gz.sha256 --verify-tag --title "LCU $VERSION" --notes-file "docs/releases/$VERSION.md"
+        # On main this creates the tag v$VERSION on the checked commit; on the tag it must already exist.
+        run: |
+          verify=()
+          if [ "$GITHUB_REF_TYPE" = tag ]; then verify=(--verify-tag); fi
+          gh release create "v$VERSION" dist/lcu-"$VERSION"-*.tar.gz dist/lcu-"$VERSION"-*.tar.gz.sha256 \
+            --target "$GITHUB_SHA" "${verify[@]}" --title "LCU $VERSION" --notes-file "docs/releases/$VERSION.md"
