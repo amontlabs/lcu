@@ -1,4 +1,4 @@
-"""Exercise the exported generic MCP command as the target account."""
+"""Exercise the exported generic MCP command (`lcu mcp`) as the target account."""
 import json
 import os
 from pathlib import Path
@@ -17,8 +17,11 @@ client = Client([server['command'], *server['args']], env=env)
 try:
     assert client.initialization['instructions'] == original.read_text().rstrip()
     names = {tool['name'] for tool in client.call('tools/list', {})['tools']}
-    assert {'js', 'js_reset', 'js_add_node_module_dir', 'turn_ended'} <= names
-    client.js('nodeRepl.write(6 * 7);')
+    # The relay lists only the model tools and owns the turn lifecycle.
+    assert names == {'js', 'js_reset'}, names
+    first = text(client.js('nodeRepl.write(6 * 7);'))
+    # The first result also carries the original instructions, for clients that drop them at initialization.
+    assert first.startswith('LCU: Computer Use instructions for this session:') and first.endswith('42'), first
     assert text(client.js('nodeRepl.write(6 * 7);')) == '42'
 finally:
     client.close()
