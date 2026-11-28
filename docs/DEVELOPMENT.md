@@ -51,7 +51,14 @@ Before publishing, inspect the tar member list and unpacked tree. They must cont
 
 ## Building a release on GitHub
 
-`.github/workflows/release.yml` builds and publishes the three archives on GitHub-hosted runners, in two manual runs. First run it on the release branch with no input: it builds `linux-x64`, `linux-arm64` and `darwin-arm64` and uploads them with their `.sha256` files. The macOS job downloads the official ChatGPT app from OpenAI into a read-only disk-image mount on the throwaway runner, only because the build checks the app's signature and runs npm on its CUA Node; `scripts/check_archive.py` confirms no app file is in an archive. Copy the checksums into `docs/releases/<version>.md` and merge. Then run the workflow on `main` (or on an existing tag `v<version>`) with `publish_run_id` set to the first run's ID: it refuses a run that is not a successful build of this workflow, or whose commit differs from the one being published outside `docs/releases/`, checks each archive against its `.sha256` and against the notes, creates the tag `v<version>` on that commit if it does not exist yet, and creates the GitHub release from those exact files with the notes as its body.
+`.github/workflows/release.yml` builds and publishes the three archives on GitHub-hosted runners, in two manual runs on `main`. No one has to push a tag by hand.
+
+1. Merge the version bump and `docs/releases/<version>.md`, with placeholder checksums, into `main`.
+2. Run the workflow on `main` with no input. It builds `linux-x64`, `linux-arm64` and `darwin-arm64` and uploads them with their `.sha256` files. The macOS job downloads the official ChatGPT app from OpenAI into a read-only disk-image mount on the throwaway runner, only because the build checks the app's signature and runs npm on its CUA Node; `scripts/check_archive.py` confirms no app file is in an archive.
+3. Copy the checksums into `docs/releases/<version>.md` and merge a PR that changes only that file.
+4. Run the workflow on `main` again with `publish_run_id` set to the build run's ID. It refuses a build that is not a successful run of this workflow, or whose commit differs from the published one outside `docs/releases/`. It then checks each archive against its `.sha256` and against the notes, creates the tag `v<version>` on that commit (refusing if the tag already exists), and creates the GitHub release from those exact files with the notes as its body.
+
+Build from `main`, not from a PR branch: after a squash merge the branch commit no longer exists, so the publish run cannot compare against it and refuses. Merge any other change to `main`, including a change to `release.yml`, before the build, since it would otherwise make the published commit differ from the built one. Running the publish step on an existing tag `v<version>` instead of `main` also works.
 
 ## Release severity marker
 
