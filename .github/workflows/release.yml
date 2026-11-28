@@ -2,10 +2,11 @@ name: Release
 
 # Builds the thin release archives on GitHub-hosted runners, then publishes a tagged release from those exact
 # archives. Two manual runs, so the checksums in docs/releases/<version>.md are known before the tag:
-#   1. Run without `publish_run_id` on the release branch: builds and uploads the three archives.
-#   2. Fill the checksums into docs/releases/<version>.md and merge, then run again on `main` (or on an existing
-#      tag `v<version>`) with `publish_run_id` set to run 1's ID: it checks the archives against the notes, creates
-#      the tag `v<version>` on that commit when it does not exist yet, and publishes the release.
+#   1. Run on `main` without `publish_run_id`: builds and uploads the three archives. Build from `main`, not a PR
+#      branch, whose commit is gone after a squash merge.
+#   2. Fill the checksums into docs/releases/<version>.md and merge only that, then run again on `main` with
+#      `publish_run_id` set to run 1's ID: it checks the archives against the notes, creates the tag `v<version>`
+#      on that commit (refusing if it exists), and publishes the release. Running on an existing tag also works.
 # The macOS build needs a signed ChatGPT.app for its CUA Node (scripts/build_bundle.py); the runner downloads the
 # official app into a throwaway disk image mount. No app file enters an archive (scripts/check_archive.py).
 # No caches anywhere (AGENTS.md).
