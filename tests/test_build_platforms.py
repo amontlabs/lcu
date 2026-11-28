@@ -179,7 +179,7 @@ class BuildPlatformTests(unittest.TestCase):
                 else:
                     target = destination / 'node_modules/@modelcontextprotocol/sdk'
                     target.mkdir(parents=True)
-                    (target / 'package.json').write_text(json.dumps({'version': '1.30.0'}))
+                    (target / 'package.json').write_text(json.dumps({'version': '1.32.2'}))
                 return SimpleNamespace(returncode=0)
 
             with mock.patch('provision_agent_tools.platform.system', return_value='Darwin'), \
@@ -216,7 +216,7 @@ class BuildPlatformTests(unittest.TestCase):
                 self.assertTrue((release / 'adapters/hermes' / name).is_file())
             self.assertFalse((release / 'adapters/hermes/lcu-config.json').exists())
             sdk_package = release / 'adapters/node_modules/@modelcontextprotocol/sdk/package.json'
-            self.assertEqual(json.loads(sdk_package.read_text())['version'], '1.30.0')
+            self.assertEqual(json.loads(sdk_package.read_text())['version'], '1.32.2')
             self.assertFalse((release / 'adapters/test').exists())
             adapter_ci = next(command for command, options in commands if 'ci' in command and
                               options['cwd'].name == 'adapters')
